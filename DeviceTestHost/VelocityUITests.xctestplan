@@ -1,0 +1,30 @@
+{
+  "configurations" : [
+    {
+      "id" : "4632504A-7F79-462B-ABBC-C5A8532BFAD0",
+      "name" : "Test Scheme Action",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "performanceAntipatternCheckerEnabled" : true,
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:DeviceTestHost.xcodeproj",
+      "identifier" : "AA0000000000000000000010",
+      "name" : "DeviceTestHost"
+    }
+  },
+  "testTargets" : [
+    {
+      "parallelizable" : false,
+      "target" : {
+        "containerPath" : "container:DeviceTestHost.xcodeproj",
+        "identifier" : "AA0000000000000000000011",
+        "name" : "VelocityUITests"
+      }
+    }
+  ],
+  "version" : 1
+}

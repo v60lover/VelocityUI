@@ -3,3 +3,14 @@
 .dolt/
 *.db
 .beads-credential-key
+.beads
+.beads/
+.claude
+.gitnexus
+.build
+CLAUDE.md
+velocityui-prompt.md
+.DS_Store
+claude-talk-to-figma-mcp/
+.swiftpm/
+DeviceTestHost/DeviceTestHost.xcodeproj/
