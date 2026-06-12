@@ -8,7 +8,7 @@ import UIKit
 @MainActor
 public final class RenderCell {
     public let layer = CALayer()
-    private var sublayers: [String: CALayer] = [:]
+    private var sublayers: [Int: CALayer] = [:]
     private(set) var currentItemID: AnyHashable?
 
     public init() {
@@ -18,7 +18,7 @@ public final class RenderCell {
     // MARK: - Layout (synchronous, zero allocation on hot path)
 
     /// Apply pre-computed frames. Called on the scroll path — must never await.
-    public func applyLayout(_ frames: [String: CGRect]) {
+    public func applyLayout(_ frames: [Int: CGRect]) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)  // no implicit animations during scroll
         for (id, frame) in frames {
@@ -41,7 +41,7 @@ public final class RenderCell {
     // MARK: - Content
 
     /// Apply a pre-decoded, BGRA8888-normalised image. CA will not copy_image.
-    public func applyContent(id: String, image: CGImage) {
+    public func applyContent(id: Int, image: CGImage) {
         guard let sub = sublayers[id] else { return }
         CATransaction.begin()
         CATransaction.setAnimationDuration(0.2)

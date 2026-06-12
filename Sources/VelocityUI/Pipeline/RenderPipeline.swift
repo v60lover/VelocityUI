@@ -37,32 +37,35 @@ public actor RenderPipeline {
             // Collect indices not yet in the ring buffer.
             var needed: [Int] = []
             for i in leadingIndex..<rangeEnd {
-                let existing = await workingRange.layout(at: i)
+                let existing = await workingRange.entry(at: i)
                 if existing == nil { needed.append(i) }
             }
             guard !needed.isEmpty, !Task.isCancelled else { return }
 
-            // Measure in parallel.
-            var results: [(Int, ResolvedLayout)] = []
-            await withTaskGroup(of: (Int, ResolvedLayout).self) { group in
+            // Measure and extract fragments in parallel.
+            // extractFragments is nonisolated — safe to call inside the task.
+            var results: [(Int, ResolvedLayout, [Fragment])] = []
+            await withTaskGroup(of: (Int, ResolvedLayout, [Fragment]).self) { group in
                 for index in needed {
                     group.addTask {
+                        let table = tables[index]
                         let layout = await measureNode(
-                            tables[index], nodeIndex: 0,
+                            table, nodeIndex: 0,
                             width: availableWidth,
                             textPool: .shared
                         )
-                        return (index, layout)
+                        let fragments = extractFragments(table: table, layout: layout)
+                        return (index, layout, fragments)
                     }
                 }
-                for await pair in group { results.append(pair) }
+                for await triple in group { results.append(triple) }
             }
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
                 workingRange.advance(to: max(0, leadingIndex - 3))
-                for (i, layout) in results {
-                    workingRange.commit(layout, at: i)
+                for (i, layout, fragments) in results {
+                    workingRange.commit(layout, fragments, at: i)
                 }
             }
         }

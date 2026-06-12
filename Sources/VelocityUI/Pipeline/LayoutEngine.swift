@@ -23,6 +23,14 @@ public func measureNode(
             spacing: d.spacing, axis: .vertical
         )
     case .hstack(let d):
+        // KNOWN LIMITATION (VelocityUI-g5x): every HStack child is measured at the full
+        // container width instead of a proportional share. Correct for Phase 1 because all
+        // cells are image-only VStacks — no HStack child cares about its width constraint.
+        // Breaks in Phase 2: TextNode inside an HStack wraps at the wrong width, producing
+        // an incorrect cell height and breaking the Spike 4 measure/render parity invariant.
+        // Fix: split measureStack → measureVStack / measureHStack. measureHStack needs a
+        // two-pass approach — serial pass to collect fixed-size claims, parallel pass to
+        // measure flexible children at their resolved widths. Do this before Phase 2 starts.
         return await measureStack(
             table: table, nodeIndex: nodeIndex,
             width: width, textPool: textPool,
@@ -49,26 +57,26 @@ public func measureNode(
                 children.append(r)
             }
         }
-        return ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: maxW, height: maxH), children: children)
+        return ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: maxW, height: maxH), children: children, nodeIndex: nodeIndex)
 
     case .text(let d):
         return await textPool.withContext { ctx in
             let size = ctx.measure(d, width: width)
-            return ResolvedLayout(totalFrame: CGRect(origin: .zero, size: size))
+            return ResolvedLayout(totalFrame: CGRect(origin: .zero, size: size), nodeIndex: nodeIndex)
         }
 
     case .image(let d):
         let h = d.aspectRatio.map { width / $0 } ?? width
-        return ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: width, height: h))
+        return ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: width, height: h), nodeIndex: nodeIndex)
 
     case .spacer(let size):
-        return ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: width, height: size))
+        return ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: width, height: size), nodeIndex: nodeIndex)
 
     case .hosting(let d):
-        return ResolvedLayout(totalFrame: CGRect(origin: .zero, size: d.size))
+        return ResolvedLayout(totalFrame: CGRect(origin: .zero, size: d.size), nodeIndex: nodeIndex)
 
     case .gif, .video, .customLayer:
-        return ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: width, height: 44))
+        return ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: width, height: 44), nodeIndex: nodeIndex)
     }
 }
 
@@ -83,10 +91,18 @@ private func measureStack(
 ) async -> ResolvedLayout {
     let childIndices = table.children(of: nodeIndex)
     guard !childIndices.isEmpty else {
-        return ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: width, height: 0))
+        return ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: width, height: 0), nodeIndex: nodeIndex)
     }
 
     var ordered = [(Int, ResolvedLayout)]()
+    // Parallel measurement is unconditionally correct for VStack: each child
+    // independently fills the full available width — siblings are irrelevant, now
+    // and after any future node types are added.
+    // For HStack this is a Phase 1 simplification — see the hstack case above and
+    // bead VelocityUI-g5x. Parallelism breaks when a child's measured size depends
+    // on how much width siblings claimed (proportional sizing). That requires a
+    // sequential first pass to resolve widths, then a parallel second pass —
+    // a structural change that belongs in a dedicated measureHStack, not here.
     await withTaskGroup(of: (Int, ResolvedLayout).self) { group in
         for (i, ci) in childIndices.enumerated() {
             group.addTask {
@@ -110,10 +126,7 @@ private func measureStack(
             if idx < ordered.count - 1 { cursor += spacing }
             crossMax = max(crossMax, layout.totalFrame.width)
         case .horizontal:
-            children.append(ResolvedLayout(
-                totalFrame: layout.totalFrame.offsetBy(dx: cursor, dy: 0),
-                children: layout.children
-            ))
+            children.append(layout.offsetBy(dx: cursor, dy: 0))
             cursor += layout.totalFrame.width
             if idx < ordered.count - 1 { cursor += spacing }
             crossMax = max(crossMax, layout.totalFrame.height)
@@ -124,6 +137,6 @@ private func measureStack(
         ? CGRect(x: 0, y: 0, width: width, height: cursor)
         : CGRect(x: 0, y: 0, width: cursor, height: crossMax)
 
-    return ResolvedLayout(totalFrame: frame, children: children)
+    return ResolvedLayout(totalFrame: frame, children: children, nodeIndex: nodeIndex)
 }
 #endif

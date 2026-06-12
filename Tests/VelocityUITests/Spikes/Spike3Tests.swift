@@ -40,8 +40,8 @@ final class Spike3Tests: XCTestCase {
                 XCTFail("normaliseAndRound returned nil at index \(i)"); continue
             }
             let cell = RenderCell()
-            cell.applyLayout(["image": CGRect(x: 0, y: 0, width: 100, height: 100)])
-            cell.applyContent(id: "image", image: normalised)
+            cell.applyLayout([0: CGRect(x: 0, y: 0, width: 100, height: 100)])
+            cell.applyContent(id: 0, image: normalised)
             cell.layer.frame = CGRect(x: 0, y: CGFloat(i) * 108, width: 100, height: 100)
             root.addSublayer(cell.layer)
         }
@@ -167,8 +167,8 @@ final class Spike3Tests: XCTestCase {
         let img = normaliseAndRound(raw, targetSize: size, cornerRadius: 0)!
 
         let cell = RenderCell()
-        cell.applyLayout(["hero": CGRect(x: 0, y: 0, width: 200, height: 150)])
-        cell.applyContent(id: "hero", image: img)
+        cell.applyLayout([0: CGRect(x: 0, y: 0, width: 200, height: 150)])
+        cell.applyContent(id: 0, image: img)
 
         XCTAssertNotNil(cell.layer.sublayers?.first?.contents,
             "Content should be set before recycle")
@@ -182,7 +182,7 @@ final class Spike3Tests: XCTestCase {
             "currentItemID must be nil after cross-item recycle")
 
         // Same-item recycle must NOT clear content
-        cell.applyContent(id: "hero", image: img)
+        cell.applyContent(id: 0, image: img)
         cell.prepareForReuse(isSameItem: true)
         XCTAssertNotNil(cell.layer.sublayers?.first?.contents,
             "Same-item recycle must not clear content")
