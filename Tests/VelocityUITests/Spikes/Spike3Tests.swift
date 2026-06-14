@@ -33,16 +33,23 @@ final class Spike3Tests: XCTestCase {
 
     func testZeroOffscreenRenderInLayerTree() {
         let root = CALayer()
+        let cellSize = CGSize(width: 100, height: 100)
+        let frag = Fragment(
+            id: 0,
+            content: .image(ImageDescriptor(url: nil, aspectRatio: 1.0, contentMode: 0,
+                                            cornerRadius: 0, layoutHash: 0, appearanceHash: 0)),
+            frame: CGRect(origin: .zero, size: cellSize)
+        )
 
         for i in 0..<20 {
-            let raw = makeSyntheticRGBAImage(size: CGSize(width: 100, height: 100), hue: CGFloat(i) / 20)
-            guard let normalised = normaliseAndRound(raw, targetSize: CGSize(width: 100, height: 100), cornerRadius: 12) else {
+            let raw = makeSyntheticRGBAImage(size: cellSize, hue: CGFloat(i) / 20)
+            guard let normalised = normaliseAndRound(raw, targetSize: cellSize, cornerRadius: 12) else {
                 XCTFail("normaliseAndRound returned nil at index \(i)"); continue
             }
             let cell = RenderCell()
-            cell.applyLayout([0: CGRect(x: 0, y: 0, width: 100, height: 100)])
-            cell.applyContent(id: 0, image: normalised)
             cell.layer.frame = CGRect(x: 0, y: CGFloat(i) * 108, width: 100, height: 100)
+            cell.applyLayout([frag])
+            cell.applyContent(id: 0, image: normalised, for: AnyHashable("item"))
             root.addSublayer(cell.layer)
         }
 
@@ -165,26 +172,41 @@ final class Spike3Tests: XCTestCase {
         let size = CGSize(width: 200, height: 150)
         let raw = makeSyntheticRGBAImage(size: size, hue: 0.3)
         let img = normaliseAndRound(raw, targetSize: size, cornerRadius: 0)!
+        let frag = Fragment(
+            id: 0,
+            content: .image(ImageDescriptor(url: nil, aspectRatio: 4.0/3.0, contentMode: 0,
+                                            cornerRadius: 0, layoutHash: 1, appearanceHash: 1)),
+            frame: CGRect(origin: .zero, size: size)
+        )
 
         let cell = RenderCell()
-        cell.applyLayout([0: CGRect(x: 0, y: 0, width: 200, height: 150)])
-        cell.applyContent(id: 0, image: img)
+        cell.layer.frame = CGRect(origin: .zero, size: size)
+        cell.applyLayout([frag])
+        cell.applyContent(id: 0, image: img, for: AnyHashable("item"))
 
-        XCTAssertNotNil(cell.layer.sublayers?.first?.contents,
+        // contentLayer is cell.layer.sublayers[1] (index 1, after placeholderLayer at 0)
+        guard let contentLayer = cell.layer.sublayers?.first(where: { !($0 is CAGradientLayer) }) else {
+            XCTFail("contentLayer not found"); return
+        }
+        XCTAssertNotNil(contentLayer.sublayers?.first?.contents,
             "Content should be set before recycle")
 
-        // Cross-item recycle
-        cell.prepareForReuse(isSameItem: false)
+        // Cross-item recycle: sublayers removed, state reset
+        cell.prepareForReuse(for: AnyHashable("item-b"))
 
-        XCTAssertNil(cell.layer.sublayers?.first?.contents,
-            "Content must be nil after cross-item prepareForReuse")
-        XCTAssertNil(cell.currentItemID,
-            "currentItemID must be nil after cross-item recycle")
+        XCTAssertEqual(contentLayer.sublayers?.count ?? 0, 0,
+            "Sublayers must be removed after cross-item prepareForReuse")
+        XCTAssertEqual(cell.currentItemID, AnyHashable("item-b"),
+            "currentItemID must update to new item after cross-item recycle")
 
-        // Same-item recycle must NOT clear content
-        cell.applyContent(id: 0, image: img)
-        cell.prepareForReuse(isSameItem: true)
-        XCTAssertNotNil(cell.layer.sublayers?.first?.contents,
+        // Same-item recycle must NOT clear content: re-layout → apply → reuse(sameItem)
+        cell.layer.frame = CGRect(origin: .zero, size: size)
+        cell.applyLayout([frag])
+        cell.applyContent(id: 0, image: img, for: AnyHashable("item-b"))
+        let sub = contentLayer.sublayers?.first
+        XCTAssertNotNil(sub?.contents, "Content should be set after re-apply")
+        cell.prepareForReuse(for: AnyHashable("item-b"))  // same item
+        XCTAssertNotNil(sub?.contents,
             "Same-item recycle must not clear content")
     }
 }
