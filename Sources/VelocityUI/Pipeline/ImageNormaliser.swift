@@ -11,14 +11,22 @@ import CoreGraphics
 ///
 /// - cornerRadius = 0: format normalisation only (no clip path).
 /// - Returns nil only if CGContext allocation fails (OOM).
+/// Convert a point dimension to pixels using round-half-away-from-zero.
+/// Use this instead of bare `Int(pts * scale)` (which truncates) everywhere a point
+/// value is converted to pixels — CacheKey, normaliseAndRound, thumbnail MaxPixelSize —
+/// so all three sites agree on the same output size.
+public nonisolated func pixelLength(_ points: CGFloat, scale: CGFloat) -> Int {
+    Int((points * scale).rounded())
+}
+
 public nonisolated func normaliseAndRound(
     _ image: CGImage,
     targetSize: CGSize,
     cornerRadius: CGFloat,
     scale: CGFloat = 1
 ) -> CGImage? {
-    let w = Int(targetSize.width * scale)
-    let h = Int(targetSize.height * scale)
+    let w = pixelLength(targetSize.width, scale: scale)
+    let h = pixelLength(targetSize.height, scale: scale)
     guard w > 0, h > 0 else { return nil }
 
     guard let ctx = CGContext(

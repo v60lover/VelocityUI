@@ -83,7 +83,81 @@ compiler. No mutable shared state crosses a layer boundary.
 
 ---
 
-## 3. The Contract (non-negotiable invariants)
+## 3. Composition Root — One Object Graph Per Feed
+
+VelocityUI has **no singletons**. Every long-lived collaborator — actors, caches,
+pools, controllers — is owned by a single `RenderEnvironment` instance, constructed
+once per `AsyncFeed`, and injected into everything that uses it.
+
+```
+                       ┌─────────────────────────────────┐
+                       │  RenderEnvironment (Sendable)   │
+                       │                                 │
+                       │  textPool        : TextMeasurementPool
+                       │  layoutCache     : LayoutCache
+                       │  dimensionCache  : DimensionCache
+                       │  imageActor      : ImageActor
+                       │  gifActor        : GIFActor
+                       │  videoController : VideoController   @MainActor
+                       │  videoPreparation: VideoPreparationActor
+                       └─────────────────┬───────────────┘
+                                         │  init injection
+       ┌────────────────────────┬────────┴────────┬─────────────────────┐
+       ▼                        ▼                 ▼                     ▼
+ RenderPipeline           FeedScrollView      RenderDiffer        Memory-pressure
+ (uses textPool,          (uses imageActor,   (uses dimension-    handler (evicts
+  layoutCache)            gifActor, video…)   Cache for `.media`  gif + video-prep
+                                              classification)    via env)
+```
+
+### Why this shape
+
+Singletons would (and did, before this rule) cause:
+
+| Problem | What it costs |
+|---|---|
+| Two feeds in the same app share one `LayoutCache` | Cross-feed cache pollution; memory budget cannot be tuned per feed |
+| Test cannot substitute a fake `ImageActor` | Pipeline tests must hit the real network or mock at module level |
+| `AsyncFeed` deinit doesn't tear down decode work | Leaked Tasks holding `CGImage`s, AVPlayers, GIF ring buffers |
+| `static let shared` resists Swift 6 concurrency tightening | Module-init order bugs; harder to reason about isolation domains |
+
+### Forbidden patterns (rejected at review)
+
+- `static let shared` on any VelocityUI-owned type
+- File-private mutable instances referenced from more than one call site
+- `@MainActor` global vars holding live state
+- Service-locator wrappers, `@Injected` property wrappers, thread-locals
+
+System-API singletons (`URLSession.shared`, `FileManager.default`,
+`NotificationCenter.default`) may be used **only as the default value of an init
+parameter**, so tests can substitute one. They are never read inline.
+
+### Default vs custom construction
+
+`AsyncFeed(items:id:content:)` constructs a `RenderEnvironment()` with all-defaults
+when no environment is supplied — so app developers don't think about wiring. Power
+users override individual collaborators (different decode-queue concurrency, smaller
+video budget, fake actors in tests) by passing a configured environment:
+
+```swift
+let env = RenderEnvironment(
+    imageActor: ImageActor(decodeConcurrency: 5),
+    videoController: VideoController(maxAttached: 2)
+)
+AsyncFeed(items: posts, id: \.id, environment: env) { … }
+```
+
+### Pure helpers stay pure
+
+`measureNode`, `classify`, `normaliseAndRound`, `rasterizeText` and the other
+`nonisolated` functions on the layout/decode path do not read from a global
+cache — they take the pool/cache they need as an argument. This keeps them
+testable in isolation and prevents accidental capture of an unrelated
+environment's state.
+
+---
+
+## 4. The Contract (non-negotiable invariants)
 
 Three clauses, each mechanically checkable in CI with `os_signpost` and a
 frame-drop counter on real hardware:
@@ -110,7 +184,7 @@ Derived rules that must never be violated:
 
 ---
 
-## 4. End-to-End Data Flow
+## 5. End-to-End Data Flow
 
 From a developer's declarative cell to pixels on screen:
 
@@ -163,7 +237,7 @@ From a developer's declarative cell to pixels on screen:
 
 ---
 
-## 5. Layer 1 — Developer DSL
+## 6. Layer 1 — Developer DSL
 
 SwiftUI-syntax API. A developer writes a `RenderView` with a `renderBody` built by
 the `@RenderNodeBuilder` result builder, and mounts it via `AsyncFeed`
@@ -205,7 +279,7 @@ expressed via index (`parentIndices`), not pointers. Layers 2–4 never see an e
 
 ---
 
-## 6. Layer 2 — Render Pipeline
+## 7. Layer 2 — Render Pipeline
 
 ### Layout as pure functions (no LayoutActor)
 
@@ -282,7 +356,7 @@ diffs allocate nothing.
 
 ---
 
-## 7. Layer 3 — Scroll Container
+## 8. Layer 3 — Scroll Container
 
 `FeedScrollView` is a `@MainActor` `UIScrollView` subclass with a fully custom cell
 lifecycle — **no UICollectionView** (cost acknowledged: VoiceOver scroll semantics, RTL,
@@ -338,7 +412,7 @@ insert/delete animations are deferred to v2; a UIView interaction overlay provid
 
 ---
 
-## 8. Layer 4 — Media Pipeline
+## 9. Layer 4 — Media Pipeline
 
 ### Threading model
 
@@ -406,7 +480,7 @@ GIF playback keeps only a sliding window of frames resident (all-frames-resident
 
 ---
 
-## 9. Build Order & Current Status
+## 10. Build Order & Current Status
 
 Build **vertically**: each phase exercises every layer boundary with minimal media
 complexity, instead of finishing one layer at a time.
@@ -466,7 +540,7 @@ Sources/VelocityUI/
 
 ---
 
-## 10. Key Decisions Quick Reference
+## 11. Key Decisions Quick Reference
 
 | Decision | Choice | One-line why |
 |---|---|---|
@@ -484,4 +558,6 @@ Sources/VelocityUI/
 | Pipeline notification | Index boundary only | No Task-per-frame at 120 Hz |
 | Video budget | 3 attached / 8 prepared | Hardware decode pipeline cap |
 | GIF v1 | CGImage ring buffer + CADisplayLink | FLAnimatedImage-proven; Metal only with profiling data |
+| Singletons | ❌ none on owned types | One `RenderEnvironment` per feed; per-feed lifetime + test substitution |
+| Wiring | Constructor injection through `RenderEnvironment` | Explicit dependency graph; no service locator, no property wrappers |
 | Distribution | SwiftPM only | — |
