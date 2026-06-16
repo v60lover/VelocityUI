@@ -1,0 +1,93 @@
+// RenderEnvironment.swift
+
+#if canImport(UIKit)
+import Foundation
+
+/// Composition root for all long-lived VelocityUI collaborators.
+///
+/// One instance per AsyncFeed, constructed once and injected downstream by initializer.
+/// No component should reach outside its own init parameters to obtain a collaborator.
+///
+/// DI contracts enforced by the designated init:
+/// - `imageActor.dimensionCache === dimensionCache` (same instance)
+/// - `videoController.videoPreparation === videoPreparation` (same instance)
+public final class RenderEnvironment: Sendable {
+    public let textPool: TextMeasurementPool
+    public let layoutCache: LayoutCache
+    public let dimensionCache: DimensionCache
+    public let imageActor: ImageActor
+    public let gifActor: GIFActor
+    public let videoController: VideoController
+    public let videoPreparation: VideoPreparationActor
+
+    /// Designated init — all collaborators supplied by the caller.
+    ///
+    /// Enforces two identity DI contracts at runtime:
+    /// - `imageActor.dimensionCache === dimensionCache`: ImageActor writes raw source
+    ///   dimensions at decode time; classify() reads from the same store. Separate
+    ///   instances break the cache-hit contract (DimensionCache.swift:11–17).
+    /// - `videoController.videoPreparation === videoPreparation`: VideoController and
+    ///   the preparation pipeline must share the same actor (Phase 4 invariant).
+    ///
+    /// Tests that need to substitute a fake `ImageActor` or `VideoController` must use
+    /// this init — it is nonisolated and callable from any context, unlike the
+    /// `@MainActor` convenience init.
+    public init(
+        textPool: TextMeasurementPool,
+        layoutCache: LayoutCache,
+        dimensionCache: DimensionCache,
+        imageActor: ImageActor,
+        gifActor: GIFActor,
+        videoController: VideoController,
+        videoPreparation: VideoPreparationActor
+    ) {
+        precondition(
+            imageActor.dimensionCache === dimensionCache,
+            "RenderEnvironment: imageActor.dimensionCache must be the same instance as dimensionCache — separate instances break the classify() hit contract"
+        )
+        precondition(
+            videoController.videoPreparation === videoPreparation,
+            "RenderEnvironment: videoController.videoPreparation must be the same instance as videoPreparation"
+        )
+        self.textPool = textPool
+        self.layoutCache = layoutCache
+        self.dimensionCache = dimensionCache
+        self.imageActor = imageActor
+        self.gifActor = gifActor
+        self.videoController = videoController
+        self.videoPreparation = videoPreparation
+    }
+
+    /// Convenience init for app use.
+    ///
+    /// `@MainActor` because `VideoController.init` is `@MainActor`. Tests that need
+    /// to substitute a `FakeImageActor` or `FakeVideoController` must use the
+    /// designated init instead — it is nonisolated and callable from any context.
+    ///
+    /// Auto-wires:
+    /// - `session` into both `DimensionCache` and `ImageActor`, satisfying the
+    ///   shared HTTP/2 connection pool contract (DimensionCache.swift:15–17).
+    /// - The same `DimensionCache` instance into `imageActor` (DI contract).
+    /// - The same `VideoPreparationActor` into both `videoController` and `videoPreparation`.
+    @MainActor
+    public convenience init(
+        textPool: TextMeasurementPool = .init(),
+        layoutCache: LayoutCache = .init(),
+        session: URLSession = .shared,
+        gifActor: GIFActor = .init(),
+        maxAttached: Int = 3
+    ) {
+        let dc = DimensionCache(session: session)
+        let videoPrep = VideoPreparationActor()
+        self.init(
+            textPool: textPool,
+            layoutCache: layoutCache,
+            dimensionCache: dc,
+            imageActor: ImageActor(session: session, dimensionCache: dc),
+            gifActor: gifActor,
+            videoController: VideoController(videoPreparation: videoPrep, maxAttached: maxAttached),
+            videoPreparation: videoPrep
+        )
+    }
+}
+#endif

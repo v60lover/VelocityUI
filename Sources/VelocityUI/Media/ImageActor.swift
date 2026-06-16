@@ -73,7 +73,7 @@ private final class CachedImage {
 /// - DimensionCache.store() receives the raw source dimensions from the image header —
 ///   not the render-size thumbnail — so classify() gets the true aspect ratio for any
 ///   future layout size without a secondary ranged probe.
-/// - No static let shared. Constructed once in RenderEnvironment, injected by initializer.
+/// - No singleton. Constructed once in RenderEnvironment, injected by initializer.
 public actor ImageActor {
     nonisolated let _executor: DispatchQueueExecutor
     public nonisolated var unownedExecutor: UnownedSerialExecutor {
@@ -89,19 +89,18 @@ public actor ImageActor {
 
     private let cache = NSCache<CacheKey, CachedImage>()
     private let session: URLSession
-    let dimensionCache: DimensionCache
+    /// `nonisolated` so RenderEnvironment can check identity (===) in its designated init.
+    nonisolated let dimensionCache: DimensionCache
 
     /// - Parameters:
-    ///   - session:        URLSession for image fetches. Pass the same instance as
-    ///                     DimensionCache so both share one HTTP/2 connection pool per
-    ///                     origin — one TCP/TLS handshake covers both collaborators.
-    ///                     Defaults to .shared for call-site convenience; tests can
+    ///   - session:        URLSession for image fetches. Defaults to `.shared`; tests can
     ///                     inject a custom session.
-    ///   - dimensionCache: Cache for raw source dimensions. Inject the same instance
+    ///   - dimensionCache: Cache for raw source dimensions. Must be the same instance
     ///                     used by classify() — separate instances break the hit contract.
+    ///                     Callers should obtain this from RenderEnvironment, not construct it here.
     public init(
         session: URLSession = .shared,
-        dimensionCache: DimensionCache = DimensionCache()
+        dimensionCache: DimensionCache
     ) {
         self._executor = DispatchQueueExecutor(label: "velocityui.image.actor")
         // 64 MB cap. At 4 bytes/pixel: a 400×800-pt image at scale 3 costs ~11.5 MB
@@ -109,6 +108,12 @@ public actor ImageActor {
         cache.totalCostLimit = 64 * 1024 * 1024
         self.session = session
         self.dimensionCache = dimensionCache
+    }
+
+    /// Test-only convenience: creates a private DimensionCache not shared with any other
+    /// collaborator. Use only in unit tests that don't verify classify() hit behaviour.
+    init() {
+        self.init(dimensionCache: DimensionCache())
     }
 
     // MARK: - Public API

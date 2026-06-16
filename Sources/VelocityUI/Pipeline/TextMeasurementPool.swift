@@ -10,8 +10,6 @@ import Foundation
 /// withContext is nonisolated async: checkout/checkin enter the actor briefly;
 /// the body itself runs off-actor so multiple tasks can measure concurrently.
 public actor TextMeasurementPool {
-    public static let shared = TextMeasurementPool()
-
     private var available: [TextMeasurementContext]
     private var waiters: [CheckedContinuation<TextMeasurementContext, Never>] = []
 

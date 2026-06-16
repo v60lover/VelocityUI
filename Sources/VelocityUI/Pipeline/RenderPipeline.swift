@@ -14,7 +14,16 @@ public actor RenderPipeline {
     /// Internal for testing only — not part of the production API.
     private(set) var taskStartCount: Int = 0
 
-    public init() {}
+    private let textPool: TextMeasurementPool
+
+    public init(textPool: TextMeasurementPool) {
+        self.textPool = textPool
+    }
+
+    /// Test-only convenience: creates a private pool not shared with RenderEnvironment.
+    init() {
+        self.textPool = TextMeasurementPool()
+    }
 
     /// Notify the pipeline that the visible leading index has changed.
     /// No-op if leadingIndex hasn't changed since last call.
@@ -34,6 +43,11 @@ public actor RenderPipeline {
             let rangeEnd = min(leadingIndex + 60, tables.count)
             guard rangeEnd > leadingIndex else { return }
 
+            // Capture textPool here — Task inherits actor isolation so self.textPool
+            // is accessible without await. group.addTask closures are @Sendable and
+            // cannot reference actor-isolated state directly.
+            let pool = self.textPool
+
             // Collect indices not yet in the ring buffer.
             var needed: [Int] = []
             for i in leadingIndex..<rangeEnd {
@@ -52,7 +66,7 @@ public actor RenderPipeline {
                         let layout = await measureNode(
                             table, nodeIndex: 0,
                             width: availableWidth,
-                            textPool: .shared
+                            textPool: pool
                         )
                         let fragments = extractFragments(table: table, layout: layout)
                         return (index, layout, fragments)

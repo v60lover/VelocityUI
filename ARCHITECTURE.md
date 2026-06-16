@@ -140,11 +140,21 @@ users override individual collaborators (different decode-queue concurrency, sma
 video budget, fake actors in tests) by passing a configured environment:
 
 ```swift
-let env = RenderEnvironment(
-    imageActor: ImageActor(decodeConcurrency: 5),
-    videoController: VideoController(maxAttached: 2)
-)
+// Convenience init (@MainActor) — smaller video budget, same URLSession for all probes:
+let env = RenderEnvironment(maxAttached: 2)
 AsyncFeed(items: posts, id: \.id, environment: env) { … }
+
+// Designated init — inject fakes in tests (nonisolated, any context):
+let dc = DimensionCache()
+let videoPrep = VideoPreparationActor()
+let env = RenderEnvironment(
+    textPool: .init(), layoutCache: .init(),
+    dimensionCache: dc,
+    imageActor: FakeImageActor(dimensionCache: dc),   // same dc — satisfies precondition
+    gifActor: .init(),
+    videoController: FakeVideoController(videoPreparation: videoPrep, maxAttached: 1),
+    videoPreparation: videoPrep
+)
 ```
 
 ### Pure helpers stay pure
