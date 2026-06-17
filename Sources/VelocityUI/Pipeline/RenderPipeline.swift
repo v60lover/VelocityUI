@@ -14,15 +14,35 @@ public actor RenderPipeline {
     /// Internal for testing only — not part of the production API.
     private(set) var taskStartCount: Int = 0
 
-    private let textPool: TextMeasurementPool
+    /// Incremented each time onIndexBoundary resolves an index from LayoutCache
+    /// rather than re-measuring. Internal for testing only.
+    private(set) var cacheHitCount: Int = 0
 
-    public init(textPool: TextMeasurementPool) {
+    private let textPool: TextMeasurementPool
+    private let layoutCache: LayoutCache
+
+    private let prefetchAhead: Int
+    private let prefetchBehind: Int
+
+    public init(
+        textPool: TextMeasurementPool,
+        layoutCache: LayoutCache,
+        prefetchAhead: Int = 10,
+        prefetchBehind: Int = 3
+    ) {
         self.textPool = textPool
+        self.layoutCache = layoutCache
+        self.prefetchAhead = prefetchAhead
+        self.prefetchBehind = prefetchBehind
     }
 
-    /// Test-only convenience: creates a private pool not shared with RenderEnvironment.
+    /// Test-only convenience — creates a private pool and cache not shared with RenderEnvironment.
+    /// Uses prefetchAhead = 60 to match the old hardcoded range and preserve Spike2 test thresholds.
     init() {
         self.textPool = TextMeasurementPool()
+        self.layoutCache = LayoutCache()
+        self.prefetchAhead = 60
+        self.prefetchBehind = 3
     }
 
     /// Notify the pipeline that the visible leading index has changed.
@@ -39,45 +59,66 @@ public actor RenderPipeline {
         prefetchTask?.cancel()
         taskStartCount += 1
 
+        // Capture actor state before entering the Task — group.addTask closures are
+        // @Sendable nonisolated and cannot reference actor-isolated self directly.
+        let cache = layoutCache
+        let pool = textPool
+        let ahead = prefetchAhead
+        let behind = prefetchBehind
+
         prefetchTask = Task {
-            let rangeEnd = min(leadingIndex + 60, tables.count)
-            guard rangeEnd > leadingIndex else { return }
+            let rangeStart = max(0, leadingIndex - behind)
+            let rangeEnd = min(leadingIndex + ahead, tables.count)
+            guard rangeEnd > rangeStart else { return }
 
-            // Capture textPool here — Task inherits actor isolation so self.textPool
-            // is accessible without await. group.addTask closures are @Sendable and
-            // cannot reference actor-isolated state directly.
-            let pool = self.textPool
-
-            // Collect indices not yet in the ring buffer.
-            var needed: [Int] = []
-            for i in leadingIndex..<rangeEnd {
-                let existing = await workingRange.entry(at: i)
-                if existing == nil { needed.append(i) }
+            // Single MainActor hop: advance or reset the ring buffer, then collect nil slots.
+            // Combining both operations avoids N serial @MainActor awaits.
+            let needed: [Int] = await MainActor.run {
+                if rangeStart < workingRange.currentRangeStart {
+                    // Scrolled backward past the window start — O(capacity) rebuild.
+                    workingRange.resetRange(to: rangeStart)
+                } else {
+                    workingRange.advance(to: rangeStart)
+                }
+                return (rangeStart..<rangeEnd).filter { workingRange.entry(at: $0) == nil }
             }
             guard !needed.isEmpty, !Task.isCancelled else { return }
 
-            // Measure and extract fragments in parallel.
-            // extractFragments is nonisolated — safe to call inside the task.
+            // Parallel: check LayoutCache first; fall back to measureNode on a miss.
             var results: [(Int, ResolvedLayout, [Fragment])] = []
-            await withTaskGroup(of: (Int, ResolvedLayout, [Fragment]).self) { group in
+            var localHits = 0
+            await withTaskGroup(of: (Int, ResolvedLayout, [Fragment], Bool).self) { group in
                 for index in needed {
+                    let table = tables[index]
+                    let key = CacheKey(layoutHash: table.layoutHash, width: availableWidth)
                     group.addTask {
-                        let table = tables[index]
+                        if let entry = await cache.get(key) {
+                            return (index, entry.layout, entry.fragments, true)
+                        }
+                        // Guard before the expensive path — exits quickly on cancellation.
+                        guard !Task.isCancelled else { return (index, .placeholder, [], false) }
                         let layout = await measureNode(
                             table, nodeIndex: 0,
                             width: availableWidth,
                             textPool: pool
                         )
                         let fragments = extractFragments(table: table, layout: layout)
-                        return (index, layout, fragments)
+                        await cache.set(CellEntry(layout: layout, fragments: fragments), for: key)
+                        return (index, layout, fragments, false)
                     }
                 }
-                for await triple in group { results.append(triple) }
+                for await (i, layout, fragments, isHit) in group {
+                    if isHit { localHits += 1 }
+                    results.append((i, layout, fragments))
+                }
             }
+            // Outer guard prevents any commit from a superseded prefetch. Cancelled subtasks
+            // return .placeholder but this guard fires before WorkingRange.commit is reached.
             guard !Task.isCancelled else { return }
 
+            cacheHitCount += localHits
+
             await MainActor.run {
-                workingRange.advance(to: max(0, leadingIndex - 3))
                 for (i, layout, fragments) in results {
                     workingRange.commit(layout, fragments, at: i)
                 }

@@ -70,6 +70,16 @@ public final class WorkingRange {
         rangeStart = newStart
     }
 
+    /// Resets the ring buffer to start at `newStart`, clearing all entries.
+    /// Use when the visible range moves backward past the current window start.
+    /// O(capacity) — acceptable on a direction change; not called on the scroll path.
+    public func resetRange(to newStart: Int) {
+        precondition(newStart < rangeStart || rangeStart == 0,
+            "resetRange(to:) is for backward scroll; use advance(to:) to move forward")
+        buffer = [CellEntry?](repeating: nil, count: capacity)
+        rangeStart = newStart
+    }
+
     public func invalidateAll() {
         buffer = [CellEntry?](repeating: nil, count: capacity)
         rangeStart = 0
