@@ -219,13 +219,34 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
         rebuildFrames(using: knownHeights)
 
-        // Indices shifted — clear all visible cells and let updateVisibleCells remount.
-        for (_, cell) in visibleCells {
-            cell.layer.removeFromSuperlayer()
-            returnToPool(cell)
+        if needsFullInvalidation {
+            for (_, cell) in visibleCells {
+                cell.layer.removeFromSuperlayer()
+                returnToPool(cell)
+            }
+            visibleCells.removeAll(keepingCapacity: true)
+            _pendingFragmentIndices.removeAll(keepingCapacity: true)
+        } else {
+            let newIndexByItemID = Dictionary(
+                uniqueKeysWithValues: tables.enumerated().map { ($1.itemID, $0) }
+            )
+            for (_, next) in changeSet.appearanceChanged {
+                guard let idx = newIndexByItemID[next.itemID],
+                      let cell = visibleCells[idx],
+                      let wrEntry = workingRange.entry(at: idx) else { continue }
+                let freshFragments = extractFragments(table: next, layout: wrEntry.layout)
+                cell.cancelPendingMedia()
+                spawnMediaFetches(for: cell, fragments: freshFragments, itemID: next.itemID)
+            }
+            for (_, next) in changeSet.mediaChanged {
+                guard let idx = newIndexByItemID[next.itemID],
+                      let cell = visibleCells[idx],
+                      let wrEntry = workingRange.entry(at: idx) else { continue }
+                let freshFragments = extractFragments(table: next, layout: wrEntry.layout)
+                cell.cancelPendingMedia()
+                spawnMediaFetches(for: cell, fragments: freshFragments, itemID: next.itemID)
+            }
         }
-        visibleCells.removeAll(keepingCapacity: true)
-        _pendingFragmentIndices.removeAll(keepingCapacity: true)
 
         // Reset reachEnd gate if item count grew (new page arrived).
         if items.count > oldItems.count {

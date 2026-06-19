@@ -628,5 +628,129 @@ final class FeedScrollViewTests: XCTestCase {
         XCTAssertTrue(newImageArrived,
             "url2's image must eventually arrive and be set on a sublayer inside contentLayer")
     }
+    // MARK: - 14. Media change preserves cell identity (no recycle on .media URL swap)
+
+    func testMediaChangeDoesNotRecycleVisibleCell() async throws {
+        let url1 = try writeTempJPEG(width: 60, height: 60)
+        let url2 = try writeTempJPEG(width: 60, height: 60)
+        defer {
+            try? FileManager.default.removeItem(at: url1)
+            try? FileManager.default.removeItem(at: url2)
+        }
+
+        let dc = DimensionCache()
+        let videoPrep = VideoPreparationActor()
+        let env = RenderEnvironment(
+            textPool: TextMeasurementPool(),
+            layoutCache: LayoutCache(),
+            dimensionCache: dc,
+            imageActor: ImageActor(dimensionCache: dc),
+            gifActor: GIFActor(),
+            videoController: VideoController(videoPreparation: videoPrep),
+            videoPreparation: videoPrep
+        )
+
+        struct URLItem: Identifiable, Sendable {
+            let id: Int
+            let imageURL: URL?
+        }
+        let item1 = URLItem(id: 0, imageURL: url1)
+        let item2 = URLItem(id: 0, imageURL: url2)
+
+        let feed = FeedScrollView<URLItem>(
+            environment: env,
+            frame: CGRect(x: 0, y: 0, width: 375, height: 812)
+        )
+        feed.cellBuilder = { item in AsyncImageNode(url: item.imageURL, aspectRatio: 1.0) }
+
+        feed.items = [item1]
+        feed.layoutSubviews()
+        let phase1Deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < phase1Deadline {
+            await Task.yield()
+            feed.layoutSubviews()
+            if findFirstContentLayer(in: feed)?.sublayers?.first(where: { $0.contents != nil }) != nil { break }
+        }
+        XCTAssertNotNil(
+            findFirstContentLayer(in: feed)?.sublayers?.first(where: { $0.contents != nil }),
+            "Precondition: url1 image must load before URL swap"
+        )
+
+        dc.store(CGSize(width: 60, height: 60), for: url2)
+
+        let cellLayerBefore = feed.layer.sublayers?.first
+        XCTAssertNotNil(cellLayerBefore, "Cell must be mounted before URL swap")
+
+        feed.items = [item2]
+        feed.layoutSubviews()
+
+        let cellLayerAfter = feed.layer.sublayers?.first
+        XCTAssertTrue(cellLayerBefore === cellLayerAfter,
+            ".media URL swap must reuse the same cell layer — no recycle expected")
+
+        XCTAssertNotNil(
+            findFirstContentLayer(in: feed)?.sublayers?.first(where: { $0.contents != nil }),
+            "sublayer.contents must stay non-nil during .media URL swap — stale-until-replaced"
+        )
+    }
+
+    // MARK: - 15. Appearance change preserves cell identity (no recycle on .appearance)
+
+    func testAppearanceChangeDoesNotRecycleVisibleCell() async throws {
+        let url = try writeTempJPEG(width: 60, height: 60)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let dc = DimensionCache()
+        let videoPrep = VideoPreparationActor()
+        let env = RenderEnvironment(
+            textPool: TextMeasurementPool(),
+            layoutCache: LayoutCache(),
+            dimensionCache: dc,
+            imageActor: ImageActor(dimensionCache: dc),
+            gifActor: GIFActor(),
+            videoController: VideoController(videoPreparation: videoPrep),
+            videoPreparation: videoPrep
+        )
+
+        struct StyleItem: Identifiable, Sendable {
+            let id: Int
+            let imageURL: URL?
+            let cornerRadius: CGFloat
+        }
+        let item1 = StyleItem(id: 0, imageURL: url, cornerRadius: 0)
+        let item2 = StyleItem(id: 0, imageURL: url, cornerRadius: 8)
+
+        let feed = FeedScrollView<StyleItem>(
+            environment: env,
+            frame: CGRect(x: 0, y: 0, width: 375, height: 812)
+        )
+        feed.cellBuilder = { item in
+            AsyncImageNode(url: item.imageURL, aspectRatio: 1.0).cornerRadius(item.cornerRadius)
+        }
+
+        feed.items = [item1]
+        feed.layoutSubviews()
+        let phase1Deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < phase1Deadline {
+            await Task.yield()
+            feed.layoutSubviews()
+            if findFirstContentLayer(in: feed)?.opacity == 1 { break }
+        }
+        XCTAssertEqual(findFirstContentLayer(in: feed)?.opacity, 1,
+            "Precondition: item must fully load before testing appearance change")
+
+        let cellLayerBefore = feed.layer.sublayers?.first
+        XCTAssertNotNil(cellLayerBefore)
+
+        feed.items = [item2]
+        feed.layoutSubviews()
+
+        let cellLayerAfter = feed.layer.sublayers?.first
+        XCTAssertTrue(cellLayerBefore === cellLayerAfter,
+            ".appearance change must reuse the same cell layer — no recycle expected")
+
+        XCTAssertEqual(findFirstContentLayer(in: feed)?.opacity, 1,
+            "contentLayer.opacity must stay 1 after .appearance change — no placeholder reset")
+    }
 }
 #endif
