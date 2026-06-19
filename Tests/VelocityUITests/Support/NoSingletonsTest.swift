@@ -19,27 +19,40 @@ final class NoSingletonsTest: XCTestCase {
 
         // Regex matches declarations only: optional access modifier + "static let shared".
         // Does NOT match comments or prose containing "static let shared" as a substring.
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/grep")
-        process.arguments = [
-            "-rnE", "--include=*.swift",
-            "(public[[:space:]]+|internal[[:space:]]+|private[[:space:]]+)?static[[:space:]]+let[[:space:]]+shared[[:space:]=]",
-            sourcesURL.path
-        ]
+        let pattern = try NSRegularExpression(
+            pattern: #"(public\s+|internal\s+|private\s+)?static\s+let\s+shared[\s=]"#
+        )
 
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: sourcesURL.path),
+              let enumerator = fm.enumerator(
+                at: sourcesURL,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+              )
+        else {
+            // Source tree not accessible at test runtime (e.g. physical device). Skip silently.
+            return
+        }
 
-        try process.run()
-        process.waitUntilExit()
+        var violations: [String] = []
+        for case let fileURL as URL in enumerator {
+            guard fileURL.pathExtension == "swift" else { continue }
+            let contents = try String(contentsOf: fileURL, encoding: .utf8)
+            let lines = contents.components(separatedBy: .newlines)
+            for (lineIdx, line) in lines.enumerated() {
+                let nsRange = NSRange(line.startIndex..., in: line)
+                if pattern.firstMatch(in: line, range: nsRange) != nil {
+                    violations.append("\(fileURL.lastPathComponent):\(lineIdx + 1): \(line)")
+                }
+            }
+        }
 
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8) ?? ""
-
-        // grep exit code 1 means no matches (success). Exit code 0 means matches found.
-        if process.terminationStatus == 0 {
-            XCTFail("'static let shared' found in Sources/VelocityUI — singletons are forbidden.\n\(output)")
+        if !violations.isEmpty {
+            XCTFail(
+                "'static let shared' found in Sources/VelocityUI — singletons are forbidden.\n"
+                    + violations.joined(separator: "\n")
+            )
         }
     }
 }

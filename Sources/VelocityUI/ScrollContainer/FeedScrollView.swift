@@ -14,7 +14,7 @@ import CoreGraphics
 /// direct sublayers. UIScrollView scrolls by adjusting `bounds.origin` — no
 /// CAScrollLayer override needed.
 @MainActor
-public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView {
+public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView where Item.ID: Sendable {
 
     // MARK: - Configuration
 
@@ -76,6 +76,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView {
 
     /// Pre-allocated scratch buffer for the recycle loop — avoids a per-frame Array allocation.
     private var _recycleBuffer: [Int] = []
+
+    /// Indices where the cell was mounted with applyLayout([]) during a WorkingRange miss.
+    /// refineKnownFrames delivers real fragments and spawns media fetches when entries arrive.
+    private var _pendingFragmentIndices: Set<Int> = []
 
     /// Placeholder height for items not yet measured by the pipeline.
     /// Affects the initial contentSize and the scroll distance to the first real layout.
@@ -142,6 +146,16 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("use init(environment:frame:)") }
+
+    deinit {
+        // deinit is not a recycle path — visibleCells are released without passing through
+        // returnToPool, so their decode Tasks must be cancelled here to mirror the recycle contract.
+        // MainActor.assumeIsolated: FeedScrollView is @MainActor-isolated and can only be
+        // deallocated on the main thread, so deinit always runs there. The assumption is safe.
+        MainActor.assumeIsolated {
+            for cell in visibleCells.values { cell.cancelPendingMedia() }
+        }
+    }
 
     // MARK: - Layout
 
@@ -211,6 +225,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView {
             returnToPool(cell)
         }
         visibleCells.removeAll(keepingCapacity: true)
+        _pendingFragmentIndices.removeAll(keepingCapacity: true)
 
         // Reset reachEnd gate if item count grew (new page arrived).
         if items.count > oldItems.count {
@@ -254,10 +269,11 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView {
     /// frames by the delta, so lowest-index-first is required for correct propagation.
     /// O(1) early-exit when `estimatedIndices` is empty (steady state).
     private func refineKnownFrames() {
-        guard !estimatedIndices.isEmpty else { return }
+        guard !estimatedIndices.isEmpty || !_pendingFragmentIndices.isEmpty else { return }
 
-        let sorted = estimatedIndices.sorted()
+        let sorted = (estimatedIndices.union(_pendingFragmentIndices)).sorted()
         var refined: [Int] = []
+        var pendingRepositioned: Set<Int> = []
 
         for index in sorted {
             guard index < resolvedFrames.count else {
@@ -271,13 +287,24 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView {
             let delta = VerticalLayoutProvider.refineFrames(&resolvedFrames, at: index, newHeight: realHeight)
             if delta != 0 { contentSize.height += delta }
             refined.append(index)
+
+            // Deliver real fragments to cells that were mounted during a WorkingRange miss.
+            // Check visibleCells first so the set is not mutated when no cell is present.
+            if let cell = visibleCells[index], _pendingFragmentIndices.remove(index) != nil {
+                cell.layer.frame = resolvedFrames[index]
+                cell.applyLayout(entry.fragments)
+                spawnMediaFetches(for: cell, fragments: entry.fragments, itemID: tables[index].itemID)
+                pendingRepositioned.insert(index)
+            }
         }
 
         for i in refined { estimatedIndices.remove(i) }
 
-        // Reposition visible cells whose scroll-space position shifted.
+        // Reposition visible cells whose scroll-space position shifted by refined height deltas.
+        // Skip indices already repositioned above (frame was set before applyLayout read bounds.size).
         for (i, cell) in visibleCells {
             guard i < resolvedFrames.count else { continue }
+            guard !pendingRepositioned.contains(i) else { continue }
             cell.layer.frame = resolvedFrames[i]
         }
     }
@@ -307,7 +334,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView {
 
     // MARK: - Synchronous scroll path
 
-    /// Called from `layoutSubviews`. ZERO await. ZERO Task spawn.
+    /// Called from `layoutSubviews`. ZERO await on the scroll path itself.
+    /// Media fetch Tasks are spawned at cell-mount time (a state change, not per frame).
     /// Returns the computed visible range so the caller can pass it to `checkReachEnd`.
     @discardableResult
     private func updateVisibleCells() -> Range<Int> {
@@ -335,6 +363,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView {
             _recycleBuffer.append(index)
         }
         for index in _recycleBuffer {
+            _pendingFragmentIndices.remove(index)
             if let cell = visibleCells.removeValue(forKey: index) {
                 cell.layer.removeFromSuperlayer()
                 returnToPool(cell)
@@ -355,10 +384,13 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView {
             if let entry = workingRange.entry(at: index) {
                 cell.layer.frame = frame
                 cell.applyLayout(entry.fragments)
+                spawnMediaFetches(for: cell, fragments: entry.fragments, itemID: table.itemID)
             } else {
                 // WorkingRange miss: placeholder gradient at estimated frame.
+                // Real fragments arrive via refineKnownFrames once the pipeline commits.
                 cell.layer.frame = frame
                 cell.applyLayout([])
+                _pendingFragmentIndices.insert(index)
             }
 
             layer.addSublayer(cell.layer)
@@ -436,9 +468,57 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView {
     /// `removeValue(forKey:)` takes sole ownership so `append` is in-place
     /// when the array has spare capacity (common case after steady-state warm-up).
     private func returnToPool(_ cell: RenderCell) {
+        cell.cancelPendingMedia()
         var pool = cellPools.removeValue(forKey: cell.kind) ?? []
         pool.append(cell)
         cellPools[cell.kind] = pool
+    }
+
+    // MARK: - Media pipeline
+
+    /// Phase 2 commit: for each image fragment with a non-nil URL, spawn a Task that fetches
+    /// and decodes the image then delivers it to the cell. Called at mount time (WR hit) and
+    /// from refineKnownFrames when a WR miss is resolved.
+    ///
+    /// Task body inherits @MainActor isolation (unstructured Task spawned from @MainActor class).
+    /// Cell is captured weakly to prevent a Task → cell → mediaHandles → Task retain cycle.
+    /// itemID is captured at spawn time and threaded through applyContent; applyContent
+    /// rejects callbacks whose captured itemID does not match the cell's currentItemID.
+    ///
+    /// `max(1, traitCollection.displayScale)` guards against the UITraitCollection returning 0.0
+    /// for views not yet attached to a UIWindow (iOS 17+ scene-based traits, unit tests). A zero
+    /// scale would produce pixelWidth=pixelHeight=0 in ImageCacheKey and undefined behaviour at
+    /// decode; 1× is a safe decode-once floor that the cache supersedes on first real-scale hit.
+    private func spawnMediaFetches(
+        for cell: RenderCell,
+        fragments: [Fragment],
+        itemID: AnyHashable
+    ) {
+        let imageActor = environment.imageActor
+        let scale = max(1, traitCollection.displayScale)
+
+        for fragment in fragments {
+            guard case .image(let d) = fragment.content, let url = d.url else { continue }
+            let fragmentID = fragment.id
+            let targetSize = fragment.frame.size
+            let cornerRadius = d.cornerRadius
+
+            let task = Task { [weak cell] in
+                guard let img = await imageActor.image(
+                    for: url,
+                    targetSize: targetSize,
+                    cornerRadius: cornerRadius,
+                    scale: scale
+                ) else { return }
+                // No Task.isCancelled check here — applyContent's itemID privacy guard
+                // is the authoritative defense against stale delivery. Relying on cooperative
+                // cancellation alone would leave the invariant untestable: if the Task dies
+                // before reaching applyContent, both "guard fired" and "guard never reached"
+                // produce the same observable state (opacity == 0).
+                cell?.applyContent(id: fragmentID, image: img, for: itemID)
+            }
+            cell.addMediaHandle(MediaHandle(task: task))
+        }
     }
 }
 #endif

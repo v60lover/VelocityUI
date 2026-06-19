@@ -1,6 +1,7 @@
 // AsyncSemaphore.swift
 
 #if canImport(UIKit)
+import Foundation
 
 /// FIFO bounded semaphore for Swift concurrency.
 ///

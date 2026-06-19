@@ -15,7 +15,7 @@ public enum CellKind: Hashable, Sendable {
 public final class MediaHandle: Sendable {
     private let task: Task<Void, Never>
 
-    public init(task: Task<Void, Never>) {
+    init(task: Task<Void, Never>) {
         self.task = task
     }
 
@@ -202,8 +202,17 @@ public final class RenderCell {
     /// Register a Task token for a pending image fetch.
     /// The Task's body MUST NOT strongly capture this cell — use `[weak self]` to avoid a
     /// retain cycle that outlives cancellation. Cycle risk: cell → handles → task closure → cell.
-    public func addMediaHandle(_ handle: MediaHandle) {
+    func addMediaHandle(_ handle: MediaHandle) {
         mediaHandles.append(handle)
+    }
+
+    /// Cancel all pending media fetch Tasks without clearing sublayer contents.
+    /// Symmetric counterpart to `addMediaHandle`. Call at recycle time to release decode
+    /// slots immediately — sublayers stay intact for pool reuse; `prepareForReuse` clears
+    /// them on the next cross-item bind.
+    func cancelPendingMedia() {
+        mediaHandles.forEach { $0.cancel() }
+        mediaHandles.removeAll(keepingCapacity: true)
     }
 
     // MARK: - Private

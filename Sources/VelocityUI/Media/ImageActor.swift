@@ -19,7 +19,7 @@ private struct DecodeResult: @unchecked Sendable {
     let rawSourceSize: CGSize?  // pixel dimensions from source header, for DimensionCache
 }
 
-private final class CacheKey: NSObject {
+private final class ImageCacheKey: NSObject {
     let url: URL
     let pixelWidth: Int    // Int(targetSize.width * scale, rounded) — avoids CGFloat equality
     let pixelHeight: Int
@@ -33,7 +33,7 @@ private final class CacheKey: NSObject {
     }
 
     override func isEqual(_ object: Any?) -> Bool {
-        guard let other = object as? CacheKey else { return false }
+        guard let other = object as? ImageCacheKey else { return false }
         return url == other.url
             && pixelWidth == other.pixelWidth
             && pixelHeight == other.pixelHeight
@@ -87,7 +87,7 @@ public actor ImageActor {
     )
     private let decodeSemaphore = AsyncSemaphore(value: 3)
 
-    private let cache = NSCache<CacheKey, CachedImage>()
+    private let cache = NSCache<ImageCacheKey, CachedImage>()
     private let session: URLSession
     /// `nonisolated` so RenderEnvironment can check identity (===) in its designated init.
     nonisolated let dimensionCache: DimensionCache
@@ -116,6 +116,27 @@ public actor ImageActor {
         self.init(dimensionCache: DimensionCache())
     }
 
+    // MARK: - Test hooks
+
+    #if canImport(XCTest)
+    /// Injected by unit tests to interpose before `image()` returns.
+    ///
+    /// When non-nil, `image()` suspends at this hook before the cache-hit check.
+    /// The hook is `@Sendable async` but does NOT check `Task.isCancelled` internally —
+    /// callers control the resume point explicitly. This lets tests hold the decode
+    /// in-flight until after a cross-item recycle, then deliver the image to exercise
+    /// the `applyContent` privacy guard.
+    ///
+    /// Set only from test code via `@testable import VelocityUI`. Never set in production.
+    var _testDecodeGateHook: (@Sendable () async -> Void)?
+
+    /// Sets `_testDecodeGateHook` from test code. Actor-isolated setter so the assignment
+    /// is safe across executor boundaries (tests call `await actor.set_testDecodeGateHook(...)`).
+    func set_testDecodeGateHook(_ hook: (@Sendable () async -> Void)?) {
+        _testDecodeGateHook = hook
+    }
+    #endif
+
     // MARK: - Public API
 
     /// Fetch and decode an image for `url`.
@@ -134,7 +155,14 @@ public actor ImageActor {
         cornerRadius: CGFloat,
         scale: CGFloat
     ) async -> CGImage? {
-        let key = CacheKey(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: scale)
+        #if canImport(XCTest)
+        // Test gate: suspend here before any work so the test can control when this call
+        // proceeds relative to a cross-item recycle. The hook is NOT cancellation-aware —
+        // it suspends until the test explicitly signals, regardless of Task.isCancelled.
+        if let hook = _testDecodeGateHook { await hook() }
+        #endif
+
+        let key = ImageCacheKey(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: scale)
 
         // 1. Cache hit — O(1), no allocation on the hot path.
         if let hit = cache.object(forKey: key) { return hit.image }

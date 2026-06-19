@@ -37,7 +37,8 @@ final class LayoutCacheTests: XCTestCase {
         let key375 = CacheKey(layoutHash: 1, width: 375)
         let key428 = CacheKey(layoutHash: 1, width: 428)
         await cache.set(makeEntry(height: 100), for: key375)
-        XCTAssertNil(await cache.get(key428), "Different width must not share a cache entry")
+        let result428 = await cache.get(key428)
+        XCTAssertNil(result428, "Different width must not share a cache entry")
     }
 
     func testDifferentLayoutHashProducesDifferentKey() async {
@@ -45,7 +46,8 @@ final class LayoutCacheTests: XCTestCase {
         let key1 = CacheKey(layoutHash: 1, width: 375)
         let key2 = CacheKey(layoutHash: 2, width: 375)
         await cache.set(makeEntry(height: 100), for: key1)
-        XCTAssertNil(await cache.get(key2), "Different layoutHash must not share a cache entry")
+        let result2 = await cache.get(key2)
+        XCTAssertNil(result2, "Different layoutHash must not share a cache entry")
     }
 
     func testUpdateInPlaceDoesNotGrowCount() async {
@@ -68,8 +70,10 @@ final class LayoutCacheTests: XCTestCase {
         await cache.set(makeEntry(), for: key)
         await cache.set(makeEntry(), for: otherKey)
         await cache.invalidate(key)
-        XCTAssertNil(await cache.get(key), "invalidate must remove the targeted entry")
-        XCTAssertNotNil(await cache.get(otherKey), "invalidate must not remove other entries")
+        let afterInvalidate = await cache.get(key)
+        let otherAfterInvalidate = await cache.get(otherKey)
+        XCTAssertNil(afterInvalidate, "invalidate must remove the targeted entry")
+        XCTAssertNotNil(otherAfterInvalidate, "invalidate must not remove other entries")
     }
 
     func testInvalidateMissingKeyIsNoop() async {
@@ -123,9 +127,12 @@ final class LayoutCacheTests: XCTestCase {
         // 4th insert triggers eviction of hash=0 (oldest)
         let newestKey = CacheKey(layoutHash: 3, width: 375)
         await cache.set(makeEntry(height: 40), for: newestKey)
-        XCTAssertNil(await cache.get(oldestKey), "Oldest-inserted entry must be evicted when cap is reached")
-        XCTAssertNotNil(await cache.get(newestKey), "Newest entry must survive eviction")
-        XCTAssertEqual(await cache.count, cap)
+        let oldest = await cache.get(oldestKey)
+        let newest = await cache.get(newestKey)
+        let countAfterEviction = await cache.count
+        XCTAssertNil(oldest, "Oldest-inserted entry must be evicted when cap is reached")
+        XCTAssertNotNil(newest, "Newest entry must survive eviction")
+        XCTAssertEqual(countAfterEviction, cap)
     }
 
     // MARK: - Concurrent access
