@@ -211,7 +211,8 @@ final class RenderDifferTests: XCTestCase {
         )
 
         XCTAssertEqual(cs.added.count, 1)
-        XCTAssertEqual(cs.added.first?.itemID, b.itemID)
+        XCTAssertEqual(cs.added.first?.table.itemID, b.itemID)
+        XCTAssertEqual(cs.added.first?.nextIdx, 1, "b is at position 1 in next")
         XCTAssertTrue(cs.removed.isEmpty)
         XCTAssertTrue(cs.layoutChanged.isEmpty)
     }
@@ -227,7 +228,8 @@ final class RenderDifferTests: XCTestCase {
         )
 
         XCTAssertEqual(cs.removed.count, 1)
-        XCTAssertEqual(cs.removed.first?.itemID, b.itemID)
+        XCTAssertEqual(cs.removed.first?.table.itemID, b.itemID)
+        XCTAssertEqual(cs.removed.first?.prevIdx, 1, "b was at position 1 in prev")
         XCTAssertTrue(cs.added.isEmpty)
     }
 
@@ -241,6 +243,45 @@ final class RenderDifferTests: XCTestCase {
         )
 
         XCTAssertFalse(cs.hasChanges)
+        XCTAssertEqual(cs.survived.count, 1, "unchanged item must appear in survived")
+        XCTAssertEqual(cs.survived.first?.prevIdx, 0)
+        XCTAssertEqual(cs.survived.first?.nextIdx, 0)
+    }
+
+    func testSurvivedCarriesCorrectIndicesWhenItemAdded() {
+        // [a] → [a, b]: a survives at (prevIdx:0, nextIdx:0), b is added at nextIdx:1
+        let a = makeImageTable(id: "a")
+        let b = makeImageTable(id: "b")
+        let differ = RenderDiffer(dimensionCache: nil)
+
+        let cs = differ.diff(
+            prev: LayoutSnapshot(tables: [a]),
+            next: LayoutSnapshot(tables: [makeImageTable(id: "a"), b])
+        )
+
+        XCTAssertEqual(cs.survived.count, 1)
+        XCTAssertEqual(cs.survived.first?.prevIdx, 0)
+        XCTAssertEqual(cs.survived.first?.nextIdx, 0)
+        XCTAssertEqual(cs.added.count, 1)
+        XCTAssertEqual(cs.added.first?.nextIdx, 1)
+    }
+
+    func testSurvivedCarriesCorrectIndicesWhenItemPrepended() {
+        // [a] → [b, a]: a survives at (prevIdx:0, nextIdx:1), b is added at nextIdx:0
+        let a = makeImageTable(id: "a")
+        let b = makeImageTable(id: "b")
+        let differ = RenderDiffer(dimensionCache: nil)
+
+        let cs = differ.diff(
+            prev: LayoutSnapshot(tables: [a]),
+            next: LayoutSnapshot(tables: [b, makeImageTable(id: "a")])
+        )
+
+        XCTAssertEqual(cs.survived.count, 1)
+        XCTAssertEqual(cs.survived.first?.prevIdx, 0)
+        XCTAssertEqual(cs.survived.first?.nextIdx, 1, "a moved from position 0 to position 1")
+        XCTAssertEqual(cs.added.count, 1)
+        XCTAssertEqual(cs.added.first?.nextIdx, 0, "b is the new item at position 0")
     }
 
     // MARK: - Change buckets
@@ -325,8 +366,20 @@ final class RenderDifferTests: XCTestCase {
         XCTAssertEqual(cs.removed.count, 1)
         XCTAssertTrue(cs.hasChanges)
 
-        XCTAssertEqual(cs.added.first?.itemID, addedItem.itemID)
-        XCTAssertEqual(cs.removed.first?.itemID, removedItem.itemID)
+        XCTAssertEqual(cs.added.first?.table.itemID, addedItem.itemID)
+        XCTAssertEqual(cs.added.first?.nextIdx, 4, "addedItem is at position 4 in next")
+        XCTAssertEqual(cs.removed.first?.table.itemID, removedItem.itemID)
+        XCTAssertEqual(cs.removed.first?.prevIdx, 4, "removedItem was at position 4 in prev")
+        // Verify (prevIdx, nextIdx) on change buckets — unch/appear/media/lay all stay at same positions
+        XCTAssertFalse(cs.survived.isEmpty, "unchanged item must appear in survived")
+        XCTAssertEqual(cs.survived.first?.prevIdx, 0)
+        XCTAssertEqual(cs.survived.first?.nextIdx, 0)
+        XCTAssertEqual(cs.appearanceChanged.first?.prevIdx, 1)
+        XCTAssertEqual(cs.appearanceChanged.first?.nextIdx, 1)
+        XCTAssertEqual(cs.mediaChanged.first?.prevIdx, 2)
+        XCTAssertEqual(cs.mediaChanged.first?.nextIdx, 2)
+        XCTAssertEqual(cs.layoutChanged.first?.prevIdx, 3)
+        XCTAssertEqual(cs.layoutChanged.first?.nextIdx, 3)
     }
 
     // MARK: - Scratch reuse (capacity retained)

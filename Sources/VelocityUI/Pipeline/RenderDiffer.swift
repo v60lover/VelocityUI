@@ -98,15 +98,22 @@ public struct LayoutSnapshot: Sendable {
 
 /// Flat description of differences between two LayoutSnapshots.
 ///
-/// All four arrays carry full NodeTable references so consumers can route
-/// work without a second lookup. `removed` carries the prev-state table
-/// (not the new state) so consumers can clean up media resources keyed by
-/// the old descriptor.
+/// All five change arrays carry full NodeTable references so consumers can
+/// route work without a second lookup. Each entry also carries (prevIdx,
+/// nextIdx) — the item's position in the prev and next snapshot respectively
+/// — so consumers can avoid O(N) AnyHashable dictionary rebuilds.
+///
+/// `removed` carries the prev-state table (not the new state) so consumers
+/// can clean up media resources keyed by the old descriptor.
+///
+/// `survived` carries (prevIdx, nextIdx) pairs for items classified .none —
+/// unchanged items that still need their known heights forwarded to rebuildFrames.
+/// It does NOT contribute to `hasChanges`.
 ///
 /// `layoutChanged` pairs are ordered: prev first, next second.
 ///
 /// CoW lifetime contract: release the previous ChangeSet **before** calling
-/// `diff()` again. The scratch arrays backing the five result arrays are
+/// `diff()` again. The scratch arrays backing the six result arrays are
 /// reused across calls via `removeAll(keepingCapacity: true)`. If a prior
 /// ChangeSet is still retained when `resetScratch()` runs, Swift's
 /// copy-on-write semantics will reallocate the backing buffer to give that
@@ -114,14 +121,17 @@ public struct LayoutSnapshot: Sendable {
 /// `FeedScrollView` must not retain the prior ChangeSet across a call to
 /// `diff()`.
 public struct ChangeSet: Sendable {
-    public let layoutChanged: [(prev: NodeTable, next: NodeTable)]
-    public let appearanceChanged: [(prev: NodeTable, next: NodeTable)]
-    public let mediaChanged: [(prev: NodeTable, next: NodeTable)]
-    public let added: [NodeTable]
+    public let layoutChanged:     [(prev: NodeTable, next: NodeTable, prevIdx: Int, nextIdx: Int)]
+    public let appearanceChanged: [(prev: NodeTable, next: NodeTable, prevIdx: Int, nextIdx: Int)]
+    public let mediaChanged:      [(prev: NodeTable, next: NodeTable, prevIdx: Int, nextIdx: Int)]
+    public let added:             [(table: NodeTable, nextIdx: Int)]
     /// Prev-state tables for items no longer present in the next snapshot.
-    public let removed: [NodeTable]
+    public let removed:           [(table: NodeTable, prevIdx: Int)]
+    /// (prevIdx, nextIdx) pairs for .none-classified (unchanged) items.
+    /// Enables zero-AnyHashable height forwarding in rebuildFrames.
+    public let survived:          [(prevIdx: Int, nextIdx: Int)]
 
-    /// True when at least one array is non-empty.
+    /// True when at least one change array is non-empty. `survived` is excluded.
     public var hasChanges: Bool {
         !layoutChanged.isEmpty || !appearanceChanged.isEmpty ||
         !mediaChanged.isEmpty || !added.isEmpty || !removed.isEmpty
@@ -152,11 +162,12 @@ public final class RenderDiffer: @unchecked Sendable {
     private let dimensionCache: DimensionCache?
 
     // Scratch buffers — reused across diff() calls
-    private var scratchLayout:     [(NodeTable, NodeTable)] = []
-    private var scratchAppearance: [(NodeTable, NodeTable)] = []
-    private var scratchMedia:      [(NodeTable, NodeTable)] = []
-    private var scratchAdded:      [NodeTable] = []
-    private var scratchRemoved:    [NodeTable] = []
+    private var scratchLayout:     [(prev: NodeTable, next: NodeTable, prevIdx: Int, nextIdx: Int)] = []
+    private var scratchAppearance: [(prev: NodeTable, next: NodeTable, prevIdx: Int, nextIdx: Int)] = []
+    private var scratchMedia:      [(prev: NodeTable, next: NodeTable, prevIdx: Int, nextIdx: Int)] = []
+    private var scratchAdded:      [(table: NodeTable, nextIdx: Int)] = []
+    private var scratchRemoved:    [(table: NodeTable, prevIdx: Int)] = []
+    private var scratchSurvived:   [(prevIdx: Int, nextIdx: Int)] = []
     private var scratchPrevIndex:  [AnyHashable: Int] = [:]
 
     /// - Parameter dimensionCache: Shared cache for the `.media` classify fast-path.
@@ -183,9 +194,9 @@ public final class RenderDiffer: @unchecked Sendable {
         }
 
         // Walk next tables: classify existing items, collect added items
-        for nextTable in next.tables {
+        for (nextIdx, nextTable) in next.tables.enumerated() {
             guard let prevIdx = scratchPrevIndex[nextTable.itemID] else {
-                scratchAdded.append(nextTable)
+                scratchAdded.append((nextTable, nextIdx))
                 continue
             }
             let prevTable = prev.tables[prevIdx]
@@ -193,17 +204,17 @@ public final class RenderDiffer: @unchecked Sendable {
             scratchPrevIndex.removeValue(forKey: nextTable.itemID)
 
             switch classify(prevTable, nextTable, dimensionCache: dimensionCache) {
-            case .none:        break
-            case .appearance:  scratchAppearance.append((prevTable, nextTable))
-            case .media:       scratchMedia.append((prevTable, nextTable))
-            case .layout:      scratchLayout.append((prevTable, nextTable))
+            case .none:        scratchSurvived.append((prevIdx, nextIdx))
+            case .appearance:  scratchAppearance.append((prevTable, nextTable, prevIdx, nextIdx))
+            case .media:       scratchMedia.append((prevTable, nextTable, prevIdx, nextIdx))
+            case .layout:      scratchLayout.append((prevTable, nextTable, prevIdx, nextIdx))
             }
         }
 
         // Items still in prevIndex were not found in next → removed.
         // Walk prev.tables in order (not the dict) so removed preserves display order.
-        for table in prev.tables where scratchPrevIndex[table.itemID] != nil {
-            scratchRemoved.append(table)
+        for (i, table) in prev.tables.enumerated() where scratchPrevIndex[table.itemID] != nil {
+            scratchRemoved.append((table, i))
         }
 
         return ChangeSet(
@@ -211,13 +222,14 @@ public final class RenderDiffer: @unchecked Sendable {
             appearanceChanged: scratchAppearance,
             mediaChanged:      scratchMedia,
             added:             scratchAdded,
-            removed:           scratchRemoved
+            removed:           scratchRemoved,
+            survived:          scratchSurvived
         )
     }
 
     // MARK: - Internal test hooks
 
-    /// Backing capacity of the scratchLayout buffer after the most recent diff() call.
+    /// Backing capacity of the scratch buffers after the most recent diff() call.
     /// Used in tests to verify `removeAll(keepingCapacity: true)` semantics — capacity
     /// must not drop below the peak seen during a large diff.
     var scratchLayoutCapacity:     Int { scratchLayout.capacity }
@@ -225,6 +237,7 @@ public final class RenderDiffer: @unchecked Sendable {
     var scratchMediaCapacity:      Int { scratchMedia.capacity }
     var scratchAddedCapacity:      Int { scratchAdded.capacity }
     var scratchRemovedCapacity:    Int { scratchRemoved.capacity }
+    var scratchSurvivedCapacity:   Int { scratchSurvived.capacity }
 
     // MARK: - Private
 
@@ -234,6 +247,7 @@ public final class RenderDiffer: @unchecked Sendable {
         scratchMedia.removeAll(keepingCapacity: true)
         scratchAdded.removeAll(keepingCapacity: true)
         scratchRemoved.removeAll(keepingCapacity: true)
+        scratchSurvived.removeAll(keepingCapacity: true)
         scratchPrevIndex.removeAll(keepingCapacity: true)
     }
 }

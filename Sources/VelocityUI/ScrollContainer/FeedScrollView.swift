@@ -189,19 +189,20 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             return
         }
 
-        // Build per-itemID height map from current resolvedFrames before clobbering them.
-        var knownHeights: [AnyHashable: CGFloat] = Dictionary(minimumCapacity: tables.count)
-        for (i, table) in tables.enumerated() {
-            if i < resolvedFrames.count {
-                knownHeights[table.itemID] = resolvedFrames[i].height
-            }
-        }
+        // Capture old frames and build (prevIdx, nextIdx) survivors before clobbering them.
+        // Covers all items that have a known previous height: .none, .layout, .appearance, .media.
+        // Int-keyed — zero AnyHashable boxing.
+        let oldFrames = resolvedFrames
+        var survivors: [(prevIdx: Int, nextIdx: Int)] = []
+        survivors.reserveCapacity(tables.count)
+        for e in changeSet.survived      { survivors.append(e) }
+        for e in changeSet.layoutChanged { survivors.append((prevIdx: e.prevIdx, nextIdx: e.nextIdx)) }
+        for e in changeSet.appearanceChanged { survivors.append((prevIdx: e.prevIdx, nextIdx: e.nextIdx)) }
+        for e in changeSet.mediaChanged  { survivors.append((prevIdx: e.prevIdx, nextIdx: e.nextIdx)) }
 
-        // Recycle cells for removed items.
-        let removedIDs = Set(changeSet.removed.map(\.itemID))
-        let removedIndicesInOld: [Int] = tables.indices.filter { removedIDs.contains(tables[$0].itemID) }
-        for idx in removedIndicesInOld {
-            if let cell = visibleCells.removeValue(forKey: idx) {
+        // Recycle cells for removed items — prevIdx is the old index in visibleCells.
+        for r in changeSet.removed {
+            if let cell = visibleCells.removeValue(forKey: r.prevIdx) {
                 returnToPool(cell)
             }
         }
@@ -217,7 +218,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         snapshot = nextSnapshot
         tables = nextTables
 
-        rebuildFrames(using: knownHeights)
+        rebuildFrames(oldFrames: oldFrames, survivors: survivors)
 
         if needsFullInvalidation {
             for (_, cell) in visibleCells {
@@ -227,24 +228,19 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             visibleCells.removeAll(keepingCapacity: true)
             _pendingFragmentIndices.removeAll(keepingCapacity: true)
         } else {
-            let newIndexByItemID = Dictionary(
-                uniqueKeysWithValues: tables.enumerated().map { ($1.itemID, $0) }
-            )
-            for (_, next) in changeSet.appearanceChanged {
-                guard let idx = newIndexByItemID[next.itemID],
-                      let cell = visibleCells[idx],
-                      let wrEntry = workingRange.entry(at: idx) else { continue }
-                let freshFragments = extractFragments(table: next, layout: wrEntry.layout)
+            for e in changeSet.appearanceChanged {
+                guard let cell = visibleCells[e.nextIdx],
+                      let wrEntry = workingRange.entry(at: e.nextIdx) else { continue }
+                let freshFragments = extractFragments(table: e.next, layout: wrEntry.layout)
                 cell.cancelPendingMedia()
-                spawnMediaFetches(for: cell, fragments: freshFragments, itemID: next.itemID)
+                spawnMediaFetches(for: cell, fragments: freshFragments, itemID: e.next.itemID)
             }
-            for (_, next) in changeSet.mediaChanged {
-                guard let idx = newIndexByItemID[next.itemID],
-                      let cell = visibleCells[idx],
-                      let wrEntry = workingRange.entry(at: idx) else { continue }
-                let freshFragments = extractFragments(table: next, layout: wrEntry.layout)
+            for e in changeSet.mediaChanged {
+                guard let cell = visibleCells[e.nextIdx],
+                      let wrEntry = workingRange.entry(at: e.nextIdx) else { continue }
+                let freshFragments = extractFragments(table: e.next, layout: wrEntry.layout)
                 cell.cancelPendingMedia()
-                spawnMediaFetches(for: cell, fragments: freshFragments, itemID: next.itemID)
+                spawnMediaFetches(for: cell, fragments: freshFragments, itemID: e.next.itemID)
             }
         }
 
@@ -262,18 +258,23 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     // MARK: - Frame management
 
     /// Rebuilds `resolvedFrames` in the current `tables` order.
-    /// Heights from `knownHeights` when available; falls back to `estimatedItemHeight`.
+    /// Heights are read from `oldFrames[s.prevIdx]` for each survivor (prevIdx, nextIdx) pair;
+    /// indices absent from `survivors` fall back to `estimatedItemHeight`.
     /// Populates `estimatedIndices` for any index using the estimate.
-    private func rebuildFrames(using knownHeights: [AnyHashable: CGFloat]) {
+    private func rebuildFrames(oldFrames: [CGRect], survivors: [(prevIdx: Int, nextIdx: Int)]) {
         let w = lastLayoutWidth > 0 ? lastLayoutWidth : bounds.width
         let spacing = layoutSpacing
+        var knownHeight = [CGFloat?](repeating: nil, count: tables.count)
+        for s in survivors where s.prevIdx < oldFrames.count {
+            knownHeight[s.nextIdx] = oldFrames[s.prevIdx].height
+        }
         resolvedFrames.removeAll(keepingCapacity: true)
         estimatedIndices.removeAll(keepingCapacity: true)
         var cursor: CGFloat = 0
         let last = tables.count - 1
-        for (i, table) in tables.enumerated() {
+        for i in tables.indices {
             let h: CGFloat
-            if let known = knownHeights[table.itemID] {
+            if let known = knownHeight[i] {
                 h = known
             } else {
                 h = estimatedItemHeight
@@ -342,7 +343,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     private func handleWidthChange() {
         workingRange.invalidateAll()
         lastNotifiedLeadingIndex = -1
-        rebuildFrames(using: [:])
+        rebuildFrames(oldFrames: [], survivors: [])
         syncContentSize()
         // LayoutCache eviction is async (actor-isolated). Between here and when invalidateAll()
         // completes, a boundary-crossing notifyPipelineIfNeeded will miss on the new-width key —
