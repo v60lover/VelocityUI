@@ -554,7 +554,7 @@ Sources/VelocityUI/
 
 | Decision | Choice | One-line why |
 |---|---|---|
-| iOS minimum | 16.0 | TextKit 2 |
+| iOS minimum | 17.0 | `View` is `@MainActor`-isolated (lets `@State private var env = RenderEnvironment()` compile under Swift 6); scene-based traits; ~93% device coverage in 2026 |
 | Concurrency | Swift 6 strict | Compile-time safety (asterisk: pooled `@unchecked Sendable` TextKit contexts) |
 | UICollectionView | ❌ | Fights the architecture; costs accepted for v1 |
 | UIView per cell | ❌ | No UIKit layout pass; GPU compositing; main thread idle |
