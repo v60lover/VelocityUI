@@ -67,6 +67,24 @@ public final class RenderCell {
 
         layer.addSublayer(placeholderLayer)
         layer.addSublayer(contentLayer)
+
+        layer.actions = [
+            "position":  NSNull(),
+            "bounds":    NSNull(),
+            "opacity":   NSNull(),
+            "sublayers": NSNull(),
+        ]
+
+        #if DEBUG
+        assert(layer.actions?["position"] is NSNull,
+            "cell.layer must suppress 'position' implicit animation — do not remove from layer.actions")
+        assert(layer.actions?["bounds"] is NSNull,
+            "cell.layer must suppress 'bounds' implicit animation — do not remove from layer.actions")
+        assert(layer.actions?["opacity"] is NSNull,
+            "cell.layer must suppress 'opacity' implicit animation — do not remove from layer.actions")
+        assert(layer.actions?["sublayers"] is NSNull,
+            "cell.layer must suppress 'sublayers' implicit animation — do not remove from layer.actions")
+        #endif
     }
 
     // MARK: - Lifecycle

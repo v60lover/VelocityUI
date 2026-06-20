@@ -438,6 +438,25 @@ final class RenderCellTests: XCTestCase {
             "Geometry sublayer must not carry image placeholder tint")
     }
 
+    // MARK: - Test 17: cell.layer suppresses implicit animations on frame changes (snap-only contract)
+
+    func testCellLayerSuppressesImplicitAnimationsOnFrameChange() {
+        // Window-connected, unfrozen: without suppression, frame changes produce
+        // position/bounds implicit animations visible in animationKeys() for 0.25 s.
+        // speed=0 bypasses implicit animation creation entirely; unfrozen means nil
+        // animationKeys() proves suppression via layer.actions, not speed bypass.
+        let (cell, _window) = makeCellInWindowUnfrozen()
+        CATransaction.flush()  // commit the addSublayer
+
+        cell.layer.frame = CGRect(x: 0, y: 50, width: 300, height: 350)
+        CATransaction.flush()
+
+        XCTAssertNil(cell.layer.animationKeys(),
+            "cell.layer must not carry implicit animations after frame change — " +
+            "layer.actions must suppress position/bounds/opacity/sublayers so all " +
+            "FeedScrollView mount sites snap without animating")
+    }
+
     // MARK: - Test 16: applyContent with mismatched itemID is a no-op (Latent 3 privacy guard)
 
     func testApplyContentWithMismatchedItemIDIsNoOp() {
