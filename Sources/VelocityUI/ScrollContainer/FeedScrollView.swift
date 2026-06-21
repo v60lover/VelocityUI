@@ -39,6 +39,19 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// Fired at most once per page; resets when `items.count` grows.
     public var onReachEnd: (@Sendable () async -> Void)?
 
+    /// Opt-in: return a value whose change should invalidate the cached NodeTable for that ID.
+    ///
+    /// When `nil` (default), every `itemsDidChange` call rebuilds all NodeTables — preserving
+    /// existing behavior bit-for-bit. When non-nil, items whose signature equals the cached
+    /// value skip `cellBuilder` and `flatten` entirely — eliminating the dominant builder+flatten
+    /// cost for unchanged items.
+    ///
+    /// Contract: if `sig(a) == sig(b)` and `a.id == b.id`, then
+    /// `flatten(cellBuilder(a), itemID: a.id)` MUST produce the same NodeTable as
+    /// `flatten(cellBuilder(b), itemID: b.id)`. Violations manifest as stale UI, not crashes.
+    /// Mirrors SwiftUI's `Equatable` view identity contract. Caller's responsibility.
+    public var itemSignature: ((Item) -> AnyHashable)? = nil
+
     // MARK: - Items
 
     public var items: [Item] = [] {
@@ -81,6 +94,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// refineKnownFrames delivers real fragments and spawns media fetches when entries arrive.
     private var _pendingFragmentIndices: Set<Int> = []
 
+    private var tableCache: [Item.ID: (sig: AnyHashable, table: NodeTable)] = [:]
+
     /// Placeholder height for items not yet measured by the pipeline.
     /// Affects the initial contentSize and the scroll distance to the first real layout.
     /// Tunable via init — useful when content is known to be significantly taller or shorter than 300 pt.
@@ -95,6 +110,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// Counts Task spawns from leading-index boundary crossings inside `notifyPipelineIfNeeded`.
     /// Does NOT count the one-shot `onReachEnd` spawn — that fires at most once per page.
     private(set) var _taskSpawnCount: Int = 0
+    #endif
+
+    #if canImport(XCTest)
+    var _tableCacheCount: Int { tableCache.count }
     #endif
 
     // MARK: - Init
@@ -179,7 +198,24 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     private func itemsDidChange(from oldItems: [Item]) {
         guard let builder = cellBuilder else { return }
 
-        let nextTables = items.map { flatten(builder($0), itemID: $0.id) }
+        var nextTables: [NodeTable] = []
+        nextTables.reserveCapacity(items.count)
+        let signature = itemSignature
+        for item in items {
+            let sig: AnyHashable = signature?(item) ?? AnyHashable(UUID())
+            if let hit = tableCache[item.id], hit.sig == sig {
+                nextTables.append(hit.table)
+            } else {
+                let table = flatten(builder(item), itemID: item.id)
+                nextTables.append(table)
+                tableCache[item.id] = (sig, table)
+            }
+        }
+        if tableCache.count > items.count {
+            let activeIDs = Set(items.lazy.map(\.id))
+            let toRemove = tableCache.keys.filter { !activeIDs.contains($0) }
+            for key in toRemove { tableCache.removeValue(forKey: key) }
+        }
         let nextSnapshot = LayoutSnapshot(tables: nextTables)
         let changeSet = differ.diff(prev: snapshot, next: nextSnapshot)
 
