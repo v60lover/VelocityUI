@@ -19,7 +19,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     // MARK: - Configuration
 
     /// Builds the DSL node tree for each item. Must be set before assigning `items`.
-    public var cellBuilder: ((Item) -> any RenderNode)?
+    public var cellBuilder: (@MainActor (Item) -> any RenderNode)?
 
     /// Number of items to prefetch ahead of the visible leading edge.
     /// Set at init — changing after construction requires a new FeedScrollView
@@ -35,9 +35,13 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// must not silently move the page-load trigger.
     public let reachEndThreshold: Int
 
+    /// Called when a user taps a cell. Receives the tapped item and its frame in
+    /// scroll-content coordinates.
+    public var onTap: (@MainActor (Item, CGRect) -> Void)?
+
     /// Called when the visible trailing edge nears the end of the item list.
     /// Fired at most once per page; resets when `items.count` grows.
-    public var onReachEnd: (@Sendable () async -> Void)?
+    public var onReachEnd: (@MainActor () async -> Void)?
 
     /// Opt-in: return a value whose change should invalidate the cached NodeTable for that ID.
     ///
@@ -64,6 +68,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     private let workingRange: WorkingRange
     private let differ: RenderDiffer
     private let environment: RenderEnvironment
+
+    /// Read-only view of the composition root.
+    /// Exposed for external lifecycle coordination and test double injection.
+    public var renderEnvironment: RenderEnvironment { environment }
 
     // MARK: - State
 
@@ -161,6 +169,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         super.init(frame: frame)
         showsVerticalScrollIndicator = true
         showsHorizontalScrollIndicator = false
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+        addGestureRecognizer(tap)
     }
 
     @available(*, unavailable)
@@ -514,6 +524,20 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         Task { await handler() }
     }
 
+    // MARK: - Tap handling
+
+    @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
+        // UIScrollView: bounds.origin = contentOffset, so gesture.location(in:) is already content-space.
+        let contentPt = gesture.location(in: self)
+        for (index, _) in visibleCells {
+            guard index < resolvedFrames.count, index < items.count else { continue }
+            if resolvedFrames[index].contains(contentPt) {
+                onTap?(items[index], resolvedFrames[index])
+                return
+            }
+        }
+    }
+
     // MARK: - Cell pool helpers
 
     /// Returns a cell from the pool, or allocates a new one.
@@ -586,6 +610,16 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             }
             cell.addMediaHandle(MediaHandle(task: task))
         }
+    }
+
+    // MARK: - Teardown
+
+    /// Cancels all in-flight decode tasks on visible cells and the pipeline's
+    /// prefetch task. Safe to call before the view is removed from its parent.
+    public func cancelInFlightWork() {
+        for cell in visibleCells.values { cell.cancelPendingMedia() }
+        let pipeline = self.pipeline
+        Task { await pipeline.markInvalidated() }
     }
 }
 #endif
