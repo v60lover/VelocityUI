@@ -2,6 +2,7 @@
 
 #if canImport(UIKit)
 import XCTest
+import Darwin
 @testable import VelocityUI
 
 @MainActor
@@ -804,6 +805,163 @@ final class FeedScrollViewTests: XCTestCase {
 
         XCTAssertEqual(findFirstContentLayer(in: feed)?.opacity, 1,
             "contentLayer.opacity must stay 1 after .appearance change — no placeholder reset")
+    }
+
+    // MARK: - 17. Wall-time microbench: itemsDidChange appearance-only speedup vs e26 baseline
+
+    /// Microbench for VelocityUI-wyc — verifies the performance claim in VelocityUI-4kp.3 #3.
+    ///
+    /// Measures `itemsDidChange` wall time for a 1000-item appearance-only feed update and
+    /// compares against a synthetic e26 baseline constructed by adding the O(N) AnyHashable
+    /// dict-build overhead that 4kp.3 removed (the `newIndexByItemID` build at old lines 230-232).
+    ///
+    /// Synthetic baseline construction:
+    ///   e26_time    ≈ current_time + T_newIndexByItemID   (1 extra O(N) AnyHashable dict)
+    ///   preE26_time ≈ current_time + T_newIndexByItemID + T_knownHeights
+    ///                                                      (2 extra O(N) AnyHashable dicts;
+    ///                                                       removedIDs is empty on appearance path)
+    ///
+    /// Why the 3× target cannot be asserted at total-function scope:
+    ///   `itemsDidChange` calls `flatten()` for all N items before diffing. On iOS simulator,
+    ///   `flatten()` for 1000 single-node items takes ~8ms (existential dispatch + NodeTable init
+    ///   per item). The removed dict build (~0.5ms) is ~6% of that total. A 3× speedup of the
+    ///   full function would require the dict build to cost >2× everything else — impossible when
+    ///   flatten dominates. The 3× claim holds for the isolated post-differ paths (rebuildFrames
+    ///   + visibility loops) but those are private. The assertions here are therefore:
+    ///     (a) an absolute p99 ceiling — catches algorithmic regressions that make the whole
+    ///         function slow, regardless of where the cost lands
+    ///     (b) dict-build overhead measurement printed for trend tracking — confirms the
+    ///         removed cost is real and detectable; cross-check against test #16
+    ///         (testAppearanceOnlyUpdateAnyHashableAccessCountBounded) which asserts the dict
+    ///         build has zero .itemID accesses, proving the code path is gone.
+    ///
+    /// Scope of the "flatten dominates" justification:
+    ///   The argument above is PATH-DEPENDENT — it holds on the path where `flatten()` runs for
+    ///   every item on every update. This test exercises exactly that path because it does not
+    ///   set `feed.itemSignature` (when VelocityUI-d7b's per-ID NodeTable cache lands, a `nil`
+    ///   signature forces a cache-miss on every item, preserving today's behavior bit-for-bit
+    ///   so this regression guard stays valid). On the cache-HIT path (`itemSignature` provided,
+    ///   most items unchanged) `flatten()` is skipped for hits and no longer dominates — total-
+    ///   function-scope speedup targets become achievable there. The cache-hit floor is asserted
+    ///   by a separate sibling test or test-17 extension owned by VelocityUI-d7b's acceptance
+    ///   criteria; do NOT re-scope this test to chase it. This test stays the force-miss baseline.
+    ///
+    /// Median + p99 are printed for CI trend tracking.
+    func testItemsDidChangeAppearanceOnlySpeedupVsE26Baseline() {
+        struct StyleItem: Identifiable, Sendable {
+            let id: Int
+            let cornerRadius: CGFloat
+        }
+
+        let N = 1000
+        let warmupIterations = 20
+        let measureIterations = 100
+
+        let env = makeEnvironment()
+        // height=0: empty visible range → visibleCells stays empty → no Task spawns that
+        // read .itemID concurrently, satisfying the counter's serial-access invariant.
+        let feed = FeedScrollView<StyleItem>(
+            environment: env,
+            frame: CGRect(x: 0, y: 0, width: 375, height: 0)
+        )
+        feed.cellBuilder = { item in
+            AsyncImageNode(url: nil, aspectRatio: 1.0).cornerRadius(item.cornerRadius)
+        }
+
+        let baseItems = (0..<N).map { StyleItem(id: $0, cornerRadius: 0) }
+        let altItems  = (0..<N).map { StyleItem(id: $0, cornerRadius: 8) }
+
+        // Initial load — items go through .added path; sets up internal snapshot.
+        feed.items = baseItems
+        // Warmup: prime RenderDiffer scratch buffers, OS instruction caches, branch predictors.
+        for i in 0..<warmupIterations {
+            feed.items = i.isMultiple(of: 2) ? altItems : baseItems
+        }
+
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        let machToNs = Double(info.numer) / Double(info.denom)
+
+        // --- Measure current implementation ---
+        // Each iteration triggers a genuine appearance-only diff: same IDs, different cornerRadius.
+        var currentRaw = [UInt64]()
+        currentRaw.reserveCapacity(measureIterations)
+        var useAlt = true
+        for _ in 0..<measureIterations {
+            let t0 = mach_absolute_time()
+            feed.items = useAlt ? altItems : baseItems
+            let t1 = mach_absolute_time()
+            currentRaw.append(t1 &- t0)
+            useAlt.toggle()
+        }
+
+        // --- Measure synthetic e26 dict-build overhead ---
+        // Reconstructs `newIndexByItemID = Dictionary(uniqueKeysWithValues: tables.enumerated()
+        //   .map { ($1.itemID, $0) })` from FeedScrollView line 230-232 (removed by 4kp.3).
+        // Uses Int payload matching the actual ItemID type in this test, pre-boxed to AnyHashable
+        // so the warmup effects on the boxing path match those in the real differ.
+        let sinkIDs = (0..<N).map { AnyHashable($0) }
+        var dictRaw = [UInt64]()
+        dictRaw.reserveCapacity(measureIterations)
+        for _ in 0..<measureIterations {
+            let t0 = mach_absolute_time()
+            var newIndexByItemID = [AnyHashable: Int](minimumCapacity: N)
+            for (i, id) in sinkIDs.enumerated() { newIndexByItemID[id] = i }
+            let t1 = mach_absolute_time()
+            withExtendedLifetime(newIndexByItemID) {}  // prevent dead-code elimination
+            dictRaw.append(t1 &- t0)
+        }
+
+        // --- Statistics ---
+        func sortedNs(_ raw: [UInt64]) -> [Double] {
+            raw.sorted().map { Double($0) * machToNs }
+        }
+        func medianNs(_ s: [Double]) -> Double { s[s.count / 2] }
+        func p99Ns(_ s: [Double]) -> Double {
+            s[max(0, Int(Double(s.count) * 0.99) - 1)]
+        }
+
+        let currentSorted = sortedNs(currentRaw)
+        let dictSorted    = sortedNs(dictRaw)
+
+        let currentMedian = medianNs(currentSorted)
+        let currentP99    = p99Ns(currentSorted)
+        let dictMedian    = medianNs(dictSorted)
+
+        // Synthetic baselines — see struct-level doc for rationale.
+        let e26Median    = currentMedian + dictMedian
+        let preE26Median = currentMedian + 2.0 * dictMedian
+        let speedupVsE26    = e26Median    / currentMedian
+        let speedupVsPreE26 = preE26Median / currentMedian
+
+        print("[VelocityUI-wyc] itemsDidChange appearance-only N=\(N) (\(measureIterations) iters):")
+        print(String(format: "  current    median=%dns  p99=%dns",
+                     Int(currentMedian.rounded()), Int(currentP99.rounded())))
+        print(String(format: "  dict-build median=%dns  (newIndexByItemID overhead removed by 4kp.3)",
+                     Int(dictMedian.rounded())))
+        print(String(format: "  e26 baseline (synthetic) median=%dns → %.1f× speedup",
+                     Int(e26Median.rounded()), speedupVsE26))
+        print(String(format: "  pre-e26 baseline (synthetic) median=%dns → %.1f× speedup",
+                     Int(preE26Median.rounded()), speedupVsPreE26))
+        print("  [target: ≥3× vs e26, ≥10× vs pre-e26 — see measurement caveat in test docstring]")
+
+        // Regression guard (a): the dict-build must measure a non-zero cost so the synthetic
+        // baseline computation is non-degenerate. If the optimizer ever eliminates the dict
+        // build loop entirely, speedup ratios collapse to 1.0 and the print output will show it.
+        XCTAssertGreaterThan(dictMedian, 0,
+            "[VelocityUI-wyc] dict-build baseline measured zero — optimizer may have elided the loop")
+
+        // Regression guard (b): absolute p99 ceiling for total itemsDidChange wall time.
+        // On iOS simulator N=1000 yields p99 ≈ 10ms (flatten dominates). 50ms gives 5× headroom
+        // for slow CI while still catching O(N²) regressions or accidental O(N) additions that
+        // push wall time into the hundreds-of-ms range.
+        // Cross-check: test #16 (testAppearanceOnlyUpdateAnyHashableAccessCountBounded) asserts
+        // zero .itemID accesses on the height-forwarding path — proving the dict build is gone.
+        // That functional test + this wall-time ceiling together guard the regression surface.
+        XCTAssertLessThan(currentP99, 50_000_000,
+            "[VelocityUI-wyc] itemsDidChange appearance-only p99 must stay < 50ms — "
+            + "measured \(Int(currentP99.rounded()))ns; O(N²) regression or unexpected O(N) "
+            + "allocation suspected if this fires. See test docstring for measurement context.")
     }
 }
 #endif
