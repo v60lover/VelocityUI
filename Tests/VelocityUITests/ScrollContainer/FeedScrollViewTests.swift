@@ -694,6 +694,59 @@ final class FeedScrollViewTests: XCTestCase {
         )
     }
 
+    // MARK: - 16. AnyHashable access counter: appearance-only itemsDidChange stays within differ-only bound
+
+    /// Guards the invariant that itemsDidChange's height-forwarding path reads .itemID zero
+    /// times — it uses (prevIdx, nextIdx) integer pairs, never an [AnyHashable: _] dict.
+    ///
+    /// NodeTable._itemIDCounter counts every .itemID property read (not AnyHashable constructions).
+    /// RenderDiffer.diff with N all-surviving appearance-changed items reads .itemID exactly 4×N
+    /// times: scratchPrevIndex build (N), lookup (N), removeValue (N), removed-check loop (N).
+    /// itemsDidChange's height-forwarding (survivors/rebuildFrames) adds zero reads.
+    /// A regression that rebuilds an [AnyHashable: _] dict for height-forwarding (+N inserts,
+    /// +N lookups) raises the counter to 6×N and the assertion fails.
+    ///
+    /// frame.height=0 keeps visibleCells empty so the appearance-changed loop's spawnMediaFetches
+    /// call — which reads e.next.itemID once per visible cell — never executes. This isolates
+    /// the measurement to the differ only and satisfies _itemIDCounter's serial-access invariant
+    /// (no concurrent Task spawns that could read .itemID during the window).
+    func testAppearanceOnlyUpdateAnyHashableAccessCountBounded() {
+        struct StyleItem: Identifiable, Sendable {
+            let id: Int
+            let cornerRadius: CGFloat
+        }
+
+        let N = 5
+        let env = makeEnvironment()
+        // height=0: empty visible range → visibleCells stays empty → no Task spawns that
+        // could read .itemID concurrently, satisfying the counter's serial-access invariant.
+        let feed = FeedScrollView<StyleItem>(
+            environment: env,
+            frame: CGRect(x: 0, y: 0, width: 375, height: 0)
+        )
+        feed.cellBuilder = { item in
+            AsyncImageNode(url: nil, aspectRatio: 1.0).cornerRadius(item.cornerRadius)
+        }
+
+        // Initial load: all N items go to scratchAdded (N lookup-miss reads). Counter grows but
+        // we reset it immediately after so the measurement is isolated to the appearance update.
+        feed.items = (0..<N).map { StyleItem(id: $0, cornerRadius: 0) }
+        NodeTable._itemIDCounter = 0
+
+        // Appearance-only update: same IDs, cornerRadius 0→8 changes appearanceHash only.
+        // AsyncImageNode.layoutHash excludes cornerRadius; AsyncImageNode.appearanceHash includes it.
+        feed.items = (0..<N).map { StyleItem(id: $0, cornerRadius: 8) }
+
+        let count = NodeTable._itemIDCounter
+        // Counter must not exceed 4×N (differ-only floor). A regression that rebuilds an
+        // [AnyHashable: _] dict for height-forwarding adds 2N reads, pushing count to 6×N.
+        XCTAssertLessThanOrEqual(
+            count, 4 * N,
+            ".itemID read count \(count) exceeds the differ-only floor \(4 * N) — "
+            + "itemsDidChange must not build an [AnyHashable: _] height-forwarding dict"
+        )
+    }
+
     // MARK: - 15. Appearance change preserves cell identity (no recycle on .appearance)
 
     func testAppearanceChangeDoesNotRecycleVisibleCell() async throws {

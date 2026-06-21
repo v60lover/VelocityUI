@@ -149,7 +149,36 @@ public enum NodeKind: Sendable {
 /// practice. Do not remove the annotation without first making AnyHashable Sendable upstream.
 public struct NodeTable: Sendable {
     // See struct-level doc for the full rationale on nonisolated(unsafe) here.
-    nonisolated(unsafe) public let itemID: AnyHashable
+    nonisolated(unsafe) private let _itemID: AnyHashable
+
+    #if canImport(XCTest)
+    // No-singletons exemption: gated test-only instrumentation. Dependency-injecting the
+    // counter through nonisolated pure helpers (classify, measureNode) would violate
+    // CLAUDE.md §4 ("pure — inputs in, value out, no implicit cache lookup"); static
+    // placement is the lesser violation.
+    //
+    // Counts every .itemID read (not AnyHashable constructions). RenderDiffer.diff reads
+    // .itemID 4 times per surviving item (prevIndex build, lookup, removeValue, removed-check).
+    // itemsDidChange height-forwarding adds zero reads — it uses (prevIdx, nextIdx) pairs.
+    // A regression that rebuilds an [AnyHashable: _] dict for height-forwarding raises the
+    // count to 6×N; test assertions catch it.
+    //
+    // Serial-access invariant: the per-update 4×N bound assumes no concurrent Task reads
+    // .itemID during the measurement window. This is NOT thread-safe by type — the caller
+    // must enforce serial access. testAppearanceOnlyUpdateAnyHashableAccessCountBounded
+    // achieves this by using frame.height=0, which prevents updateVisibleCells Task spawns.
+    // Any test that reads this counter while a concurrent Task could read .itemID will
+    // under-count and produce a false-passing result.
+    nonisolated(unsafe) static var _itemIDCounter: Int = 0
+    #endif
+
+    public var itemID: AnyHashable {
+        #if canImport(XCTest)
+        NodeTable._itemIDCounter += 1
+        #endif
+        return _itemID
+    }
+
     public let nodes: [NodeKind]
     public let parentIndices: [Int]  // parentIndices[i] = parent of node i; -1 for root
     public let layoutHash: Int
@@ -172,7 +201,7 @@ public struct NodeTable: Sendable {
         layoutHash: Int,
         appearanceHash: Int
     ) {
-        self.itemID = AnyHashable(itemID)
+        self._itemID = AnyHashable(itemID)
         self.nodes = nodes
         self.parentIndices = parentIndices
         self.layoutHash = layoutHash
