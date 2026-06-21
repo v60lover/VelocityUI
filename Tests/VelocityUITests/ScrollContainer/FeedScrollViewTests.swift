@@ -1108,6 +1108,44 @@ final class FeedScrollViewTests: XCTestCase {
     }
     #endif
 
+    // MARK: - 21b. itemSignature mixed add+remove eviction removes replaced ID
+
+    #if canImport(XCTest)
+    func testItemSignatureEvictsReplacedIDs() {
+        struct Item: Identifiable, Sendable { let id: Int }
+
+        let N = 5
+        let env = makeEnvironment()
+        let feed = FeedScrollView<Item>(
+            environment: env,
+            frame: CGRect(x: 0, y: 0, width: 375, height: 0)
+        )
+
+        final class Counter { var value = 0 }
+        let counter = Counter()
+
+        feed.itemSignature = { AnyHashable($0.id) }
+        feed.cellBuilder = { _ in
+            counter.value += 1
+            return AsyncImageNode(url: nil, aspectRatio: 1.0)
+        }
+
+        feed.items = (1...N).map { Item(id: $0) }
+        XCTAssertEqual(feed._tableCacheCount, N,
+            "Cache must have N entries after initial load")
+
+        // Swap id=5 for id=6 — same count, but id=5 must be evicted and id=6 added.
+        // After the items loop: ids 1–4 hit, id=6 misses → cache grows to N+1 (6 entries).
+        // tableCache.count (6) > items.count (5) → eviction removes id=5 → back to N.
+        counter.value = 0
+        feed.items = (1..<N).map { Item(id: $0) } + [Item(id: 6)]
+        XCTAssertEqual(feed._tableCacheCount, N,
+            "Mixed add+remove: eviction must shed replaced id=5, leaving cache.count == items.count")
+        XCTAssertEqual(counter.value, 1,
+            "Only the new id=6 must trigger a builder call — ids 1–4 hit cache")
+    }
+    #endif
+
     // MARK: - 22. Cache-hit floor: N=1000, 1 changed → builder called once, speedup ≥ 2×
 
     /// Brackets the d7b identity+signature cache perf envelope with two measurement loops.

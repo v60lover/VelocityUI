@@ -126,6 +126,16 @@ public actor RenderPipeline {
         }
     }
 
+    /// Resets dedup state and cancels any in-flight prefetch so the next
+    /// `onIndexBoundary` call with the same leading index is not skipped by the
+    /// guard on line 57 — necessary after `WorkingRange.invalidateAll()` wipes
+    /// all entries and the leading index hasn't changed.
+    public func markInvalidated() {
+        lastLeadingIndex = -1
+        prefetchTask?.cancel()
+        prefetchTask = nil
+    }
+
     /// Awaits the current prefetch task. Used in tests to synchronise assertions.
     public func waitForCurrentPrefetch() async {
         await prefetchTask?.value

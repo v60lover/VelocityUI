@@ -200,21 +200,26 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
         var nextTables: [NodeTable] = []
         nextTables.reserveCapacity(items.count)
-        let signature = itemSignature
-        for item in items {
-            let sig: AnyHashable = signature?(item) ?? AnyHashable(UUID())
-            if let hit = tableCache[item.id], hit.sig == sig {
-                nextTables.append(hit.table)
-            } else {
-                let table = flatten(builder(item), itemID: item.id)
-                nextTables.append(table)
-                tableCache[item.id] = (sig, table)
+        if let signature = itemSignature {
+            for item in items {
+                let sig = signature(item)
+                if let hit = tableCache[item.id], hit.sig == sig {
+                    nextTables.append(hit.table)
+                } else {
+                    let table = flatten(builder(item), itemID: item.id)
+                    nextTables.append(table)
+                    tableCache[item.id] = (sig, table)
+                }
             }
-        }
-        if tableCache.count > items.count {
-            let activeIDs = Set(items.lazy.map(\.id))
-            let toRemove = tableCache.keys.filter { !activeIDs.contains($0) }
-            for key in toRemove { tableCache.removeValue(forKey: key) }
+            if tableCache.count > items.count {
+                let activeIDs = Set(items.lazy.map(\.id))
+                let toRemove = tableCache.keys.filter { !activeIDs.contains($0) }
+                for key in toRemove { tableCache.removeValue(forKey: key) }
+            }
+        } else {
+            for item in items {
+                nextTables.append(flatten(builder(item), itemID: item.id))
+            }
         }
         let nextSnapshot = LayoutSnapshot(tables: nextTables)
         let changeSet = differ.diff(prev: snapshot, next: nextSnapshot)
@@ -249,6 +254,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                                     !changeSet.added.isEmpty
         if needsFullInvalidation {
             workingRange.invalidateAll()
+            let pipeline = self.pipeline
+            Task { await pipeline.markInvalidated() }
         }
 
         snapshot = nextSnapshot
@@ -378,6 +385,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
     private func handleWidthChange() {
         workingRange.invalidateAll()
+        let pipeline = self.pipeline
+        Task { await pipeline.markInvalidated() }
         lastNotifiedLeadingIndex = -1
         rebuildFrames(oldFrames: [], survivors: [])
         syncContentSize()
