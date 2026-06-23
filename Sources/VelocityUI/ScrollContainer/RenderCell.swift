@@ -187,6 +187,15 @@ public final class RenderCell {
 
     // MARK: - Content
 
+    #if canImport(XCTest)
+    /// Counts applyContent privacy-guard rejections (stale itemID deliveries).
+    /// In normal fast-scroll operation this should be zero — cancelled Tasks return nil before
+    /// reaching applyContent. Non-zero counts indicate a cancellation-propagation gap.
+    /// Serial-access invariant: reads/writes happen on @MainActor only (RenderCell is @MainActor);
+    /// the nonisolated(unsafe) annotation is a formality for @testable cross-module access.
+    nonisolated(unsafe) static var _privacyGuardFiredCount: Int = 0
+    #endif
+
     /// Apply a pre-decoded BGRA8888-normalised image. Crossfades contents over 0.2 s via
     /// CATransition (CALayer.contents has no default CA action; setAnimationDuration alone
     /// would produce an instant swap). Fades out the placeholder once ALL image fragments arrive.
@@ -197,7 +206,12 @@ public final class RenderCell {
     public func applyContent(id: Int, image: CGImage, for itemID: AnyHashable) {
         // Privacy guard: reject stale callbacks from a previous item's fetch.
         // nil currentItemID means the cell is fresh/unbound — any delivery is accepted.
-        if let currentID = currentItemID, currentID != itemID { return }
+        if let currentID = currentItemID, currentID != itemID {
+            #if canImport(XCTest)
+            RenderCell._privacyGuardFiredCount += 1
+            #endif
+            return
+        }
         guard let sub = sublayers[id] else { return }
 
         let fade = CATransition()

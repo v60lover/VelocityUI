@@ -108,6 +108,10 @@ public actor ImageActor {
         cache.totalCostLimit = 64 * 1024 * 1024
         self.session = session
         self.dimensionCache = dimensionCache
+        #if canImport(XCTest)
+        // Tag decodeQueue so the async closure can verify it is on the right queue.
+        decodeQueue.setSpecific(key: _testDecodeQueueKey, value: true)
+        #endif
     }
 
     /// Test-only convenience: creates a private DimensionCache not shared with any other
@@ -119,6 +123,39 @@ public actor ImageActor {
     // MARK: - Test hooks
 
     #if canImport(XCTest)
+    /// DispatchSpecificKey set on decodeQueue so the decode closure can assert
+    /// it is running on the expected queue rather than the cooperative pool.
+    /// Captured as a local before `withCheckedContinuation` to avoid retaining `self` in the async closure.
+    nonisolated let _testDecodeQueueKey = DispatchSpecificKey<Bool>()
+
+    /// Counts decode closures that ran on velocityui.image.decode (expected) vs other queues.
+    /// Protected by _testDecodeLock — lock makes writes safe across concurrent Task/queue threads.
+    /// Pattern matches NodeTable._itemIDCounter — nonisolated(unsafe) is the lesser violation.
+    ///
+    /// Serial-test invariant: these static counters assume one ImageActor instance is under
+    /// test at a time and no concurrent test-suite processes share them. Call
+    /// _testDecodeResetCounts() before each test that reads these values. Any test that reads
+    /// the counters while a concurrent test target could be running decodes will produce
+    /// false-passing or under-counted results.
+    nonisolated(unsafe) private static let _testDecodeLock = NSLock()
+    nonisolated(unsafe) static var _testDecodeOnQueueCount: Int = 0
+    nonisolated(unsafe) static var _testDecodeTotalCount: Int = 0
+
+    nonisolated static func _testDecodeRecord(onQueue: Bool) {
+        ImageActor._testDecodeLock.lock()
+        defer { ImageActor._testDecodeLock.unlock() }
+        ImageActor._testDecodeTotalCount += 1
+        if onQueue { ImageActor._testDecodeOnQueueCount += 1 }
+    }
+
+    /// Reset counters before each test that checks decode queue isolation.
+    nonisolated static func _testDecodeResetCounts() {
+        ImageActor._testDecodeLock.lock()
+        defer { ImageActor._testDecodeLock.unlock() }
+        ImageActor._testDecodeOnQueueCount = 0
+        ImageActor._testDecodeTotalCount = 0
+    }
+
     /// Injected by unit tests to interpose before `image()` returns.
     ///
     /// When non-nil, `image()` suspends at this hook before the cache-hit check.
@@ -207,6 +244,11 @@ public actor ImageActor {
         //    withCheckedContinuation is safe: every DispatchQueue.async path calls
         //    cont.resume exactly once (explicit success path + guard-else paths).
         let sem = decodeSemaphore
+        #if canImport(XCTest)
+        // Capture key here (actor-isolated context) so the @Sendable async closure
+        // can call DispatchQueue.getSpecific without retaining self.
+        let capturedQueueKey = _testDecodeQueueKey
+        #endif
         let result: DecodeResult = await withCheckedContinuation { cont in
             let capturedData = data
             let capturedSize = targetSize
@@ -218,6 +260,11 @@ public actor ImageActor {
             // calling Task's priority. Prefetch decodes should run at .utility. Deferred to
             // fling-handling.
             decodeQueue.async {
+                #if canImport(XCTest)
+                // Verify we are running on velocityui.image.decode (not the cooperative pool).
+                let onDecodeQueue = DispatchQueue.getSpecific(key: capturedQueueKey) == true
+                ImageActor._testDecodeRecord(onQueue: onDecodeQueue)
+                #endif
                 #if DEBUG
                 let decodeStart = CFAbsoluteTimeGetCurrent()
                 #endif

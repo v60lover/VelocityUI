@@ -122,6 +122,22 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
     #if canImport(XCTest)
     var _tableCacheCount: Int { tableCache.count }
+
+    /// Returns nil-entry count in WorkingRange for indices in [start, end).
+    /// Used by the Phase 1 integration suite to re-validate the Spike 2 ring-buffer
+    /// warmup criterion on the real FeedScrollView stack (not just the bare pipeline).
+    func _workingRangeMissCount(from start: Int, to end: Int) -> Int {
+        guard start < end else { return 0 }
+        let clampedEnd = min(end, tables.count)
+        guard start < clampedEnd else { return 0 }
+        return (start..<clampedEnd).filter { workingRange.entry(at: $0) == nil }.count
+    }
+
+    /// Returns the root CALayer of the cell mounted at item index, or nil if not visible.
+    /// Used by integration tests to compare layer identity across itemsDidChange calls.
+    func _cellLayer(at index: Int) -> CALayer? {
+        visibleCells[index]?.layer
+    }
     #endif
 
     // MARK: - Init
@@ -601,11 +617,14 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                     cornerRadius: cornerRadius,
                     scale: scale
                 ) else { return }
-                // No Task.isCancelled check here — applyContent's itemID privacy guard
-                // is the authoritative defense against stale delivery. Relying on cooperative
-                // cancellation alone would leave the invariant untestable: if the Task dies
-                // before reaching applyContent, both "guard fired" and "guard never reached"
-                // produce the same observable state (opacity == 0).
+                // isCancelled guard: primary defence on the fast-scroll path. MediaHandle.cancel()
+                // marks the Task cancelled before prepareForReuse rebinds the cell; imageActor.image()
+                // may still return a decoded image if the semaphore had already been acquired.
+                // This guard catches that window and returns before calling applyContent, keeping
+                // RenderCell._privacyGuardFiredCount at zero during fast scroll (Test 5 invariant).
+                // applyContent's itemID privacy guard is a defense-in-depth backup for races
+                // where cancellation and content delivery coincide after isCancelled is checked.
+                guard !Task.isCancelled else { return }
                 cell?.applyContent(id: fragmentID, image: img, for: itemID)
             }
             cell.addMediaHandle(MediaHandle(task: task))
