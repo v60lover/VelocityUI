@@ -1,0 +1,307 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 60;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		BB0000000000000000000040 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000020 /* AppDelegate.swift */; };
+		BB0000000000000000000041 /* LaunchArguments.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000022 /* LaunchArguments.swift */; };
+		BB0000000000000000000042 /* BenchmarkItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000023 /* BenchmarkItem.swift */; };
+		BB0000000000000000000043 /* BenchmarkDataset.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000024 /* BenchmarkDataset.swift */; };
+		BB0000000000000000000044 /* ImageSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000025 /* ImageSource.swift */; };
+		BB0000000000000000000045 /* SamePipelineImageSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000026 /* SamePipelineImageSource.swift */; };
+		BB0000000000000000000046 /* IdiomaticImageSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000027 /* IdiomaticImageSource.swift */; };
+		BB0000000000000000000047 /* RuntimePickerViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000028 /* RuntimePickerViewController.swift */; };
+		BB0000000000000000000048 /* VelocityUIRuntimeViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000029 /* VelocityUIRuntimeViewController.swift */; };
+		BB0000000000000000000049 /* SwiftUILazyVStackRuntimeViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000002A /* SwiftUILazyVStackRuntimeViewController.swift */; };
+		BB000000000000000000004A /* SwiftUIListRuntimeViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000002B /* SwiftUIListRuntimeViewController.swift */; };
+		BB000000000000000000004B /* UICollectionViewRuntimeViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000002C /* UICollectionViewRuntimeViewController.swift */; };
+		BB000000000000000000004C /* TextureRuntimeViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000002D /* TextureRuntimeViewController.swift */; };
+		BB000000000000000000004D /* BenchmarkCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000002F /* BenchmarkCell.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		BB0000000000000000000020 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		BB0000000000000000000022 /* LaunchArguments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchArguments.swift; sourceTree = "<group>"; };
+		BB0000000000000000000023 /* BenchmarkItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkItem.swift; sourceTree = "<group>"; };
+		BB0000000000000000000024 /* BenchmarkDataset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkDataset.swift; sourceTree = "<group>"; };
+		BB0000000000000000000025 /* ImageSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageSource.swift; sourceTree = "<group>"; };
+		BB0000000000000000000026 /* SamePipelineImageSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SamePipelineImageSource.swift; sourceTree = "<group>"; };
+		BB0000000000000000000027 /* IdiomaticImageSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdiomaticImageSource.swift; sourceTree = "<group>"; };
+		BB0000000000000000000028 /* RuntimePickerViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimePickerViewController.swift; sourceTree = "<group>"; };
+		BB000000000000000000002F /* BenchmarkCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkCell.swift; sourceTree = "<group>"; };
+		BB0000000000000000000029 /* VelocityUIRuntimeViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VelocityUIRuntimeViewController.swift; sourceTree = "<group>"; };
+		BB000000000000000000002A /* SwiftUILazyVStackRuntimeViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftUILazyVStackRuntimeViewController.swift; sourceTree = "<group>"; };
+		BB000000000000000000002B /* SwiftUIListRuntimeViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftUIListRuntimeViewController.swift; sourceTree = "<group>"; };
+		BB000000000000000000002C /* UICollectionViewRuntimeViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UICollectionViewRuntimeViewController.swift; sourceTree = "<group>"; };
+		BB000000000000000000002D /* TextureRuntimeViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextureRuntimeViewController.swift; sourceTree = "<group>"; };
+		BB000000000000000000002E /* BenchmarkHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BenchmarkHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		BB0000000000000000000031 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		BB0000000000000000000002 = {
+			isa = PBXGroup;
+			children = (
+				BB0000000000000000000003 /* Sources */,
+				BB0000000000000000000005 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		BB0000000000000000000003 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				BB0000000000000000000020 /* AppDelegate.swift */,
+				BB0000000000000000000022 /* LaunchArguments.swift */,
+				BB0000000000000000000023 /* BenchmarkItem.swift */,
+				BB0000000000000000000024 /* BenchmarkDataset.swift */,
+				BB0000000000000000000025 /* ImageSource.swift */,
+				BB0000000000000000000026 /* SamePipelineImageSource.swift */,
+				BB0000000000000000000027 /* IdiomaticImageSource.swift */,
+				BB0000000000000000000028 /* RuntimePickerViewController.swift */,
+				BB000000000000000000002F /* BenchmarkCell.swift */,
+				BB0000000000000000000004 /* Runtimes */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		BB0000000000000000000004 /* Runtimes */ = {
+			isa = PBXGroup;
+			children = (
+				BB0000000000000000000029 /* VelocityUIRuntimeViewController.swift */,
+				BB000000000000000000002A /* SwiftUILazyVStackRuntimeViewController.swift */,
+				BB000000000000000000002B /* SwiftUIListRuntimeViewController.swift */,
+				BB000000000000000000002C /* UICollectionViewRuntimeViewController.swift */,
+				BB000000000000000000002D /* TextureRuntimeViewController.swift */,
+			);
+			path = Runtimes;
+			sourceTree = "<group>";
+		};
+		BB0000000000000000000005 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				BB000000000000000000002E /* BenchmarkHost.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		BB0000000000000000000010 /* BenchmarkHost */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BB0000000000000000000051 /* Build configuration list for PBXNativeTarget "BenchmarkHost" */;
+			buildPhases = (
+				BB0000000000000000000030 /* Sources */,
+				BB0000000000000000000031 /* Frameworks */,
+				BB0000000000000000000032 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = BenchmarkHost;
+			packageProductDependencies = (
+			);
+			productName = BenchmarkHost;
+			productReference = BB000000000000000000002E /* BenchmarkHost.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		BB0000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					BB0000000000000000000010 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+				};
+			};
+			buildConfigurationList = BB0000000000000000000050 /* Build configuration list for PBXProject "BenchmarkHost" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = BB0000000000000000000002;
+			packageReferences = (
+			);
+			productRefGroup = BB0000000000000000000005 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				BB0000000000000000000010 /* BenchmarkHost */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		BB0000000000000000000032 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		BB0000000000000000000030 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BB0000000000000000000040 /* AppDelegate.swift in Sources */,
+				BB0000000000000000000041 /* LaunchArguments.swift in Sources */,
+				BB0000000000000000000042 /* BenchmarkItem.swift in Sources */,
+				BB0000000000000000000043 /* BenchmarkDataset.swift in Sources */,
+				BB0000000000000000000044 /* ImageSource.swift in Sources */,
+				BB0000000000000000000045 /* SamePipelineImageSource.swift in Sources */,
+				BB0000000000000000000046 /* IdiomaticImageSource.swift in Sources */,
+				BB0000000000000000000047 /* RuntimePickerViewController.swift in Sources */,
+				BB0000000000000000000048 /* VelocityUIRuntimeViewController.swift in Sources */,
+				BB0000000000000000000049 /* SwiftUILazyVStackRuntimeViewController.swift in Sources */,
+				BB000000000000000000004A /* SwiftUIListRuntimeViewController.swift in Sources */,
+				BB000000000000000000004B /* UICollectionViewRuntimeViewController.swift in Sources */,
+				BB000000000000000000004C /* TextureRuntimeViewController.swift in Sources */,
+				BB000000000000000000004D /* BenchmarkCell.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		BB0000000000000000000060 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		BB0000000000000000000061 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 6.0;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		BB0000000000000000000062 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = KTSADV9433;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CADisableMinimumFrameDuration = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = NO;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.velocityui.BenchmarkHost;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		BB0000000000000000000063 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = KTSADV9433;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CADisableMinimumFrameDuration = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = NO;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.velocityui.BenchmarkHost;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		BB0000000000000000000050 /* Build configuration list for PBXProject "BenchmarkHost" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BB0000000000000000000060 /* Debug */,
+				BB0000000000000000000061 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		BB0000000000000000000051 /* Build configuration list for PBXNativeTarget "BenchmarkHost" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BB0000000000000000000062 /* Debug */,
+				BB0000000000000000000063 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = BB0000000000000000000001 /* Project object */;
+}
