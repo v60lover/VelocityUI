@@ -6,10 +6,12 @@ import UIKit
 final class SwiftUILazyVStackRuntimeViewController: UIViewController {
     private let benchmarkItems: [BenchmarkItem]
     private let imageSource: any ImageSource
+    private let harness: BenchmarkHarness
 
-    init(items: [BenchmarkItem], imageSource: any ImageSource) {
+    init(items: [BenchmarkItem], imageSource: any ImageSource, harness: BenchmarkHarness) {
         self.benchmarkItems = items
         self.imageSource = imageSource
+        self.harness = harness
         super.init(nibName: nil, bundle: nil)
         title = "SwiftUI LazyVStack"
     }

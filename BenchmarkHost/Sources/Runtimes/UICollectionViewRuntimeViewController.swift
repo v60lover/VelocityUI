@@ -5,11 +5,13 @@ import UIKit
 final class UICollectionViewRuntimeViewController: UIViewController {
     private let benchmarkItems: [BenchmarkItem]
     private let imageSource: any ImageSource
+    private let harness: BenchmarkHarness
     private var collectionView: UICollectionView!
 
-    init(items: [BenchmarkItem], imageSource: any ImageSource) {
+    init(items: [BenchmarkItem], imageSource: any ImageSource, harness: BenchmarkHarness) {
         self.benchmarkItems = items
         self.imageSource = imageSource
+        self.harness = harness
         super.init(nibName: nil, bundle: nil)
         title = "UICollectionView"
     }

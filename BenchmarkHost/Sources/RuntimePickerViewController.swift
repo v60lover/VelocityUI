@@ -5,6 +5,7 @@ import UIKit
 final class RuntimePickerViewController: UITableViewController {
     private let items: [BenchmarkItem]
     private let imageSource: any ImageSource
+    private let harness: BenchmarkHarness
 
     private let runtimes: [(title: String, runtime: LaunchArguments.Runtime)] = [
         ("VelocityUI AsyncFeed", .velocityUI),
@@ -14,9 +15,10 @@ final class RuntimePickerViewController: UITableViewController {
         ("Texture ASCollectionNode", .texture),
     ]
 
-    init(items: [BenchmarkItem], imageSource: any ImageSource) {
+    init(items: [BenchmarkItem], imageSource: any ImageSource, harness: BenchmarkHarness) {
         self.items = items
         self.imageSource = imageSource
+        self.harness = harness
         super.init(style: .insetGrouped)
         title = "BenchmarkHost"
     }
@@ -49,11 +51,11 @@ final class RuntimePickerViewController: UITableViewController {
 
     private func makeRuntimeVC(runtime: LaunchArguments.Runtime) -> UIViewController {
         switch runtime {
-        case .velocityUI:        return VelocityUIRuntimeViewController(items: items, imageSource: imageSource)
-        case .swiftUILazyVStack: return SwiftUILazyVStackRuntimeViewController(items: items, imageSource: imageSource)
-        case .swiftUIList:       return SwiftUIListRuntimeViewController(items: items, imageSource: imageSource)
-        case .uiCollectionView:  return UICollectionViewRuntimeViewController(items: items, imageSource: imageSource)
-        case .texture:           return TextureRuntimeViewController(items: items, imageSource: imageSource)
+        case .velocityUI:        return VelocityUIRuntimeViewController(items: items, imageSource: imageSource, harness: harness)
+        case .swiftUILazyVStack: return SwiftUILazyVStackRuntimeViewController(items: items, imageSource: imageSource, harness: harness)
+        case .swiftUIList:       return SwiftUIListRuntimeViewController(items: items, imageSource: imageSource, harness: harness)
+        case .uiCollectionView:  return UICollectionViewRuntimeViewController(items: items, imageSource: imageSource, harness: harness)
+        case .texture:           return TextureRuntimeViewController(items: items, imageSource: imageSource, harness: harness)
         }
     }
 }

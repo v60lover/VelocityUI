@@ -7,6 +7,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
 
     private var dataset: [BenchmarkItem] = []
+    private let harness = BenchmarkHarness()
 
     func application(
         _ application: UIApplication,
@@ -28,7 +29,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         if let runtime = args.runtime {
             rootVC = makeRuntimeVC(runtime: runtime, items: dataset, imageSource: imageSource)
         } else {
-            rootVC = RuntimePickerViewController(items: dataset, imageSource: imageSource)
+            rootVC = RuntimePickerViewController(items: dataset, imageSource: imageSource, harness: harness)
         }
 
         window = UIWindow(frame: UIScreen.main.bounds)
@@ -43,11 +44,11 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         imageSource: any ImageSource
     ) -> UIViewController {
         switch runtime {
-        case .velocityUI:        return VelocityUIRuntimeViewController(items: items, imageSource: imageSource)
-        case .swiftUILazyVStack: return SwiftUILazyVStackRuntimeViewController(items: items, imageSource: imageSource)
-        case .swiftUIList:       return SwiftUIListRuntimeViewController(items: items, imageSource: imageSource)
-        case .uiCollectionView:  return UICollectionViewRuntimeViewController(items: items, imageSource: imageSource)
-        case .texture:           return TextureRuntimeViewController(items: items, imageSource: imageSource)
+        case .velocityUI:        return VelocityUIRuntimeViewController(items: items, imageSource: imageSource, harness: harness)
+        case .swiftUILazyVStack: return SwiftUILazyVStackRuntimeViewController(items: items, imageSource: imageSource, harness: harness)
+        case .swiftUIList:       return SwiftUIListRuntimeViewController(items: items, imageSource: imageSource, harness: harness)
+        case .uiCollectionView:  return UICollectionViewRuntimeViewController(items: items, imageSource: imageSource, harness: harness)
+        case .texture:           return TextureRuntimeViewController(items: items, imageSource: imageSource, harness: harness)
         }
     }
 }

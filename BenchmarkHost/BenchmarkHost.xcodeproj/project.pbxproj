@@ -21,7 +21,22 @@
 		BB000000000000000000004B /* UICollectionViewRuntimeViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000002C /* UICollectionViewRuntimeViewController.swift */; };
 		BB000000000000000000004C /* TextureRuntimeViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000002D /* TextureRuntimeViewController.swift */; };
 		BB000000000000000000004D /* BenchmarkCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000002F /* BenchmarkCell.swift */; };
+		BB0000000000000000000080 /* BenchmarkReport.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000070 /* BenchmarkReport.swift */; };
+		BB0000000000000000000081 /* AllocationProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000071 /* AllocationProbe.swift */; };
+		BB0000000000000000000082 /* BenchmarkHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000072 /* BenchmarkHarness.swift */; };
+		BB00000000000000000000A0 /* BenchmarkHarnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000090 /* BenchmarkHarnessTests.swift */; };
+		BB00000000000000000000A1 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000093 /* XCTest.framework */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		BB00000000000000000000B4 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = BB0000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = BB0000000000000000000010;
+			remoteInfo = BenchmarkHost;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		BB0000000000000000000020 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
@@ -39,6 +54,12 @@
 		BB000000000000000000002C /* UICollectionViewRuntimeViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UICollectionViewRuntimeViewController.swift; sourceTree = "<group>"; };
 		BB000000000000000000002D /* TextureRuntimeViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextureRuntimeViewController.swift; sourceTree = "<group>"; };
 		BB000000000000000000002E /* BenchmarkHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BenchmarkHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		BB0000000000000000000070 /* BenchmarkReport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkReport.swift; sourceTree = "<group>"; };
+		BB0000000000000000000071 /* AllocationProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AllocationProbe.swift; sourceTree = "<group>"; };
+		BB0000000000000000000072 /* BenchmarkHarness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkHarness.swift; sourceTree = "<group>"; };
+		BB0000000000000000000090 /* BenchmarkHarnessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkHarnessTests.swift; sourceTree = "<group>"; };
+		BB0000000000000000000091 /* BenchmarkHostTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BenchmarkHostTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		BB0000000000000000000093 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = Platforms/iPhoneOS.platform/Developer/Library/Frameworks/XCTest.framework; sourceTree = DEVELOPER_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -49,6 +70,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		BB00000000000000000000B2 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BB00000000000000000000A1 /* XCTest.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -56,6 +85,7 @@
 			isa = PBXGroup;
 			children = (
 				BB0000000000000000000003 /* Sources */,
+				BB0000000000000000000092 /* Tests */,
 				BB0000000000000000000005 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -72,6 +102,9 @@
 				BB0000000000000000000027 /* IdiomaticImageSource.swift */,
 				BB0000000000000000000028 /* RuntimePickerViewController.swift */,
 				BB000000000000000000002F /* BenchmarkCell.swift */,
+				BB0000000000000000000070 /* BenchmarkReport.swift */,
+				BB0000000000000000000071 /* AllocationProbe.swift */,
+				BB0000000000000000000072 /* BenchmarkHarness.swift */,
 				BB0000000000000000000004 /* Runtimes */,
 			);
 			path = Sources;
@@ -93,8 +126,17 @@
 			isa = PBXGroup;
 			children = (
 				BB000000000000000000002E /* BenchmarkHost.app */,
+				BB0000000000000000000091 /* BenchmarkHostTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		BB0000000000000000000092 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				BB0000000000000000000090 /* BenchmarkHarnessTests.swift */,
+			);
+			path = Tests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -119,6 +161,25 @@
 			productReference = BB000000000000000000002E /* BenchmarkHost.app */;
 			productType = "com.apple.product-type.application";
 		};
+		BB00000000000000000000B0 /* BenchmarkHostTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BB00000000000000000000C0 /* Build configuration list for PBXNativeTarget "BenchmarkHostTests" */;
+			buildPhases = (
+				BB00000000000000000000B1 /* Sources */,
+				BB00000000000000000000B2 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				BB00000000000000000000B3 /* PBXTargetDependency */,
+			);
+			name = BenchmarkHostTests;
+			packageProductDependencies = (
+			);
+			productName = BenchmarkHostTests;
+			productReference = BB0000000000000000000091 /* BenchmarkHostTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -131,6 +192,10 @@
 				TargetAttributes = {
 					BB0000000000000000000010 = {
 						CreatedOnToolsVersion = 15.0;
+					};
+					BB00000000000000000000B0 = {
+						CreatedOnToolsVersion = 15.0;
+						TestTargetID = BB0000000000000000000010;
 					};
 				};
 			};
@@ -150,6 +215,7 @@
 			projectRoot = "";
 			targets = (
 				BB0000000000000000000010 /* BenchmarkHost */,
+				BB00000000000000000000B0 /* BenchmarkHostTests */,
 			);
 		};
 /* End PBXProject section */
@@ -183,10 +249,29 @@
 				BB000000000000000000004B /* UICollectionViewRuntimeViewController.swift in Sources */,
 				BB000000000000000000004C /* TextureRuntimeViewController.swift in Sources */,
 				BB000000000000000000004D /* BenchmarkCell.swift in Sources */,
+				BB0000000000000000000080 /* BenchmarkReport.swift in Sources */,
+				BB0000000000000000000081 /* AllocationProbe.swift in Sources */,
+				BB0000000000000000000082 /* BenchmarkHarness.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BB00000000000000000000B1 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BB00000000000000000000A0 /* BenchmarkHarnessTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		BB00000000000000000000B3 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = BB0000000000000000000010 /* BenchmarkHost */;
+			targetProxy = BB00000000000000000000B4 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		BB0000000000000000000060 /* Debug */ = {
@@ -280,6 +365,50 @@
 			};
 			name = Release;
 		};
+		BB00000000000000000000C1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = KTSADV9433;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.velocityui.BenchmarkHostTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/BenchmarkHost.app/BenchmarkHost";
+			};
+			name = Debug;
+		};
+		BB00000000000000000000C2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = KTSADV9433;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.velocityui.BenchmarkHostTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/BenchmarkHost.app/BenchmarkHost";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -297,6 +426,15 @@
 			buildConfigurations = (
 				BB0000000000000000000062 /* Debug */,
 				BB0000000000000000000063 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		BB00000000000000000000C0 /* Build configuration list for PBXNativeTarget "BenchmarkHostTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BB00000000000000000000C1 /* Debug */,
+				BB00000000000000000000C2 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

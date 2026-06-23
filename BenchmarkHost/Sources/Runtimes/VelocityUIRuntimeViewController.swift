@@ -5,10 +5,12 @@ import UIKit
 final class VelocityUIRuntimeViewController: UITableViewController {
     private let benchmarkItems: [BenchmarkItem]
     private let imageSource: any ImageSource
+    private let harness: BenchmarkHarness
 
-    init(items: [BenchmarkItem], imageSource: any ImageSource) {
+    init(items: [BenchmarkItem], imageSource: any ImageSource, harness: BenchmarkHarness) {
         self.benchmarkItems = items
         self.imageSource = imageSource
+        self.harness = harness
         super.init(style: .plain)
         title = "VelocityUI"
     }
