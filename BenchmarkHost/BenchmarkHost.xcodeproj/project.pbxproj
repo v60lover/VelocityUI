@@ -25,10 +25,14 @@
 		BB0000000000000000000081 /* AllocationProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000071 /* AllocationProbe.swift */; };
 		BB0000000000000000000082 /* BenchmarkHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000072 /* BenchmarkHarness.swift */; };
 		BB00000000000000000000A0 /* BenchmarkHarnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000090 /* BenchmarkHarnessTests.swift */; };
+		BB00000000000000000000E6 /* BenchmarkDataLoaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000E5 /* BenchmarkDataLoaderTests.swift */; };
+		BB00000000000000000000E8 /* Nuke in Frameworks */ = {isa = PBXBuildFile; productRef = BB00000000000000000000E7 /* Nuke */; };
 		BB00000000000000000000A1 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000093 /* XCTest.framework */; };
 		BB00000000000000000000D3 /* ScrollDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000D0 /* ScrollDriver.swift */; };
 		BB00000000000000000000D4 /* BenchmarkOrchestrator.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000D1 /* BenchmarkOrchestrator.swift */; };
 		BB00000000000000000000D5 /* ScrollDriverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000D2 /* ScrollDriverTests.swift */; };
+		BB00000000000000000000E3 /* Nuke in Frameworks */ = {isa = PBXBuildFile; productRef = BB00000000000000000000E1 /* Nuke */; };
+		BB00000000000000000000E4 /* NukeUI in Frameworks */ = {isa = PBXBuildFile; productRef = BB00000000000000000000E2 /* NukeUI */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -66,6 +70,7 @@
 		BB00000000000000000000D0 /* ScrollDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollDriver.swift; sourceTree = "<group>"; };
 		BB00000000000000000000D1 /* BenchmarkOrchestrator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkOrchestrator.swift; sourceTree = "<group>"; };
 		BB00000000000000000000D2 /* ScrollDriverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollDriverTests.swift; sourceTree = "<group>"; };
+		BB00000000000000000000E5 /* BenchmarkDataLoaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkDataLoaderTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -73,6 +78,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				BB00000000000000000000E3 /* Nuke in Frameworks */,
+				BB00000000000000000000E4 /* NukeUI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -81,6 +88,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				BB00000000000000000000A1 /* XCTest.framework in Frameworks */,
+				BB00000000000000000000E8 /* Nuke in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -144,6 +152,7 @@
 			children = (
 				BB0000000000000000000090 /* BenchmarkHarnessTests.swift */,
 				BB00000000000000000000D2 /* ScrollDriverTests.swift */,
+				BB00000000000000000000E5 /* BenchmarkDataLoaderTests.swift */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -165,6 +174,8 @@
 			);
 			name = BenchmarkHost;
 			packageProductDependencies = (
+				BB00000000000000000000E1 /* Nuke */,
+				BB00000000000000000000E2 /* NukeUI */,
 			);
 			productName = BenchmarkHost;
 			productReference = BB000000000000000000002E /* BenchmarkHost.app */;
@@ -184,6 +195,7 @@
 			);
 			name = BenchmarkHostTests;
 			packageProductDependencies = (
+				BB00000000000000000000E7 /* Nuke */,
 			);
 			productName = BenchmarkHostTests;
 			productReference = BB0000000000000000000091 /* BenchmarkHostTests.xctest */;
@@ -218,6 +230,7 @@
 			);
 			mainGroup = BB0000000000000000000002;
 			packageReferences = (
+				BB00000000000000000000E0 /* XCRemoteSwiftPackageReference "Nuke" */,
 			);
 			productRefGroup = BB0000000000000000000005 /* Products */;
 			projectDirPath = "";
@@ -272,6 +285,7 @@
 			files = (
 				BB00000000000000000000A0 /* BenchmarkHarnessTests.swift in Sources */,
 				BB00000000000000000000D5 /* ScrollDriverTests.swift in Sources */,
+				BB00000000000000000000E6 /* BenchmarkDataLoaderTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -452,6 +466,35 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		BB00000000000000000000E0 /* XCRemoteSwiftPackageReference "Nuke" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/kean/Nuke.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 12.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		BB00000000000000000000E1 /* Nuke */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = BB00000000000000000000E0 /* XCRemoteSwiftPackageReference "Nuke" */;
+			productName = Nuke;
+		};
+		BB00000000000000000000E2 /* NukeUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = BB00000000000000000000E0 /* XCRemoteSwiftPackageReference "Nuke" */;
+			productName = NukeUI;
+		};
+		BB00000000000000000000E7 /* Nuke */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = BB00000000000000000000E0 /* XCRemoteSwiftPackageReference "Nuke" */;
+			productName = Nuke;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = BB0000000000000000000001 /* Project object */;
 }

@@ -1,5 +1,7 @@
 // SwiftUILazyVStackRuntimeViewController.swift
 
+import NukeUI
+import os
 import SwiftUI
 import UIKit
 
@@ -23,7 +25,12 @@ final class SwiftUILazyVStackRuntimeViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        let hostVC = UIHostingController(rootView: LazyVStackFeedView(items: benchmarkItems, imageSource: imageSource))
+        let feedView = LazyVStackFeedView(
+            items: benchmarkItems,
+            imageSource: imageSource,
+            harness: harness
+        )
+        let hostVC = UIHostingController(rootView: feedView)
         addChild(hostVC)
         hostVC.view.frame = view.bounds
         hostVC.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -42,12 +49,13 @@ final class SwiftUILazyVStackRuntimeViewController: UIViewController {
 private struct LazyVStackFeedView: View {
     let items: [BenchmarkItem]
     let imageSource: any ImageSource
+    let harness: BenchmarkHarness
 
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 8) {
                 ForEach(items, id: \.id) { item in
-                    BenchmarkRowView(item: item, imageSource: imageSource)
+                    LazyVStackRowView(item: item, imageSource: imageSource, harness: harness)
                 }
             }
             .padding(.horizontal, 16)
@@ -55,32 +63,80 @@ private struct LazyVStackFeedView: View {
     }
 }
 
-private struct BenchmarkRowView: View {
+private struct LazyVStackRowView: View {
     let item: BenchmarkItem
     let imageSource: any ImageSource
+    let harness: BenchmarkHarness
+
     @State private var imageData: Data?
+    @State private var spanState: OSSignpostIntervalState?
+
+    private var isIdiomatic: Bool { imageSource is IdiomaticImageSource }
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Group {
-                if let data = imageData, let uiImage = UIImage(data: data) {
-                    Image(uiImage: uiImage)
-                        .resizable()
-                        .scaledToFill()
-                } else {
-                    Color(hue: item.placeholderHue, saturation: 0.5, brightness: 0.8)
-                }
-            }
-            .frame(width: BenchmarkItem.thumbWidth, height: item.thumbHeight)
-            .clipShape(RoundedRectangle(cornerRadius: item.cornerRadius))
+            imageView
+                .frame(width: BenchmarkItem.thumbWidth, height: item.thumbHeight)
+                .clipShape(RoundedRectangle(cornerRadius: item.cornerRadius))
 
             if !item.caption.isEmpty {
                 Text(item.caption)
                     .font(.body)
             }
         }
+        .onAppear {
+            if spanState == nil {
+                spanState = harness.beginCellMount()
+            }
+        }
+        .onDisappear {
+            if let s = spanState {
+                harness.endCellMount(s)
+                spanState = nil
+            }
+        }
         .task {
+            guard !isIdiomatic else { return }
             imageData = await imageSource.imageData(for: item)
+            if let s = spanState {
+                harness.endCellMount(s)
+                spanState = nil
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var imageView: some View {
+        if isIdiomatic {
+            LazyImage(url: item.imageURL) { state in
+                Group {
+                    if let image = state.image {
+                        image.resizable().scaledToFill()
+                    } else {
+                        Color(hue: item.placeholderHue, saturation: 0.5, brightness: 0.8)
+                    }
+                }
+                .onAppear {
+                    // Cache-hit: image already available on first render, onChange won't fire.
+                    if state.image != nil, let s = spanState {
+                        harness.endCellMount(s)
+                        spanState = nil
+                    }
+                }
+                .onChange(of: state.isLoading) { _, isLoading in
+                    if !isLoading, let s = spanState {
+                        harness.endCellMount(s)
+                        spanState = nil
+                    }
+                }
+            }
+            .pipeline(.benchmark)
+        } else if let data = imageData, let uiImage = UIImage(data: data) {
+            Image(uiImage: uiImage)
+                .resizable()
+                .scaledToFill()
+        } else {
+            Color(hue: item.placeholderHue, saturation: 0.5, brightness: 0.8)
         }
     }
 }
