@@ -31,6 +31,8 @@ struct LaunchArguments {
     var itemCount: Int
     /// Seconds the measurement pass runs before auto-terminating. Defaults to 30 s.
     var measurementDuration: TimeInterval
+    /// Items to prefetch ahead of visible cells. UICollectionView prefetch only; default matches VelocityUI's working range for fairness.
+    var prefetchWindow: Int
 
     init() {
         let args = ProcessInfo.processInfo.arguments
@@ -40,6 +42,7 @@ struct LaunchArguments {
         scenario = Self.value(for: "--scenario", in: args).flatMap(Scenario.init) ?? .warm
         itemCount = Self.value(for: "--items", in: args).flatMap(Int.init) ?? 100
         measurementDuration = Self.value(for: "--duration", in: args).flatMap(TimeInterval.init) ?? 30
+        prefetchWindow = Self.value(for: "--prefetch-window", in: args).flatMap(Int.init) ?? 10
     }
 
     /// Explicit-value init for unit tests — does not read from ProcessInfo.
@@ -49,7 +52,8 @@ struct LaunchArguments {
         runtime: Runtime? = nil,
         imageMode: ImageMode = .idiomatic,
         itemCount: Int = 100,
-        measurementDuration: TimeInterval = 30
+        measurementDuration: TimeInterval = 30,
+        prefetchWindow: Int = 10
     ) {
         self.scenario = scenario
         self.velocityProfile = velocityProfile
@@ -57,6 +61,7 @@ struct LaunchArguments {
         self.imageMode = imageMode
         self.itemCount = itemCount
         self.measurementDuration = measurementDuration
+        self.prefetchWindow = prefetchWindow
     }
 
     private static func value(for flag: String, in args: [String]) -> String? {
