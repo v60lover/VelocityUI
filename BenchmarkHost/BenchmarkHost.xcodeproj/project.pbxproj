@@ -26,6 +26,9 @@
 		BB0000000000000000000082 /* BenchmarkHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000072 /* BenchmarkHarness.swift */; };
 		BB00000000000000000000A0 /* BenchmarkHarnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000090 /* BenchmarkHarnessTests.swift */; };
 		BB00000000000000000000A1 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000093 /* XCTest.framework */; };
+		BB00000000000000000000D3 /* ScrollDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000D0 /* ScrollDriver.swift */; };
+		BB00000000000000000000D4 /* BenchmarkOrchestrator.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000D1 /* BenchmarkOrchestrator.swift */; };
+		BB00000000000000000000D5 /* ScrollDriverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000D2 /* ScrollDriverTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -60,6 +63,9 @@
 		BB0000000000000000000090 /* BenchmarkHarnessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkHarnessTests.swift; sourceTree = "<group>"; };
 		BB0000000000000000000091 /* BenchmarkHostTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BenchmarkHostTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB0000000000000000000093 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = Platforms/iPhoneOS.platform/Developer/Library/Frameworks/XCTest.framework; sourceTree = DEVELOPER_DIR; };
+		BB00000000000000000000D0 /* ScrollDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollDriver.swift; sourceTree = "<group>"; };
+		BB00000000000000000000D1 /* BenchmarkOrchestrator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkOrchestrator.swift; sourceTree = "<group>"; };
+		BB00000000000000000000D2 /* ScrollDriverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollDriverTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -105,6 +111,8 @@
 				BB0000000000000000000070 /* BenchmarkReport.swift */,
 				BB0000000000000000000071 /* AllocationProbe.swift */,
 				BB0000000000000000000072 /* BenchmarkHarness.swift */,
+				BB00000000000000000000D0 /* ScrollDriver.swift */,
+				BB00000000000000000000D1 /* BenchmarkOrchestrator.swift */,
 				BB0000000000000000000004 /* Runtimes */,
 			);
 			path = Sources;
@@ -135,6 +143,7 @@
 			isa = PBXGroup;
 			children = (
 				BB0000000000000000000090 /* BenchmarkHarnessTests.swift */,
+				BB00000000000000000000D2 /* ScrollDriverTests.swift */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -252,6 +261,8 @@
 				BB0000000000000000000080 /* BenchmarkReport.swift in Sources */,
 				BB0000000000000000000081 /* AllocationProbe.swift in Sources */,
 				BB0000000000000000000082 /* BenchmarkHarness.swift in Sources */,
+				BB00000000000000000000D3 /* ScrollDriver.swift in Sources */,
+				BB00000000000000000000D4 /* BenchmarkOrchestrator.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -260,6 +271,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				BB00000000000000000000A0 /* BenchmarkHarnessTests.swift in Sources */,
+				BB00000000000000000000D5 /* ScrollDriverTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

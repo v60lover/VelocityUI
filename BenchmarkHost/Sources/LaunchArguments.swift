@@ -29,6 +29,8 @@ struct LaunchArguments {
     var velocityProfile: VelocityProfile
     var scenario: Scenario
     var itemCount: Int
+    /// Seconds the measurement pass runs before auto-terminating. Defaults to 30 s.
+    var measurementDuration: TimeInterval
 
     init() {
         let args = ProcessInfo.processInfo.arguments
@@ -37,6 +39,24 @@ struct LaunchArguments {
         velocityProfile = Self.value(for: "--velocity-profile", in: args).flatMap(VelocityProfile.init) ?? .medium
         scenario = Self.value(for: "--scenario", in: args).flatMap(Scenario.init) ?? .warm
         itemCount = Self.value(for: "--items", in: args).flatMap(Int.init) ?? 100
+        measurementDuration = Self.value(for: "--duration", in: args).flatMap(TimeInterval.init) ?? 30
+    }
+
+    /// Explicit-value init for unit tests — does not read from ProcessInfo.
+    init(
+        scenario: Scenario,
+        velocityProfile: VelocityProfile = .medium,
+        runtime: Runtime? = nil,
+        imageMode: ImageMode = .idiomatic,
+        itemCount: Int = 100,
+        measurementDuration: TimeInterval = 30
+    ) {
+        self.scenario = scenario
+        self.velocityProfile = velocityProfile
+        self.runtime = runtime
+        self.imageMode = imageMode
+        self.itemCount = itemCount
+        self.measurementDuration = measurementDuration
     }
 
     private static func value(for flag: String, in args: [String]) -> String? {

@@ -141,6 +141,10 @@ final class BenchmarkHarness: NSObject {
     }
 }
 
+// MARK: - BenchmarkHarnessProtocol
+
+extension BenchmarkHarness: BenchmarkHarnessProtocol {}
+
 // MARK: - MetricKit subscriber
 
 extension BenchmarkHarness: MXMetricManagerSubscriber {

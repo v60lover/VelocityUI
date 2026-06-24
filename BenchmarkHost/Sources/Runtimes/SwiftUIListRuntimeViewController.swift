@@ -7,11 +7,13 @@ final class SwiftUIListRuntimeViewController: UIViewController {
     private let benchmarkItems: [BenchmarkItem]
     private let imageSource: any ImageSource
     private let harness: BenchmarkHarness
+    private let orchestrator: BenchmarkOrchestrator?
 
-    init(items: [BenchmarkItem], imageSource: any ImageSource, harness: BenchmarkHarness) {
+    init(items: [BenchmarkItem], imageSource: any ImageSource, harness: BenchmarkHarness, orchestrator: BenchmarkOrchestrator? = nil) {
         self.benchmarkItems = items
         self.imageSource = imageSource
         self.harness = harness
+        self.orchestrator = orchestrator
         super.init(nibName: nil, bundle: nil)
         title = "SwiftUI List"
     }
@@ -27,6 +29,13 @@ final class SwiftUIListRuntimeViewController: UIViewController {
         hostVC.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(hostVC.view)
         hostVC.didMove(toParent: self)
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        if let sv = view.firstScrollView {
+            orchestrator?.scrollViewReady(sv)
+        }
     }
 }
 

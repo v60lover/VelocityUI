@@ -6,12 +6,14 @@ final class UICollectionViewRuntimeViewController: UIViewController {
     private let benchmarkItems: [BenchmarkItem]
     private let imageSource: any ImageSource
     private let harness: BenchmarkHarness
-    private var collectionView: UICollectionView!
+    private let orchestrator: BenchmarkOrchestrator?
+    var collectionView: UICollectionView!
 
-    init(items: [BenchmarkItem], imageSource: any ImageSource, harness: BenchmarkHarness) {
+    init(items: [BenchmarkItem], imageSource: any ImageSource, harness: BenchmarkHarness, orchestrator: BenchmarkOrchestrator? = nil) {
         self.benchmarkItems = items
         self.imageSource = imageSource
         self.harness = harness
+        self.orchestrator = orchestrator
         super.init(nibName: nil, bundle: nil)
         title = "UICollectionView"
     }
@@ -32,6 +34,11 @@ final class UICollectionViewRuntimeViewController: UIViewController {
         collectionView.dataSource = self
         collectionView.delegate = self
         view.addSubview(collectionView)
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        orchestrator?.scrollViewReady(collectionView)
     }
 }
 

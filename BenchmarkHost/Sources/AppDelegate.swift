@@ -27,7 +27,15 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
 
         let rootVC: UIViewController
         if let runtime = args.runtime {
-            rootVC = makeRuntimeVC(runtime: runtime, items: dataset, imageSource: imageSource)
+            let orchestrator = BenchmarkOrchestrator(args: args, harness: harness)
+            orchestrator.onComplete = { report in
+                if let data = try? JSONEncoder().encode(report),
+                   let json = String(data: data, encoding: .utf8) {
+                    print(json)
+                }
+                exit(0)
+            }
+            rootVC = makeRuntimeVC(runtime: runtime, items: dataset, imageSource: imageSource, orchestrator: orchestrator)
         } else {
             rootVC = RuntimePickerViewController(items: dataset, imageSource: imageSource, harness: harness)
         }
@@ -41,14 +49,15 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     private func makeRuntimeVC(
         runtime: LaunchArguments.Runtime,
         items: [BenchmarkItem],
-        imageSource: any ImageSource
+        imageSource: any ImageSource,
+        orchestrator: BenchmarkOrchestrator? = nil
     ) -> UIViewController {
         switch runtime {
-        case .velocityUI:        return VelocityUIRuntimeViewController(items: items, imageSource: imageSource, harness: harness)
-        case .swiftUILazyVStack: return SwiftUILazyVStackRuntimeViewController(items: items, imageSource: imageSource, harness: harness)
-        case .swiftUIList:       return SwiftUIListRuntimeViewController(items: items, imageSource: imageSource, harness: harness)
-        case .uiCollectionView:  return UICollectionViewRuntimeViewController(items: items, imageSource: imageSource, harness: harness)
-        case .texture:           return TextureRuntimeViewController(items: items, imageSource: imageSource, harness: harness)
+        case .velocityUI:        return VelocityUIRuntimeViewController(items: items, imageSource: imageSource, harness: harness, orchestrator: orchestrator)
+        case .swiftUILazyVStack: return SwiftUILazyVStackRuntimeViewController(items: items, imageSource: imageSource, harness: harness, orchestrator: orchestrator)
+        case .swiftUIList:       return SwiftUIListRuntimeViewController(items: items, imageSource: imageSource, harness: harness, orchestrator: orchestrator)
+        case .uiCollectionView:  return UICollectionViewRuntimeViewController(items: items, imageSource: imageSource, harness: harness, orchestrator: orchestrator)
+        case .texture:           return TextureRuntimeViewController(items: items, imageSource: imageSource, harness: harness, orchestrator: orchestrator)
         }
     }
 }
