@@ -71,7 +71,7 @@ final class BenchmarkHarness: NSObject {
         let mkSnapshots: [BenchmarkReport.MetricKitSnapshot] = payloads.map { payload in
             BenchmarkReport.MetricKitSnapshot(
                 deliveredAtTimestamp: payload.timeStampBegin.timeIntervalSince1970,
-                payloadJSONBase64: payload.jsonRepresentation.base64EncodedString()
+                payloadJSONBase64: payload.jsonRepresentation().base64EncodedString()
             )
         }
 

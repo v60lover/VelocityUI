@@ -2,6 +2,7 @@
 
 import Darwin
 import Foundation
+import os
 
 /// Polls phys_footprint via task_info(TASK_VM_INFO) at 60 Hz on a background queue.
 /// start() / stop() must be called from a single serial context (BenchmarkHarness is @MainActor).

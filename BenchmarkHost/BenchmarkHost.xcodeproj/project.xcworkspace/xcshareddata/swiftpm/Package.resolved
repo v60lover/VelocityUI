@@ -1,0 +1,24 @@
+{
+  "originHash" : "84c6ef848656f28f6bc8aec3f39fd4630b7e530f3d9de50719ed220967f1ed7f",
+  "pins" : [
+    {
+      "identity" : "nuke",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/kean/Nuke.git",
+      "state" : {
+        "revision" : "83e19143355b02e9261edb2323b3e1e93287ebb9",
+        "version" : "12.9.0"
+      }
+    },
+    {
+      "identity" : "texture",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/FluidGroup/Texture.git",
+      "state" : {
+        "revision" : "f6aba697c93e955b822e1bed148e83eee2db70e4",
+        "version" : "3.0.3"
+      }
+    }
+  ],
+  "version" : 3
+}

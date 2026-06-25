@@ -27,6 +27,7 @@
 		BB00000000000000000000A0 /* BenchmarkHarnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000090 /* BenchmarkHarnessTests.swift */; };
 		BB00000000000000000000E6 /* BenchmarkDataLoaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000E5 /* BenchmarkDataLoaderTests.swift */; };
 		BB00000000000000000000E8 /* Nuke in Frameworks */ = {isa = PBXBuildFile; productRef = BB00000000000000000000E7 /* Nuke */; };
+		BB00000000000000000000F2 /* AsyncDisplayKit in Frameworks */ = {isa = PBXBuildFile; productRef = BB00000000000000000000F1 /* AsyncDisplayKit */; };
 		BB00000000000000000000A1 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000093 /* XCTest.framework */; };
 		BB00000000000000000000D3 /* ScrollDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000D0 /* ScrollDriver.swift */; };
 		BB00000000000000000000D4 /* BenchmarkOrchestrator.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000D1 /* BenchmarkOrchestrator.swift */; };
@@ -80,6 +81,7 @@
 			files = (
 				BB00000000000000000000E3 /* Nuke in Frameworks */,
 				BB00000000000000000000E4 /* NukeUI in Frameworks */,
+				BB00000000000000000000F2 /* AsyncDisplayKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -164,6 +166,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = BB0000000000000000000051 /* Build configuration list for PBXNativeTarget "BenchmarkHost" */;
 			buildPhases = (
+				BB00000000000000000000F3 /* Patch Texture */,
 				BB0000000000000000000030 /* Sources */,
 				BB0000000000000000000031 /* Frameworks */,
 				BB0000000000000000000032 /* Resources */,
@@ -176,6 +179,7 @@
 			packageProductDependencies = (
 				BB00000000000000000000E1 /* Nuke */,
 				BB00000000000000000000E2 /* NukeUI */,
+				BB00000000000000000000F1 /* AsyncDisplayKit */,
 			);
 			productName = BenchmarkHost;
 			productReference = BB000000000000000000002E /* BenchmarkHost.app */;
@@ -231,6 +235,7 @@
 			mainGroup = BB0000000000000000000002;
 			packageReferences = (
 				BB00000000000000000000E0 /* XCRemoteSwiftPackageReference "Nuke" */,
+				BB00000000000000000000F0 /* XCRemoteSwiftPackageReference "Texture" */,
 			);
 			productRefGroup = BB0000000000000000000005 /* Products */;
 			projectDirPath = "";
@@ -241,6 +246,22 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		BB00000000000000000000F3 /* Patch Texture */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			inputFileListPaths = ();
+			inputPaths = ();
+			name = "Patch Texture";
+			outputFileListPaths = ();
+			outputPaths = ();
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Texture 3.0.3 ASTextLayout.mm has 4 chained comparisons (A < B < C) that\n# Clang 16 promotes to hard errors via -Wparentheses. Parenthesize them so\n# the warning fires at warning level, not error level.\nTEXTURE_MM=\"${BUILD_DIR%/Build/Products}/../SourcePackages/checkouts/Texture/Source/TextExperiment/Component/ASTextLayout.mm\"\nif [ -f \"$TEXTURE_MM\" ] && grep -q 'point\\.y) < fabs(right' \"$TEXTURE_MM\"; then\n  sed -i '' 's/= fabs(left - point\\.y) < fabs(right - point\\.y) < /= (fabs(left - point.y) < fabs(right - point.y)) < /g' \"$TEXTURE_MM\"\n  sed -i '' 's/= fabs(left - point\\.x) < fabs(right - point\\.x) < /= (fabs(left - point.x) < fabs(right - point.x)) < /g' \"$TEXTURE_MM\"\nfi\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXResourcesBuildPhase section */
 		BB0000000000000000000032 /* Resources */ = {
@@ -320,6 +341,8 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				ONLY_ACTIVE_ARCH = YES;
+				OTHER_CFLAGS = "$(inherited) -Wno-parentheses";
+				OTHER_CPLUSPLUSFLAGS = "$(inherited) -Wno-parentheses";
 				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
@@ -340,6 +363,8 @@
 				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				OTHER_CFLAGS = "$(inherited) -Wno-parentheses";
+				OTHER_CPLUSPLUSFLAGS = "$(inherited) -Wno-parentheses";
 				SDKROOT = iphoneos;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_VERSION = 6.0;
@@ -476,6 +501,14 @@
 				minimumVersion = 12.0.0;
 			};
 		};
+		BB00000000000000000000F0 /* XCRemoteSwiftPackageReference "Texture" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/FluidGroup/Texture.git";
+			requirement = {
+				kind = exactVersion;
+				version = 3.0.3;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -493,6 +526,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = BB00000000000000000000E0 /* XCRemoteSwiftPackageReference "Nuke" */;
 			productName = Nuke;
+		};
+		BB00000000000000000000F1 /* AsyncDisplayKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = BB00000000000000000000F0 /* XCRemoteSwiftPackageReference "Texture" */;
+			productName = AsyncDisplayKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
