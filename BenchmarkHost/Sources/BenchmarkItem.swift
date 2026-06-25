@@ -2,7 +2,7 @@
 
 import Foundation
 
-struct BenchmarkItem: Sendable, Identifiable {
+struct BenchmarkItem: Sendable, Identifiable, Equatable {
     let id: Int
     let imageURL: URL
     let aspectRatio: Double

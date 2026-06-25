@@ -73,6 +73,10 @@ private final class CachedImage {
 /// - DimensionCache.store() receives the raw source dimensions from the image header —
 ///   not the render-size thumbnail — so classify() gets the true aspect ratio for any
 ///   future layout size without a secondary ranged probe.
+/// - Concurrent requests for the same (url, size, radius, scale) key share one decode
+///   `Task` via an `inFlight` map — both `image()` and `preload()` coalesce against it.
+///   Mirrors DimensionCache's coalescing pattern: creator handles cache store; joiners await
+///   the result.
 /// - No singleton. Constructed once in RenderEnvironment, injected by initializer.
 public actor ImageActor {
     nonisolated let _executor: DispatchQueueExecutor
@@ -88,6 +92,7 @@ public actor ImageActor {
     private let decodeSemaphore = AsyncSemaphore(value: 3)
 
     private let cache = NSCache<ImageCacheKey, CachedImage>()
+    private var inFlight: [ImageCacheKey: Task<DecodeResult, Never>] = [:]
     private let session: URLSession
     /// `nonisolated` so RenderEnvironment can check identity (===) in its designated init.
     nonisolated let dimensionCache: DimensionCache
@@ -172,6 +177,22 @@ public actor ImageActor {
     func set_testDecodeGateHook(_ hook: (@Sendable () async -> Void)?) {
         _testDecodeGateHook = hook
     }
+
+    /// Injected by unit tests to interpose in `preload()` before the decode Task is created —
+    /// fires after the in-flight coalescing check and the pre-launch cancellation guard.
+    ///
+    /// When non-nil, `preload()` suspends at this hook. Cancelling the outer task during this
+    /// hook has no effect on the inner decode Task (unstructured; does not inherit cancellation).
+    /// Use to observe actor state at the inFlight boundary, not to test slot-release under
+    /// cancellation (for that, see VelocityUI-bw1: hook inside `_decode()` after wait()).
+    ///
+    /// Set only from test code via `@testable import VelocityUI`. Never set in production.
+    var _testPreloadGateHook: (@Sendable () async -> Void)?
+
+    /// Sets `_testPreloadGateHook` from test code.
+    func set_testPreloadGateHook(_ hook: (@Sendable () async -> Void)?) {
+        _testPreloadGateHook = hook
+    }
     #endif
 
     // MARK: - Public API
@@ -185,7 +206,9 @@ public actor ImageActor {
     ///                   clip. Pass 0 for no rounding.
     ///   - scale:        Screen scale (points → pixels). Must be captured from UIScreen at
     ///                   the @MainActor call site — UIScreen.main is not safe off main.
-    /// - Returns: BGRA8888 premultiplied CGImage, or nil on error / cancellation.
+    /// - Returns: BGRA8888 premultiplied CGImage, or nil on error or pre-launch cancellation.
+    ///   If an in-flight task for this key is already running, returns its result regardless
+    ///   of the calling task's cancellation state (shared work is not killed for one caller).
     public func image(
         for url: URL,
         targetSize: CGSize,
@@ -204,64 +227,180 @@ public actor ImageActor {
         // 1. Cache hit — O(1), no allocation on the hot path.
         if let hit = cache.object(forKey: key) { return hit.image }
 
-        // 2. Before-network cancellation check.
-        guard !Task.isCancelled else { return nil }
-
-        // 3. Network fetch on the cooperative pool (URLSession suspends, no thread held).
-        #if DEBUG
-        let networkStart = CFAbsoluteTimeGetCurrent()
-        #endif
-        guard let (data, response) = try? await session.data(from: url) else { return nil }
-
-        // 3a. Reject non-2xx: HTML error bodies waste a decode slot and fail at CGImageSource.
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            return nil
+        // 2. Join an existing in-flight task for the same key rather than launching a
+        //    second network fetch + decode — creator handles cache store.
+        if let existing = inFlight[key] {
+            let result = await existing.value
+            return result.image
         }
-        #if DEBUG
-        let networkMs = (CFAbsoluteTimeGetCurrent() - networkStart) * 1_000
-        log.debug("network \(url.lastPathComponent) \(String(format: "%.1f", networkMs))ms")
-        #endif
 
-        // 4. After-network cancellation check.
+        // 3. Before-launch cancellation check.
         guard !Task.isCancelled else { return nil }
 
-        // 5. Acquire a decode slot. Throws CancellationError if cancelled while waiting;
-        //    the slot is never consumed on the thrown path — do NOT call signal().
+        // 4. Launch a task that owns the network fetch + decode for this key.
+        let capturedSession = session
+        let capturedURL = url
+        let capturedTargetSize = targetSize
+        let capturedCornerRadius = cornerRadius
+        let capturedScale = scale
+        let task = Task<DecodeResult, Never> {
+            #if DEBUG
+            let networkStart = CFAbsoluteTimeGetCurrent()
+            #endif
+            guard let (data, response) = try? await capturedSession.data(from: capturedURL) else {
+                return DecodeResult(image: nil, rawSourceSize: nil)
+            }
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                return DecodeResult(image: nil, rawSourceSize: nil)
+            }
+            #if DEBUG
+            let networkMs = (CFAbsoluteTimeGetCurrent() - networkStart) * 1_000
+            log.debug("network \(capturedURL.lastPathComponent) \(String(format: "%.1f", networkMs))ms")
+            #endif
+            guard !Task.isCancelled else { return DecodeResult(image: nil, rawSourceSize: nil) }
+            return await self._decode(
+                data: data,
+                targetSize: capturedTargetSize,
+                cornerRadius: capturedCornerRadius,
+                scale: capturedScale
+            )
+        }
+        inFlight[key] = task
+        let result = await task.value
+        inFlight[key] = nil
+
+        // 5. Cache store + DimensionCache side-effect.
+        if let decoded = result.image {
+            let cost = decoded.width * decoded.height * 4
+            cache.setObject(CachedImage(decoded), forKey: key, cost: cost)
+            if let rawSize = result.rawSourceSize {
+                dimensionCache.store(rawSize, for: url)
+            }
+        }
+
+        return result.image
+    }
+
+    /// Decode pre-loaded Data and prime the image cache at the given layout dimensions.
+    ///
+    /// Equivalent to steps 1 + 5–7 of `image(for:targetSize:cornerRadius:scale:)` — the decode
+    /// and cache-store path — without the network fetch (steps 3–4a). Shared with `image()` to
+    /// cap total decode concurrency at 3 — preload and visible-cell decodes draw from one slot
+    /// pool. FIFO ordering means a preload burst can delay a concurrent `image()` call; intended
+    /// for one-shot warm-up before the visible feed begins fetching.
+    ///
+    /// - Parameters:
+    ///   - data:         Raw image bytes (caller-supplied; not fetched here).
+    ///   - url:          Canonical URL the data originated from. Must match the URL later passed
+    ///                   to `image(for:…)` so the cache key aligns and produces a hit.
+    ///   - targetSize:   Desired render size in points — must match the layout-computed size used
+    ///                   at measurement time, or the cache key will miss.
+    ///   - cornerRadius: Rounding radius in points, applied at decode time. Pass 0 for none.
+    ///   - scale:        Screen scale captured at a @MainActor call site.
+    /// - Note: Bad data (nil CGImageSource or thumbnail failure) silently skips the cache store;
+    ///         the caller receives no signal. Verify warm-up success by probing image(for:…)
+    ///         before measurement begins.
+    /// - Note: Concurrent calls for the same key join the in-flight decode — only one decode
+    ///         Task runs per key at a time. Use during warm-up before the visible feed begins.
+    public func preload(
+        _ data: Data,
+        for url: URL,
+        targetSize: CGSize,
+        cornerRadius: CGFloat,
+        scale: CGFloat
+    ) async {
+        let key = ImageCacheKey(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: scale)
+
+        if cache.object(forKey: key) != nil { return }
+
+        // Join an existing in-flight task for the same key — creator handles cache store.
+        if let existing = inFlight[key] {
+            _ = await existing.value
+            return
+        }
+
+        guard !Task.isCancelled else { return }
+
+        #if canImport(XCTest)
+        if let hook = _testPreloadGateHook { await hook() }
+        #endif
+
+        let capturedData = data
+        let capturedTargetSize = targetSize
+        let capturedCornerRadius = cornerRadius
+        let capturedScale = scale
+        let task = Task<DecodeResult, Never> {
+            await self._decode(
+                data: capturedData,
+                targetSize: capturedTargetSize,
+                cornerRadius: capturedCornerRadius,
+                scale: capturedScale
+            )
+        }
+        inFlight[key] = task
+        let result = await task.value
+        inFlight[key] = nil
+
+        if let decoded = result.image {
+            let cost = decoded.width * decoded.height * 4
+            cache.setObject(CachedImage(decoded), forKey: key, cost: cost)
+            if let rawSize = result.rawSourceSize {
+                dimensionCache.store(rawSize, for: url)
+            }
+        }
+    }
+
+    // MARK: - Private helpers
+
+    /// Acquire a decode slot, run CGImageSource decode on `decodeQueue`, release the slot,
+    /// and return the result. Semaphore acquire/release and continuation are owned here so
+    /// callers share one implementation.
+    ///
+    /// - Returns: `DecodeResult(image: nil, rawSourceSize: nil)` on cancellation or decode
+    ///   failure. Never throws — all error paths are folded into the nil result.
+    private func _decode(
+        data: Data,
+        targetSize: CGSize,
+        cornerRadius: CGFloat,
+        scale: CGFloat
+    ) async -> DecodeResult {
+        // Cancellation paths below (`catch` + post-acquire guard) are dormant: this method
+        // runs inside an unstructured `Task<DecodeResult, Never>` whose handle is never
+        // cancelled. Kept as contract surface for VelocityUI-bw1, which wires inner-Task
+        // cancellation through the inFlight map.
+        //
+        // Acquire a decode slot. Throws CancellationError if cancelled while waiting;
+        // the slot is never consumed on the thrown path — do NOT call signal().
         do {
             try await decodeSemaphore.wait()
         } catch {
-            return nil
+            return DecodeResult(image: nil, rawSourceSize: nil)
         }
 
-        // 5a. Cancellation check after semaphore acquire — a cancellation arriving between
-        //     wait() and the dispatch enqueue would otherwise spend a slot on dead work.
+        // Cancellation arriving between wait() returning and the dispatch enqueue would
+        // otherwise spend a slot on dead work.
         guard !Task.isCancelled else {
             Task { await decodeSemaphore.signal() }
-            return nil
+            return DecodeResult(image: nil, rawSourceSize: nil)
         }
 
-        // 6. Decode on the dedicated concurrent queue via dispatch-and-resume.
-        //    withCheckedContinuation is safe: every DispatchQueue.async path calls
-        //    cont.resume exactly once (explicit success path + guard-else paths).
         let sem = decodeSemaphore
         #if canImport(XCTest)
-        // Capture key here (actor-isolated context) so the @Sendable async closure
-        // can call DispatchQueue.getSpecific without retaining self.
+        // Capture before the continuation (actor-isolated context) so the @Sendable
+        // closure can call DispatchQueue.getSpecific without retaining self.
         let capturedQueueKey = _testDecodeQueueKey
         #endif
-        let result: DecodeResult = await withCheckedContinuation { cont in
+        return await withCheckedContinuation { cont in
             let capturedData = data
             let capturedSize = targetSize
             let capturedRadius = cornerRadius
             let capturedScale = scale
-            let capturedUrl = url
 
             // TODO(VelocityUI-vim+): decodeQueue runs at .userInitiated regardless of the
             // calling Task's priority. Prefetch decodes should run at .utility. Deferred to
             // fling-handling.
             decodeQueue.async {
                 #if canImport(XCTest)
-                // Verify we are running on velocityui.image.decode (not the cooperative pool).
                 let onDecodeQueue = DispatchQueue.getSpecific(key: capturedQueueKey) == true
                 ImageActor._testDecodeRecord(onQueue: onDecodeQueue)
                 #endif
@@ -314,7 +453,7 @@ public actor ImageActor {
                 )
                 #if DEBUG
                 let decodeMs = (CFAbsoluteTimeGetCurrent() - decodeStart) * 1_000
-                log.debug("decode \(capturedUrl.lastPathComponent) \(String(format: "%.1f", decodeMs))ms")
+                log.debug("decode \(capturedSize.width)×\(capturedSize.height) \(String(format: "%.1f", decodeMs))ms")
                 #endif
                 // Release the slot BEFORE resuming so the next waiter can acquire it without
                 // waiting for the continuation-resume actor hop (compresses tail latency in
@@ -323,17 +462,6 @@ public actor ImageActor {
                 cont.resume(returning: DecodeResult(image: normalised, rawSourceSize: rawSize))
             }
         }
-
-        // 7. Cache store + DimensionCache side-effect.
-        if let decoded = result.image {
-            let cost = decoded.width * decoded.height * 4
-            cache.setObject(CachedImage(decoded), forKey: key, cost: cost)
-            if let rawSize = result.rawSourceSize {
-                dimensionCache.store(rawSize, for: url)
-            }
-        }
-
-        return result.image
     }
 
     /// Cancel fetches below the visible range.

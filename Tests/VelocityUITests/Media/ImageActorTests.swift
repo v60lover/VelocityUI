@@ -7,6 +7,51 @@ import CoreGraphics
 import os
 @testable import VelocityUI
 
+private final class CountingURLProtocol: URLProtocol {
+    private static let _lock = OSAllocatedUnfairLock(initialState: 0)
+
+    static var count: Int { _lock.withLock { $0 } }
+    static func reset() { _lock.withLock { $0 = 0 } }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        CountingURLProtocol._lock.withLock { $0 += 1 }
+        let data = UIGraphicsImageRenderer(
+            size: CGSize(width: 2, height: 2),
+            format: {
+                let fmt = UIGraphicsImageRendererFormat()
+                fmt.scale = 1
+                return fmt
+            }()
+        ).jpegData(withCompressionQuality: 0.9) { ctx in
+            UIColor.red.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+        }
+        let response = URLResponse(
+            url: request.url!,
+            mimeType: "image/jpeg",
+            expectedContentLength: data.count,
+            textEncodingName: nil
+        )
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private final class FailingURLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost))
+    }
+    override func stopLoading() {}
+}
+
 final class ImageActorTests: XCTestCase {
 
     // MARK: - Fixture helpers
@@ -324,6 +369,136 @@ final class ImageActorTests: XCTestCase {
         XCTAssertNil(
             dimensions.get(url),
             "Cache must not be populated when task is cancelled before decode"
+        )
+    }
+
+    // MARK: - Test 12: preload() warms cache so image() succeeds without a network request
+
+    func testPreloadThenImageHitsCache() async throws {
+        let data = jpegData(width: 40, height: 40)
+        let url = URL(string: "https://test.preload.example/a.jpg")!
+        let size = CGSize(width: 40, height: 40)
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FailingURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let actor = ImageActor(session: session, dimensionCache: DimensionCache())
+
+        await actor.preload(data, for: url, targetSize: size, cornerRadius: 0, scale: 1)
+
+        let result = await actor.image(for: url, targetSize: size, cornerRadius: 0, scale: 1)
+        XCTAssertNotNil(result, "image() must return the preloaded CGImage without hitting the network")
+    }
+
+    // MARK: - Test 13: corrupt preload data leaves cache empty; image() proceeds to decode
+
+    func testPreloadBadDataSkipsCache() async throws {
+        let url = try writeTempJPEG(width: 30, height: 30)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let size = CGSize(width: 30, height: 30)
+        let actor = ImageActor(dimensionCache: DimensionCache())
+
+        await actor.preload(Data(count: 8), for: url, targetSize: size, cornerRadius: 0, scale: 1)
+
+        let result = await actor.image(for: url, targetSize: size, cornerRadius: 0, scale: 1)
+        XCTAssertNotNil(result, "Bad preload data must not poison cache; image() must succeed via decode")
+    }
+
+    // MARK: - Test 14: pre-cancelled preload tasks do not exhaust the semaphore
+
+    func testPreloadPreCancelledDoesNotLeakSemaphoreSlot() async throws {
+        let data = jpegData(width: 20, height: 20)
+        let url = URL(string: "https://test.preload.example/c.jpg")!
+        let size = CGSize(width: 20, height: 20)
+        let actor = ImageActor(dimensionCache: DimensionCache())
+
+        for _ in 0..<3 {
+            let t = Task {
+                await Task.yield()
+                await actor.preload(data, for: url, targetSize: size, cornerRadius: 0, scale: 1)
+            }
+            t.cancel()
+            _ = await t.value
+        }
+
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<3 {
+                group.addTask {
+                    await actor.preload(data, for: url, targetSize: size, cornerRadius: 0, scale: 1)
+                }
+            }
+        }
+    }
+
+    // MARK: - Test 15: preload() populates DimensionCache with raw source dimensions
+
+    func testPreloadPopulatesDimensionCache() async throws {
+        let data = jpegData(width: 160, height: 120)
+        let url = URL(string: "https://test.preload.example/d.jpg")!
+        let dimensions = DimensionCache()
+        let actor = ImageActor(dimensionCache: dimensions)
+
+        XCTAssertNil(dimensions.get(url), "No entry before preload")
+        await actor.preload(data, for: url, targetSize: CGSize(width: 80, height: 60), cornerRadius: 0, scale: 1)
+
+        let stored = dimensions.get(url)
+        XCTAssertNotNil(stored, "DimensionCache must be populated after preload")
+        XCTAssertEqual(stored?.width,  160, "Must store raw source width, not thumbnail width")
+        XCTAssertEqual(stored?.height, 120, "Must store raw source height, not thumbnail height")
+    }
+
+    // MARK: - Test 16: preload() and image() produce identical cache keys for fractional point sizes
+
+    func testPreloadCacheKeyAlignmentFractional() async throws {
+        let data = jpegData(width: 101, height: 162)
+        let url = URL(string: "https://test.preload.example/e.jpg")!
+        let size = CGSize(width: 50.4, height: 80.6)
+        let scale: CGFloat = 2
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FailingURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let actor = ImageActor(session: session, dimensionCache: DimensionCache())
+
+        await actor.preload(data, for: url, targetSize: size, cornerRadius: 8, scale: scale)
+
+        let result = await actor.image(for: url, targetSize: size, cornerRadius: 8, scale: scale)
+        XCTAssertNotNil(
+            result,
+            "image() must hit cache after preload() with identical fractional size+radius+scale"
+        )
+    }
+
+    // MARK: - Test 17: Concurrent same-key image() calls coalesce to one network fetch
+
+    func testImageCoalescesConcurrentSameURLRequests() async throws {
+        CountingURLProtocol.reset()
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CountingURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let actor = ImageActor(session: session, dimensionCache: DimensionCache())
+
+        let url = URL(string: "https://test.coalesce.example/a.jpg")!
+        let size = CGSize(width: 40, height: 40)
+
+        let results = await withTaskGroup(of: CGImage?.self) { group in
+            group.addTask {
+                await actor.image(for: url, targetSize: size, cornerRadius: 0, scale: 1)
+            }
+            group.addTask {
+                await actor.image(for: url, targetSize: size, cornerRadius: 0, scale: 1)
+            }
+            var collected: [CGImage?] = []
+            for await r in group { collected.append(r) }
+            return collected
+        }
+
+        let nonNilCount = results.compactMap { $0 }.count
+        XCTAssertEqual(nonNilCount, 2, "Both concurrent callers must receive a non-nil image")
+        XCTAssertEqual(
+            CountingURLProtocol.count, 1,
+            "In-flight coalescing must collapse N concurrent same-key requests to one network fetch"
         )
     }
 }

@@ -34,6 +34,8 @@
 		BB00000000000000000000D5 /* ScrollDriverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB00000000000000000000D2 /* ScrollDriverTests.swift */; };
 		BB00000000000000000000E3 /* Nuke in Frameworks */ = {isa = PBXBuildFile; productRef = BB00000000000000000000E1 /* Nuke */; };
 		BB00000000000000000000E4 /* NukeUI in Frameworks */ = {isa = PBXBuildFile; productRef = BB00000000000000000000E2 /* NukeUI */; };
+		BB0000000000000000000102 /* VelocityUI in Frameworks */ = {isa = PBXBuildFile; productRef = BB0000000000000000000101 /* VelocityUI */; };
+		BB0000000000000000000103 /* BenchmarkURLProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000104 /* BenchmarkURLProtocol.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -72,6 +74,7 @@
 		BB00000000000000000000D1 /* BenchmarkOrchestrator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkOrchestrator.swift; sourceTree = "<group>"; };
 		BB00000000000000000000D2 /* ScrollDriverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollDriverTests.swift; sourceTree = "<group>"; };
 		BB00000000000000000000E5 /* BenchmarkDataLoaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkDataLoaderTests.swift; sourceTree = "<group>"; };
+		BB0000000000000000000104 /* BenchmarkURLProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkURLProtocol.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -82,6 +85,7 @@
 				BB00000000000000000000E3 /* Nuke in Frameworks */,
 				BB00000000000000000000E4 /* NukeUI in Frameworks */,
 				BB00000000000000000000F2 /* AsyncDisplayKit in Frameworks */,
+				BB0000000000000000000102 /* VelocityUI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -123,6 +127,7 @@
 				BB0000000000000000000072 /* BenchmarkHarness.swift */,
 				BB00000000000000000000D0 /* ScrollDriver.swift */,
 				BB00000000000000000000D1 /* BenchmarkOrchestrator.swift */,
+				BB0000000000000000000104 /* BenchmarkURLProtocol.swift */,
 				BB0000000000000000000004 /* Runtimes */,
 			);
 			path = Sources;
@@ -180,6 +185,7 @@
 				BB00000000000000000000E1 /* Nuke */,
 				BB00000000000000000000E2 /* NukeUI */,
 				BB00000000000000000000F1 /* AsyncDisplayKit */,
+				BB0000000000000000000101 /* VelocityUI */,
 			);
 			productName = BenchmarkHost;
 			productReference = BB000000000000000000002E /* BenchmarkHost.app */;
@@ -236,6 +242,7 @@
 			packageReferences = (
 				BB00000000000000000000E0 /* XCRemoteSwiftPackageReference "Nuke" */,
 				BB00000000000000000000F0 /* XCRemoteSwiftPackageReference "Texture" */,
+				BB0000000000000000000100 /* XCLocalSwiftPackageReference "VelocityUI" */,
 			);
 			productRefGroup = BB0000000000000000000005 /* Products */;
 			projectDirPath = "";
@@ -297,6 +304,7 @@
 				BB0000000000000000000082 /* BenchmarkHarness.swift in Sources */,
 				BB00000000000000000000D3 /* ScrollDriver.swift in Sources */,
 				BB00000000000000000000D4 /* BenchmarkOrchestrator.swift in Sources */,
+				BB0000000000000000000103 /* BenchmarkURLProtocol.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -492,6 +500,13 @@
 		};
 /* End XCConfigurationList section */
 
+/* Begin XCLocalSwiftPackageReference section */
+		BB0000000000000000000100 /* XCLocalSwiftPackageReference "VelocityUI" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../;
+		};
+/* End XCLocalSwiftPackageReference section */
+
 /* Begin XCRemoteSwiftPackageReference section */
 		BB00000000000000000000E0 /* XCRemoteSwiftPackageReference "Nuke" */ = {
 			isa = XCRemoteSwiftPackageReference;
@@ -531,6 +546,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = BB00000000000000000000F0 /* XCRemoteSwiftPackageReference "Texture" */;
 			productName = AsyncDisplayKit;
+		};
+		BB0000000000000000000101 /* VelocityUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = BB0000000000000000000100 /* XCLocalSwiftPackageReference "VelocityUI" */;
+			productName = VelocityUI;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
