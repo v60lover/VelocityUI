@@ -19,4 +19,6 @@ CALIBER_LEARNINGS.md
 .mcp.json
 COMPARISON.md
 implement.md
-
+BenchmarkHost/build/
+BenchmarkHost/results/
+BenchmarkHost/
