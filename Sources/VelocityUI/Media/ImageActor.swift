@@ -193,6 +193,18 @@ public actor ImageActor {
     func set_testPreloadGateHook(_ hook: (@Sendable () async -> Void)?) {
         _testPreloadGateHook = hook
     }
+
+    /// Injected by unit tests to interpose in `prefetch()` before the inner decode Task is
+    /// created — fires after the in-flight coalescing check and the pre-launch cancellation
+    /// guard. Use to observe actor state at the inFlight boundary.
+    ///
+    /// Set only from test code via `@testable import VelocityUI`. Never set in production.
+    var _testPrefetchGateHook: (@Sendable () async -> Void)?
+
+    /// Sets `_testPrefetchGateHook` from test code.
+    func set_testPrefetchGateHook(_ hook: (@Sendable () async -> Void)?) {
+        _testPrefetchGateHook = hook
+    }
     #endif
 
     // MARK: - Public API
@@ -238,32 +250,8 @@ public actor ImageActor {
         guard !Task.isCancelled else { return nil }
 
         // 4. Launch a task that owns the network fetch + decode for this key.
-        let capturedSession = session
-        let capturedURL = url
-        let capturedTargetSize = targetSize
-        let capturedCornerRadius = cornerRadius
-        let capturedScale = scale
         let task = Task<DecodeResult, Never> {
-            #if DEBUG
-            let networkStart = CFAbsoluteTimeGetCurrent()
-            #endif
-            guard let (data, response) = try? await capturedSession.data(from: capturedURL) else {
-                return DecodeResult(image: nil, rawSourceSize: nil)
-            }
-            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                return DecodeResult(image: nil, rawSourceSize: nil)
-            }
-            #if DEBUG
-            let networkMs = (CFAbsoluteTimeGetCurrent() - networkStart) * 1_000
-            log.debug("network \(capturedURL.lastPathComponent) \(String(format: "%.1f", networkMs))ms")
-            #endif
-            guard !Task.isCancelled else { return DecodeResult(image: nil, rawSourceSize: nil) }
-            return await self._decode(
-                data: data,
-                targetSize: capturedTargetSize,
-                cornerRadius: capturedCornerRadius,
-                scale: capturedScale
-            )
+            await self._networkFetchAndDecode(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: scale)
         }
         inFlight[key] = task
         let result = await task.value
@@ -336,6 +324,68 @@ public actor ImageActor {
                 cornerRadius: capturedCornerRadius,
                 scale: capturedScale
             )
+        }
+        inFlight[key] = task
+        let result = await task.value
+        inFlight[key] = nil
+
+        if let decoded = result.image {
+            let cost = decoded.width * decoded.height * 4
+            cache.setObject(CachedImage(decoded), forKey: key, cost: cost)
+            if let rawSize = result.rawSourceSize {
+                dimensionCache.store(rawSize, for: url)
+            }
+        }
+    }
+
+    /// Network-fetch, decode, and cache an image at lower scheduling priority.
+    ///
+    /// - Cache hit → returns immediately (no work).
+    /// - In-flight hit → joins the existing Task (from a concurrent `image()` or `prefetch()`);
+    ///   the shared `inFlight` map keyed by `ImageCacheKey` guarantees coalescing across all
+    ///   entry points. Creator handles cache store; joiners await the result.
+    /// - Cold path → network fetch → decode via `_networkFetchAndDecode` → normalise +
+    ///   corner-round → cache store + `DimensionCache.store()` side-effect. Same pipeline
+    ///   as `image()`; return value is discarded.
+    /// - QoS: inner Task runs at `.utility` so the cooperative scheduler deprioritises
+    ///   prefetch network waits relative to mount-time `image()` callers (`.userInitiated`).
+    ///   `decodeQueue` always runs at `.userInitiated` (shared; see TODO in `_decode`).
+    ///   URLSession connection pool is shared — QoS differentiation is effective at the
+    ///   cooperative pool scheduler layer only, not at TCP/TLS or server-side ordering.
+    /// - Cancellation: `await task.value` on `Task<DecodeResult, Never>` does not throw on
+    ///   cancellation; `prefetch()` awaits the inner Task regardless. The inner Task is
+    ///   unstructured — cancelling the calling Task of `prefetch()` does NOT cancel the
+    ///   inner Task or any concurrent `image()` awaiting the same inFlight entry.
+    ///
+    /// - Parameters:
+    ///   - url:          Source URL.
+    ///   - targetSize:   Desired render size in points — must match the size passed to the
+    ///                   paired `image(for:…)` call so the cache key aligns.
+    ///   - cornerRadius: Rounding radius in points. Pass 0 for no rounding.
+    ///   - scale:        Screen scale captured at a @MainActor call site.
+    public func prefetch(
+        for url: URL,
+        targetSize: CGSize,
+        cornerRadius: CGFloat,
+        scale: CGFloat
+    ) async {
+        let key = ImageCacheKey(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: scale)
+
+        if cache.object(forKey: key) != nil { return }
+
+        if let existing = inFlight[key] {
+            _ = await existing.value
+            return
+        }
+
+        guard !Task.isCancelled else { return }
+
+        #if canImport(XCTest)
+        if let hook = _testPrefetchGateHook { await hook() }
+        #endif
+
+        let task = Task<DecodeResult, Never>(priority: .utility) {
+            await self._networkFetchAndDecode(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: scale)
         }
         inFlight[key] = task
         let result = await task.value
@@ -462,6 +512,33 @@ public actor ImageActor {
                 cont.resume(returning: DecodeResult(image: normalised, rawSourceSize: rawSize))
             }
         }
+    }
+
+    /// Network fetch + decode; shared by `image()` and `prefetch()` so the pipeline has one
+    /// implementation. Called from inside an unstructured `Task<DecodeResult, Never>` — hops
+    /// to the actor for `session` access, suspends during the network request (releasing the
+    /// actor), then hops back for `_decode`.
+    private func _networkFetchAndDecode(
+        url: URL,
+        targetSize: CGSize,
+        cornerRadius: CGFloat,
+        scale: CGFloat
+    ) async -> DecodeResult {
+        #if DEBUG
+        let networkStart = CFAbsoluteTimeGetCurrent()
+        #endif
+        guard let (data, response) = try? await session.data(from: url) else {
+            return DecodeResult(image: nil, rawSourceSize: nil)
+        }
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            return DecodeResult(image: nil, rawSourceSize: nil)
+        }
+        #if DEBUG
+        let networkMs = (CFAbsoluteTimeGetCurrent() - networkStart) * 1_000
+        log.debug("network \(url.lastPathComponent) \(String(format: "%.1f", networkMs))ms")
+        #endif
+        guard !Task.isCancelled else { return DecodeResult(image: nil, rawSourceSize: nil) }
+        return await _decode(data: data, targetSize: targetSize, cornerRadius: cornerRadius, scale: scale)
     }
 
     /// Cancel fetches below the visible range.

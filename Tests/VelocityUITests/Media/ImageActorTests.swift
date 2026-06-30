@@ -52,6 +52,46 @@ private final class FailingURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
+/// Blocks in startLoading() until the test calls release(). Lets tests inject a network
+/// pause so other Tasks can join an inFlight entry before the response arrives.
+private final class BarrierURLProtocol: URLProtocol {
+    private static let _hitSem = DispatchSemaphore(value: 0)
+    private static let _releaseSem = DispatchSemaphore(value: 0)
+
+    /// Block the calling thread until startLoading has been entered.
+    /// Must be called from a non-cooperative thread (e.g. DispatchQueue.global).
+    static func waitForHit() { _hitSem.wait() }
+    /// Unblock startLoading so it delivers its response.
+    static func release() { _releaseSem.signal() }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        BarrierURLProtocol._hitSem.signal()
+        BarrierURLProtocol._releaseSem.wait()
+        let data = UIGraphicsImageRenderer(
+            size: CGSize(width: 2, height: 2),
+            format: { let f = UIGraphicsImageRendererFormat(); f.scale = 1; return f }()
+        ).jpegData(withCompressionQuality: 0.9) { ctx in
+            UIColor.red.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+        }
+        let response = URLResponse(
+            url: request.url!, mimeType: "image/jpeg",
+            expectedContentLength: data.count, textEncodingName: nil
+        )
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {
+        // Avoid deadlock if URLSession cancels the request while blocked in _releaseSem.wait().
+        BarrierURLProtocol._releaseSem.signal()
+    }
+}
+
 final class ImageActorTests: XCTestCase {
 
     // MARK: - Fixture helpers
@@ -466,6 +506,197 @@ final class ImageActorTests: XCTestCase {
         XCTAssertNotNil(
             result,
             "image() must hit cache after preload() with identical fractional size+radius+scale"
+        )
+    }
+
+    // MARK: - Test 18: prefetch() returns immediately on cache hit — no network request
+
+    func testPrefetchCacheHitNoNetwork() async throws {
+        CountingURLProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CountingURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let actor = ImageActor(session: session, dimensionCache: DimensionCache())
+
+        let data = jpegData(width: 40, height: 40)
+        let url = URL(string: "https://test.prefetch.cachehit.example/a.jpg")!
+        let size = CGSize(width: 40, height: 40)
+
+        // Prime cache via preload() — no network involved.
+        await actor.preload(data, for: url, targetSize: size, cornerRadius: 0, scale: 1)
+        XCTAssertEqual(CountingURLProtocol.count, 0, "preload() must not use the network session")
+
+        // prefetch() must detect the cache hit and return without a network request.
+        await actor.prefetch(for: url, targetSize: size, cornerRadius: 0, scale: 1)
+        XCTAssertEqual(CountingURLProtocol.count, 0, "prefetch() on a cached key must not make a network request")
+    }
+
+    // MARK: - Test 19: prefetch() then image() returns cached CGImage — zero additional network calls
+
+    func testPrefetchThenImageHitsCacheNoExtraNetwork() async throws {
+        CountingURLProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CountingURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let actor = ImageActor(session: session, dimensionCache: DimensionCache())
+
+        let url = URL(string: "https://test.prefetch.then.image.example/a.jpg")!
+        let size = CGSize(width: 40, height: 40)
+
+        await actor.prefetch(for: url, targetSize: size, cornerRadius: 0, scale: 1)
+        XCTAssertEqual(CountingURLProtocol.count, 1, "prefetch() must make exactly one network request")
+
+        let result = await actor.image(for: url, targetSize: size, cornerRadius: 0, scale: 1)
+        XCTAssertNotNil(result, "image() must return the CGImage cached by prefetch()")
+        XCTAssertEqual(CountingURLProtocol.count, 1, "image() after prefetch() must not make an additional network request")
+    }
+
+    // MARK: - Test 20: Concurrent prefetch() + image() coalesce to one network fetch
+
+    func testPrefetchAndImageCoalesceToOneNetworkCall() async throws {
+        CountingURLProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CountingURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let actor = ImageActor(session: session, dimensionCache: DimensionCache())
+
+        let url = URL(string: "https://test.prefetch.coalesce.example/a.jpg")!
+        let size = CGSize(width: 40, height: 40)
+
+        // prefetch returns Void; image returns CGImage?. Wrap both as CGImage? so the group
+        // is typed and Swift 6 doesn't flag the captured-var mutation.
+        let results = await withTaskGroup(of: CGImage?.self) { group in
+            group.addTask { await actor.prefetch(for: url, targetSize: size, cornerRadius: 0, scale: 1); return nil }
+            group.addTask { return await actor.image(for: url, targetSize: size, cornerRadius: 0, scale: 1) }
+            var collected: [CGImage?] = []
+            for await r in group { collected.append(r) }
+            return collected
+        }
+
+        XCTAssertNotNil(results.compactMap { $0 }.first, "image() must return a valid CGImage")
+        XCTAssertEqual(
+            CountingURLProtocol.count,
+            1,
+            "Concurrent prefetch() + image() for the same key must coalesce to one network fetch"
+        )
+    }
+
+    // MARK: - Test 21: Cancelling prefetch() calling Task does not cancel image() sharing the same inFlight entry
+
+    func testPrefetchCancellationDoesNotCancelConcurrentImageTask() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [BarrierURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let actor = ImageActor(session: session, dimensionCache: DimensionCache())
+
+        let url = URL(string: "https://test.prefetch.cancel.barrier.example/a.jpg")!
+        let size = CGSize(width: 40, height: 40)
+
+        // Gate: pauses image() before the cache/inFlight check. The hook signals when hit
+        // (explicit happens-before anchor) then blocks until released.
+        let imageHitSem = AsyncSemaphore(value: 0)
+        let imageReleaseSem = AsyncSemaphore(value: 0)
+        await actor.set_testDecodeGateHook {
+            await imageHitSem.signal()
+            try? await imageReleaseSem.wait()
+        }
+        defer { Task { await actor.set_testDecodeGateHook(nil) } }
+
+        // Step 1: prefetch launches. Its inner Task calls session.data(from:).
+        // BarrierURLProtocol blocks startLoading() until released.
+        // inFlight[key] is set before the actor suspends at `await task.value`.
+        let prefetchTask = Task {
+            await actor.prefetch(for: url, targetSize: size, cornerRadius: 0, scale: 1)
+        }
+
+        // Step 2: Block a background thread until the network request has started.
+        // When this returns: inFlight[key] is populated, the actor is free.
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                BarrierURLProtocol.waitForHit()
+                cont.resume()
+            }
+        }
+
+        // Step 3: image() launches and immediately hits the decode gate hook, suspending
+        // before the cache or inFlight check.
+        let imageTask = Task {
+            await actor.image(for: url, targetSize: size, cornerRadius: 0, scale: 1)
+        }
+        // Step 3b: Explicit happens-before anchor — wait until imageTask has hit the gate.
+        try await imageHitSem.wait()
+
+        // Step 4: Release the gate. imageTask resumes, finds cache miss (inner Task still
+        // blocked in BarrierURLProtocol), finds inFlight[key] HIT, and joins.
+        await imageReleaseSem.signal()
+
+        // Step 5: Cancel the prefetch calling Task. The inner Task<DecodeResult, Never>
+        // is unstructured — cancellation does not propagate to it or to imageTask's
+        // `await existing.value` on the same inFlight entry.
+        prefetchTask.cancel()
+
+        // Step 6: Release the network barrier. The inner Task receives data, decodes,
+        // stores in cache. Both prefetch() and image() receive the DecodeResult.
+        BarrierURLProtocol.release()
+
+        let result = await imageTask.value
+        _ = await prefetchTask.value
+
+        XCTAssertNotNil(
+            result,
+            "image() must return a valid CGImage even when the concurrent prefetch() calling Task is cancelled while both share the same inFlight entry"
+        )
+    }
+
+    // MARK: - Test 22: prefetch() populates DimensionCache with raw source dimensions
+
+    func testPrefetchPopulatesDimensionCache() async throws {
+        CountingURLProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CountingURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let dc = DimensionCache()
+        let actor = ImageActor(session: session, dimensionCache: dc)
+
+        let url = URL(string: "https://test.prefetch.dimcache.example/a.jpg")!
+        let size = CGSize(width: 40, height: 40)
+
+        XCTAssertNil(dc.get(url), "DimensionCache must be empty before prefetch()")
+        await actor.prefetch(for: url, targetSize: size, cornerRadius: 0, scale: 1)
+
+        // CountingURLProtocol returns a 2×2 JPEG; raw source dimensions must be stored.
+        let stored = dc.get(url)
+        XCTAssertNotNil(stored, "prefetch() must populate DimensionCache as a decode-time side effect")
+        XCTAssertEqual(stored?.width, 2, "Must store raw source width, not render-target width")
+        XCTAssertEqual(stored?.height, 2, "Must store raw source height, not render-target height")
+    }
+
+    // MARK: - Test 23: Cache-key alignment — prefetch() + image() with fractional point sizes
+
+    func testPrefetchCacheKeyAlignmentFractional() async throws {
+        CountingURLProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CountingURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let actor = ImageActor(session: session, dimensionCache: DimensionCache())
+
+        let url = URL(string: "https://test.prefetch.keyfrac.example/a.jpg")!
+        let size = CGSize(width: 50.4, height: 80.6)
+        let scale: CGFloat = 2
+
+        await actor.prefetch(for: url, targetSize: size, cornerRadius: 8, scale: scale)
+        XCTAssertEqual(CountingURLProtocol.count, 1, "prefetch() must make exactly one network request")
+
+        // image() with identical fractional params must hit the cache and not re-fetch.
+        let result = await actor.image(for: url, targetSize: size, cornerRadius: 8, scale: scale)
+        XCTAssertNotNil(
+            result,
+            "image() must hit cache after prefetch() with identical fractional size + radius + scale"
+        )
+        XCTAssertEqual(
+            CountingURLProtocol.count,
+            1,
+            "image() after prefetch() with same fractional params must not make an additional network request"
         )
     }
 
