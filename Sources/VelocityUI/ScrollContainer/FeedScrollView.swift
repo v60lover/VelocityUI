@@ -397,8 +397,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             // Check visibleCells first so the set is not mutated when no cell is present.
             if let cell = visibleCells[index], _pendingFragmentIndices.remove(index) != nil {
                 cell.layer.frame = resolvedFrames[index]
-                cell.applyLayout(entry.fragments)
-                spawnMediaFetches(for: cell, fragments: entry.fragments, itemID: tables[index].itemID)
+                let syncMap = buildSyncMap(for: entry.fragments)
+                cell.applyLayout(entry.fragments, synchronousContent: syncMap)
+                spawnMediaFetches(for: cell, fragments: entry.fragments, itemID: tables[index].itemID,
+                                  syncMap: syncMap)
                 pendingRepositioned.insert(index)
             }
         }
@@ -490,8 +492,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
             if let entry = workingRange.entry(at: index) {
                 cell.layer.frame = frame
-                cell.applyLayout(entry.fragments)
-                spawnMediaFetches(for: cell, fragments: entry.fragments, itemID: table.itemID)
+                let syncMap = buildSyncMap(for: entry.fragments)
+                cell.applyLayout(entry.fragments, synchronousContent: syncMap)
+                spawnMediaFetches(for: cell, fragments: entry.fragments, itemID: table.itemID,
+                                  syncMap: syncMap)
             } else {
                 // WorkingRange miss: placeholder gradient at estimated frame.
                 // Real fragments arrive via refineKnownFrames once the pipeline commits.
@@ -612,10 +616,16 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// for views not yet attached to a UIWindow (iOS 17+ scene-based traits, unit tests). A zero
     /// scale would produce pixelWidth=pixelHeight=0 in ImageCacheKey and undefined behaviour at
     /// decode; 1× is a safe decode-once floor that the cache supersedes on first real-scale hit.
+    ///
+    /// `syncMap`: fragments already painted synchronously via applyLayout's synchronousContent
+    /// map. These must not receive a second async fetch — they are already in the cache and
+    /// the sublayer already has non-nil contents. Passing the map directly avoids an extra
+    /// Set allocation per mount; lookup is O(1) via Dictionary subscript.
     private func spawnMediaFetches(
         for cell: RenderCell,
         fragments: [Fragment],
-        itemID: AnyHashable
+        itemID: AnyHashable,
+        syncMap: [Int: CGImage] = [:]
     ) {
         let imageActor = environment.imageActor
         let scale = max(1, traitCollection.displayScale)
@@ -629,6 +639,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         for fragment in fragments {
             guard case .image(let d) = fragment.content, let url = d.url else { continue }
             let fragmentID = fragment.id
+            guard syncMap[fragmentID] == nil else { continue }
             let targetSize = fragment.frame.size
             let cornerRadius = d.cornerRadius
 
@@ -657,6 +668,27 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             }
             cell.addMediaHandle(MediaHandle(task: task))
         }
+    }
+
+    /// Probes the image cache synchronously for each image fragment with a non-nil URL.
+    /// Returns a map from fragment.id → CGImage for cache hits only; misses (including
+    /// in-flight decodes) are excluded — callers fall back to spawnMediaFetches for those.
+    ///
+    /// Scale caveat: if preload ran at a different displayScale (e.g. scale 1 in tests,
+    /// scale 3 in production), cachedImage returns nil and the fragment is excluded from
+    /// the map, silently falling back to the async path. Same constraint as image().
+    private func buildSyncMap(for fragments: [Fragment]) -> [Int: CGImage] {
+        let imageActor = environment.imageActor
+        let scale = max(1, traitCollection.displayScale)
+        var map: [Int: CGImage] = [:]
+        for fragment in fragments {
+            guard case .image(let d) = fragment.content, let url = d.url else { continue }
+            if let img = imageActor.cachedImage(for: url, targetSize: fragment.frame.size,
+                                                cornerRadius: d.cornerRadius, scale: scale) {
+                map[fragment.id] = img
+            }
+        }
+        return map
     }
 
     // MARK: - Teardown

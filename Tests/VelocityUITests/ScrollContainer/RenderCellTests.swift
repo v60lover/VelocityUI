@@ -457,6 +457,98 @@ final class RenderCellTests: XCTestCase {
             "FeedScrollView mount sites snap without animating")
     }
 
+    // MARK: - Test 18: applyLayout with sync content sets sublayer.contents, skips gray tint
+
+    func testSyncApplyLayoutSetsContentsAndSkipsGrayTint() {
+        let cell = makeCell()
+        let img = makeCGImage()
+        let frag = imageFragment(id: 0, frame: CGRect(x: 0, y: 0, width: 320, height: 200))
+
+        cell.applyLayout([frag], synchronousContent: [0: img])
+
+        guard let cl = contentLayer(of: cell) else { XCTFail("contentLayer missing"); return }
+        let sub = cl.sublayers?.first
+
+        XCTAssertNotNil(sub?.contents,
+            "Sync paint must set sublayer.contents immediately — no Task spawn or applyContent needed")
+        XCTAssertNil(sub?.backgroundColor,
+            "Sync paint must skip the gray placeholder tint — image is already present")
+    }
+
+    // MARK: - Test 19: applyLayout sync full-coverage reveals contentLayer immediately, no animation
+
+    func testSyncApplyLayoutAllFragmentsCoveredRevealsContentLayerImmediately() {
+        let cell = makeCell()
+        let img = makeCGImage()
+        let frags = [
+            imageFragment(id: 0, frame: CGRect(x: 0, y: 0, width: 320, height: 100)),
+            imageFragment(id: 1, frame: CGRect(x: 0, y: 100, width: 320, height: 100)),
+        ]
+
+        // Capture baseline before the call — the static counter accumulates across tests.
+        #if DEBUG
+        let countBefore = RenderCell._debugApplyContentCount
+        #endif
+
+        cell.applyLayout(frags, synchronousContent: [0: img, 1: img])
+
+        guard let cl = contentLayer(of: cell) else { XCTFail("contentLayer missing"); return }
+        guard let pl = placeholderLayer(of: cell) else { XCTFail("placeholderLayer missing"); return }
+
+        XCTAssertEqual(cl.opacity, 1,
+            "contentLayer must be immediately visible when sync map covers every image fragment")
+        XCTAssertEqual(pl.opacity, 0,
+            "placeholderLayer must be immediately hidden when sync map covers every image fragment")
+
+        // Verify applyContent was NOT called — sync path bypasses it, so the counter must not move.
+        #if DEBUG
+        XCTAssertEqual(RenderCell._debugApplyContentCount, countBefore,
+            "Sync paint must bypass applyContent — _debugApplyContentCount must not increment")
+        #endif
+    }
+
+    // MARK: - Test 20: applyLayout partial sync map — covered fragment has contents, uncovered has gray tint
+
+    func testSyncApplyLayoutPartialCoverageLeavesMissingFragmentAsAsync() {
+        let cell = makeCell()
+        let img = makeCGImage()
+        let frags = [
+            imageFragment(id: 0, frame: CGRect(x: 0, y: 0, width: 320, height: 100)),
+            imageFragment(id: 1, frame: CGRect(x: 0, y: 100, width: 320, height: 100)),
+        ]
+
+        // Only fragment 0 in sync map — fragment 1 falls back to async path
+        cell.applyLayout(frags, synchronousContent: [0: img])
+
+        guard let cl = contentLayer(of: cell) else { XCTFail("contentLayer missing"); return }
+        let subs = cl.sublayers ?? []
+        XCTAssertEqual(subs.count, 2)
+
+        // Insertion order = fragment order: subs[0]=id0 (sync), subs[1]=id1 (async fallback)
+        XCTAssertNotNil(subs[0].contents, "Sync-painted fragment must have non-nil contents")
+        XCTAssertNil(subs[0].backgroundColor, "Sync-painted fragment must not have gray tint")
+        XCTAssertNil(subs[1].contents, "Async-fallback fragment must have nil contents (not yet fetched)")
+        XCTAssertNotNil(subs[1].backgroundColor, "Async-fallback fragment must have gray placeholder tint")
+
+        // contentLayer must stay hidden — not all fragments loaded yet
+        XCTAssertEqual(cl.opacity, 0,
+            "contentLayer must stay hidden when partial sync map does not cover all image fragments")
+    }
+
+    // MARK: - Test 21: applyLayout(_:) wrapper produces same behavior as empty sync map
+
+    func testApplyLayoutNoArgWrapperPreservesGrayTintForNilContents() {
+        let cell = makeCell()
+        let frag = imageFragment(id: 0, frame: CGRect(x: 0, y: 0, width: 320, height: 200))
+
+        cell.applyLayout([frag])  // wrapper → synchronousContent: [:]
+
+        guard let cl = contentLayer(of: cell) else { XCTFail("contentLayer missing"); return }
+        let sub = cl.sublayers?.first
+        XCTAssertNil(sub?.contents, "No sync content — sublayer must have nil contents")
+        XCTAssertNotNil(sub?.backgroundColor, "No sync content — gray placeholder tint must be applied")
+    }
+
     // MARK: - Test 16: applyContent with mismatched itemID is a no-op (Latent 3 privacy guard)
 
     func testApplyContentWithMismatchedItemIDIsNoOp() {

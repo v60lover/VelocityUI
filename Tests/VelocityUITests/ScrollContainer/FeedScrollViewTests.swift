@@ -1296,5 +1296,110 @@ final class FeedScrollViewTests: XCTestCase {
             "[VelocityUI-d7b] cache-hit speedup must be ≥2× vs miss-path median — "
             + "measured \(String(format: "%.1f", speedup))×; cache not skipping builder on hit path")
     }
+
+    // MARK: - 23. Sync paint: refineKnownFrames sets sublayer.contents within the same layoutSubviews
+    //              call that delivers fragments — no async hop, no applyContent (VelocityUI-1ho AC1,5,6)
+
+    /// Verifies the core sync-paint invariant end-to-end through the full FeedScrollView stack:
+    ///
+    /// 1. Mount itemA, wait for async load to complete (image enters cache).
+    /// 2. Prepend itemB → WorkingRange invalidated → itemA moves to index 1 (WR miss).
+    /// 3. Pipeline re-measures → commits to WR → setNeedsLayout.
+    /// 4. On the next layoutSubviews, refineKnownFrames builds a sync map (cachedImage hit),
+    ///    calls applyLayout(_:synchronousContent:) → sublayer.contents is non-nil in the SAME
+    ///    layoutSubviews call — no additional Task.yield or async hop required.
+    ///
+    /// Additionally asserts: _debugApplyContentCount == 0 (applyContent was bypassed),
+    /// and placeholderLayer.opacity == 0 (full-coverage sync map reveals contentLayer inline).
+    func testSyncPaintSetsContentsWithinRefineKnownFrames() async throws {
+        let url = try writeTempJPEG(width: 60, height: 60)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let dc = DimensionCache()
+        let videoPrep = VideoPreparationActor()
+        let env = RenderEnvironment(
+            textPool: TextMeasurementPool(),
+            layoutCache: LayoutCache(),
+            dimensionCache: dc,
+            imageActor: ImageActor(dimensionCache: dc),
+            gifActor: GIFActor(),
+            videoController: VideoController(videoPreparation: videoPrep),
+            videoPreparation: videoPrep
+        )
+
+        struct ImageItem: Identifiable, Sendable {
+            let id: Int
+            let imageURL: URL?
+        }
+        let itemA = ImageItem(id: 0, imageURL: url)
+        let itemB = ImageItem(id: 1, imageURL: nil)
+
+        let feed = FeedScrollView<ImageItem>(
+            environment: env,
+            frame: CGRect(x: 0, y: 0, width: 375, height: 812)
+        )
+        feed.cellBuilder = { item in AsyncImageNode(url: item.imageURL, aspectRatio: 1.0) }
+
+        // Phase 1: mount itemA via the async path. Once opacity == 1, the decoded image is
+        // in the ImageActor NSCache — cachedImage() will return non-nil for the same key.
+        feed.items = [itemA]
+        feed.layoutSubviews()
+        let phase1Deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < phase1Deadline {
+            await Task.yield()
+            feed.layoutSubviews()
+            if findFirstContentLayer(in: feed)?.opacity == 1 { break }
+        }
+        XCTAssertEqual(findFirstContentLayer(in: feed)?.opacity, 1,
+            "Precondition: itemA must fully load before the sync-paint test (image must be cached)")
+
+        // Phase 2: prepend itemB. WorkingRange is invalidated; itemA moves to index 1.
+        // All visible cells are recycled. On next layoutSubviews, updateVisibleCells mounts
+        // both indices as WR misses → _pendingFragmentIndices = {0, 1}.
+        #if DEBUG
+        RenderCell._debugResetApplyContentCount()
+        #endif
+
+        feed.items = [itemB, itemA]
+        feed.layoutSubviews()
+
+        // Phase 3: poll until refineKnownFrames delivers real fragments for itemA at index 1.
+        // The pipeline re-measures → WR populated → setNeedsLayout. On the triggered
+        // layoutSubviews, refineKnownFrames builds a sync map via cachedImage (cache hit),
+        // calls applyLayout(_:synchronousContent:), and sets sublayer.contents INLINE.
+        // We check immediately after layoutSubviews — no additional yield is needed.
+        var syncPaintFired = false
+        let phase3Deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < phase3Deadline {
+            await Task.yield()
+            feed.layoutSubviews()
+            // Sync paint: contents must be non-nil RIGHT HERE, in the same runloop turn
+            // as the layoutSubviews that triggered refineKnownFrames delivery.
+            if findContentLayer(atCellIndex: 1, in: feed)?
+                .sublayers?.first(where: { $0.contents != nil }) != nil {
+                syncPaintFired = true
+                break
+            }
+        }
+
+        XCTAssertTrue(syncPaintFired,
+            "Sync paint must set sublayer.contents within the layoutSubviews that delivers fragments — "
+            + "no async hop (applyContent) needed when image is in cache")
+
+        // AC(5): applyContent must NOT have been called — sync path bypasses it entirely.
+        #if DEBUG
+        XCTAssertEqual(RenderCell._debugApplyContentCount, 0,
+            "Sync paint must bypass applyContent — _debugApplyContentCount must be 0 (AC5)")
+        #endif
+
+        // AC(6): placeholderLayer must be hidden (opacity 0) — full-coverage sync map
+        // revealed contentLayer inline via applyLayout's fast-path reveal.
+        guard let cellLayer = feed._cellLayer(at: 1) else {
+            XCTFail("Cell at index 1 must be visible after sync paint"); return
+        }
+        let pl = cellLayer.sublayers?.compactMap { $0 as? CAGradientLayer }.first
+        XCTAssertEqual(pl?.opacity ?? 1, 0,
+            "placeholderLayer must be hidden (opacity 0) when sync map covers all image fragments (AC6)")
+    }
 }
 #endif

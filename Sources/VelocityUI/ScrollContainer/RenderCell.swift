@@ -120,6 +120,22 @@ public final class RenderCell {
     /// Geometry phase. Hot-path contract: zero allocation in steady-state recycling (sublayer reuse).
     /// Prunes sublayers for fragments no longer present so Phase 2+ re-measures don't leave orphans.
     public func applyLayout(_ fragments: [Fragment]) {
+        applyLayout(fragments, synchronousContent: [:])
+    }
+
+    /// Geometry phase with optional synchronous content paint.
+    ///
+    /// For image fragments whose id is present in `synchronousContent`, the decoded CGImage is
+    /// applied inline — no Task spawn, no fade animation, no gray placeholder tint. If the map
+    /// covers every image fragment, `contentLayer` is revealed and `placeholderLayer` hidden in
+    /// the same CATransaction (sync paint = image is part of the first rendered frame).
+    ///
+    /// Callers must obtain `synchronousContent` via `ImageActor.cachedImage` (nonisolated).
+    /// On a scale mismatch between warm-up and mount time, `cachedImage` returns nil and the
+    /// corresponding fragment silently falls back to the async path via `spawnMediaFetches`.
+    ///
+    /// Keys in `synchronousContent` not matching any fragment id are silently ignored — the map may contain extras.
+    public func applyLayout(_ fragments: [Fragment], synchronousContent: [Int: CGImage]) {
         let cellBounds = CGRect(origin: .zero, size: layer.bounds.size)
 
         CATransaction.begin()
@@ -158,8 +174,15 @@ public final class RenderCell {
             // Classify on EVERY iteration — handles id-reuse across content types so
             // mediaFragmentIDs never becomes stale relative to the current fragment set.
             if case .image = fragment.content {
-                // Gray placeholder tint only while no content is loaded
-                if sub.contents == nil { sub.backgroundColor = UIColor.systemGray5.cgColor }
+                if let image = synchronousContent[fragment.id] {
+                    // Sync paint: image is already decoded — set contents inline.
+                    // No gray tint (image is present), no CATransition (no delay to mask).
+                    sub.contents = image
+                    sub.backgroundColor = nil
+                } else if sub.contents == nil {
+                    // Gray placeholder tint only while no content is loaded
+                    sub.backgroundColor = UIColor.systemGray5.cgColor
+                }
                 mediaFragmentIDs.insert(fragment.id)
             } else {
                 sub.backgroundColor = nil
@@ -180,6 +203,16 @@ public final class RenderCell {
         // UX than the per-sublayer tint for the new arrival.
         if allMediaLoaded && mediaFragmentIDs.contains(where: { sublayers[$0]?.contents == nil }) {
             allMediaLoaded = false
+        }
+
+        // Fast-path reveal: when the sync map covers every image fragment, the image is part
+        // of the first rendered frame — no delay to mask, so no fade animation needed.
+        // Must run inside setDisableActions(true) so the opacity changes are instant.
+        if !allMediaLoaded && !mediaFragmentIDs.isEmpty
+            && mediaFragmentIDs.allSatisfy({ sublayers[$0]?.contents != nil }) {
+            allMediaLoaded = true
+            placeholderLayer.opacity = 0
+            contentLayer.opacity = 1
         }
 
         CATransaction.commit()
