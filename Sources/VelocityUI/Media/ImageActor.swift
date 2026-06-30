@@ -205,6 +205,14 @@ public actor ImageActor {
     func set_testPrefetchGateHook(_ hook: (@Sendable () async -> Void)?) {
         _testPrefetchGateHook = hook
     }
+
+    /// URLs that reached the cold-path inside `prefetch()` — populated after the
+    /// inFlight/cache checks pass and before the inner Task is created.
+    /// Actor-isolated; access with `await actor._testGetPrefetchedURLs()`.
+    private(set) var _testPrefetchedURLs: [URL] = []
+
+    func _testGetPrefetchedURLs() -> [URL] { _testPrefetchedURLs }
+    func _testResetPrefetchedURLs() { _testPrefetchedURLs.removeAll() }
     #endif
 
     // MARK: - Public API
@@ -382,6 +390,7 @@ public actor ImageActor {
 
         #if canImport(XCTest)
         if let hook = _testPrefetchGateHook { await hook() }
+        _testPrefetchedURLs.append(url)
         #endif
 
         let task = Task<DecodeResult, Never>(priority: .utility) {

@@ -196,6 +196,14 @@ public final class RenderCell {
     nonisolated(unsafe) static var _privacyGuardFiredCount: Int = 0
     #endif
 
+    #if DEBUG
+    /// Total count of successful `applyContent` deliveries across all cells.
+    /// Used by BenchmarkHost's slowScrollFirstThreeItems scenario to count gray→image transitions.
+    /// nonisolated(unsafe): writes occur only on @MainActor; reads are debug/test-only.
+    nonisolated(unsafe) static var _debugApplyContentCount: Int = 0
+    nonisolated static func _debugResetApplyContentCount() { _debugApplyContentCount = 0 }
+    #endif
+
     /// Apply a pre-decoded BGRA8888-normalised image. Crossfades contents over 0.2 s via
     /// CATransition (CALayer.contents has no default CA action; setAnimationDuration alone
     /// would produce an instant swap). Fades out the placeholder once ALL image fragments arrive.
@@ -227,6 +235,10 @@ public final class RenderCell {
         CATransaction.commit()
 
         fadeOutPlaceholderIfAllReady()
+
+        #if DEBUG
+        RenderCell._debugApplyContentCount += 1
+        #endif
     }
 
     // MARK: - Media Handles

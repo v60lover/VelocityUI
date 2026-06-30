@@ -138,6 +138,19 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     func _cellLayer(at index: Int) -> CALayer? {
         visibleCells[index]?.layer
     }
+
+    /// Called on @MainActor after a successful `applyContent` delivery.
+    /// Used in tests to await image settlement without Task.sleep.
+    /// Async: allows callers to await actor-isolated signals (e.g. AsyncSemaphore.signal()).
+    /// @Sendable: captured by value into a Task { } body before invocation.
+    var _onContentDelivered: (@Sendable () async -> Void)?
+    func _setOnContentDelivered(_ h: (@Sendable () async -> Void)?) { _onContentDelivered = h }
+    #endif
+
+    #if DEBUG
+    /// Called on @MainActor after each successful `applyContent` delivery.
+    /// Used by BenchmarkHost to count gray→image transitions.
+    var _onContentDeliveredDebug: (() -> Void)?
     #endif
 
     // MARK: - Init
@@ -606,6 +619,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     ) {
         let imageActor = environment.imageActor
         let scale = max(1, traitCollection.displayScale)
+        #if canImport(XCTest)
+        let onDelivery = _onContentDelivered
+        #endif
+        #if DEBUG
+        let onDebug = _onContentDeliveredDebug
+        #endif
 
         for fragment in fragments {
             guard case .image(let d) = fragment.content, let url = d.url else { continue }
@@ -629,6 +648,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                 // where cancellation and content delivery coincide after isCancelled is checked.
                 guard !Task.isCancelled else { return }
                 cell?.applyContent(id: fragmentID, image: img, for: itemID)
+                #if canImport(XCTest)
+                await onDelivery?()
+                #endif
+                #if DEBUG
+                onDebug?()
+                #endif
             }
             cell.addMediaHandle(MediaHandle(task: task))
         }
