@@ -20,6 +20,7 @@ public actor RenderPipeline {
 
     private let textPool: TextMeasurementPool
     private let layoutCache: LayoutCache
+    private let imageActor: ImageActor
 
     private let prefetchAhead: Int
     private let prefetchBehind: Int
@@ -27,20 +28,24 @@ public actor RenderPipeline {
     public init(
         textPool: TextMeasurementPool,
         layoutCache: LayoutCache,
+        imageActor: ImageActor,
         prefetchAhead: Int = 10,
         prefetchBehind: Int = 3
     ) {
         self.textPool = textPool
         self.layoutCache = layoutCache
+        self.imageActor = imageActor
         self.prefetchAhead = prefetchAhead
         self.prefetchBehind = prefetchBehind
     }
 
-    /// Test-only convenience — creates a private pool and cache not shared with RenderEnvironment.
+    /// Test-only convenience — creates a private pool, cache, and image actor not shared with RenderEnvironment.
     /// Uses prefetchAhead = 60 to match the old hardcoded range and preserve Spike2 test thresholds.
+    /// The private `ImageActor` instance's cache is isolated — do not combine with `env.imageActor` in tests expecting shared warmup.
     init() {
         self.textPool = TextMeasurementPool()
         self.layoutCache = LayoutCache()
+        self.imageActor = ImageActor()
         self.prefetchAhead = 60
         self.prefetchBehind = 3
     }
@@ -48,11 +53,21 @@ public actor RenderPipeline {
     /// Notify the pipeline that the visible leading index has changed.
     /// No-op if leadingIndex hasn't changed since last call.
     /// Cancels and replaces any running prefetch task.
+    ///
+    /// - Parameters:
+    ///   - leadingIndex:   First visible item index at the time of the boundary crossing.
+    ///   - workingRange:   Ring buffer shared with the scroll container (MainActor-isolated).
+    ///   - tables:         NodeTables in display order, parallel to the item array.
+    ///   - availableWidth: Viewport width in points, captured verbatim at the MainActor call site.
+    ///   - scale:          Screen scale captured at the MainActor call site (e.g. `traitCollection.displayScale`).
+    ///                     `UITraitCollection.displayScale` is MainActor-isolated; capturing it at the call site
+    ///                     ensures the `ImageCacheKey` matches the one mount-time `spawnMediaFetches` constructs.
     public func onIndexBoundary(
         _ leadingIndex: Int,
         workingRange: WorkingRange,
         tables: [NodeTable],
-        availableWidth: CGFloat
+        availableWidth: CGFloat,
+        scale: CGFloat
     ) {
         guard leadingIndex != lastLeadingIndex else { return }
         lastLeadingIndex = leadingIndex
@@ -63,6 +78,8 @@ public actor RenderPipeline {
         // @Sendable nonisolated and cannot reference actor-isolated self directly.
         let cache = layoutCache
         let pool = textPool
+        let actor = imageActor
+        let capturedScale = scale
         let ahead = prefetchAhead
         let behind = prefetchBehind
 
@@ -121,6 +138,26 @@ public actor RenderPipeline {
             await MainActor.run {
                 for (i, layout, fragments) in results {
                     workingRange.commit(layout, fragments, at: i)
+                }
+            }
+
+            // Fire image prefetches for all .image fragments collected above.
+            // Second withTaskGroup so all URLs dispatch in parallel — not serial awaits.
+            // Cancellation already guarded above; if the task was cancelled before
+            // reaching here, this group is never entered.
+            // If a subtask joined an inFlight entry, it awaits the inner unstructured Task to completion
+            // regardless of outer cancellation — per ImageActor.prefetch contract (best-effort cancel).
+            guard !Task.isCancelled else { return }
+            await withTaskGroup(of: Void.self) { group in
+                for (_, _, fragments) in results {
+                    for fragment in fragments {
+                        guard case .image(let d) = fragment.content, let url = d.url else { continue }
+                        let size = fragment.frame.size
+                        let radius = d.cornerRadius
+                        group.addTask {
+                            await actor.prefetch(for: url, targetSize: size, cornerRadius: radius, scale: capturedScale)
+                        }
+                    }
                 }
             }
         }

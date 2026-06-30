@@ -287,6 +287,7 @@ final class PhaseOneIntegrationTests: XCTestCase {
         let pipeline = RenderPipeline(
             textPool: env.textPool,
             layoutCache: env.layoutCache,
+            imageActor: env.imageActor,
             prefetchAhead: tableCount,
             prefetchBehind: 3
         )
@@ -335,7 +336,7 @@ final class PhaseOneIntegrationTests: XCTestCase {
         }
 
         // Run the measure storm concurrently with the decode burst.
-        await pipeline.onIndexBoundary(0, workingRange: workingRange, tables: tables, availableWidth: 375)
+        await pipeline.onIndexBoundary(0, workingRange: workingRange, tables: tables, availableWidth: 375, scale: 1)
         await pipeline.waitForCurrentPrefetch()
 
         // Wait for all decodes to finish.

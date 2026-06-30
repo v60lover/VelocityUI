@@ -177,6 +177,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         self.pipeline = RenderPipeline(
             textPool: environment.textPool,
             layoutCache: environment.layoutCache,
+            imageActor: environment.imageActor,
             prefetchAhead: prefetchAheadCount,
             prefetchBehind: prefetchBehindCount
         )
@@ -510,6 +511,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
         let capturedTables = tables
         let capturedWidth  = bounds.width  // width contract: verbatim, no arithmetic
+        let capturedScale  = max(1, traitCollection.displayScale)  // same guard as spawnMediaFetches
 
         #if DEBUG
         _taskSpawnCount += 1
@@ -521,7 +523,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                 leading,
                 workingRange: self.workingRange,
                 tables: capturedTables,
-                availableWidth: capturedWidth
+                availableWidth: capturedWidth,
+                scale: capturedScale
             )
             await self.pipeline.waitForCurrentPrefetch()
             self.setNeedsLayout()

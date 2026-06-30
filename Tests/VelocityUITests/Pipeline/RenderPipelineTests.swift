@@ -29,6 +29,7 @@ final class RenderPipelineTests: XCTestCase {
         RenderPipeline(
             textPool: TextMeasurementPool(),
             layoutCache: LayoutCache(),
+            imageActor: ImageActor(),
             prefetchAhead: ahead,
             prefetchBehind: behind
         )
@@ -43,7 +44,7 @@ final class RenderPipelineTests: XCTestCase {
         let width: CGFloat = 320
 
         // First boundary: all cache misses → measures everything
-        await pipeline.onIndexBoundary(0, workingRange: range, tables: tables, availableWidth: width)
+        await pipeline.onIndexBoundary(0, workingRange: range, tables: tables, availableWidth: width, scale: 1)
         await pipeline.waitForCurrentPrefetch()
 
         let hitsAfterFirst = await pipeline.cacheHitCount
@@ -54,11 +55,11 @@ final class RenderPipelineTests: XCTestCase {
 
         // Second boundary at same index: must be treated as a new boundary.
         // Poke a different index first to reset lastLeadingIndex, then come back.
-        await pipeline.onIndexBoundary(1, workingRange: range, tables: tables, availableWidth: width)
+        await pipeline.onIndexBoundary(1, workingRange: range, tables: tables, availableWidth: width, scale: 1)
         await pipeline.waitForCurrentPrefetch()
         await MainActor.run { range.invalidateAll() }
 
-        await pipeline.onIndexBoundary(0, workingRange: range, tables: tables, availableWidth: width)
+        await pipeline.onIndexBoundary(0, workingRange: range, tables: tables, availableWidth: width, scale: 1)
         await pipeline.waitForCurrentPrefetch()
 
         let hitsAfterSecond = await pipeline.cacheHitCount
@@ -80,12 +81,12 @@ final class RenderPipelineTests: XCTestCase {
 
         // Scroll down 500 items (matches bead success criterion)
         for step in stride(from: 0, through: 500, by: 10) {
-            await pipeline.onIndexBoundary(step, workingRange: range, tables: tables, availableWidth: width)
+            await pipeline.onIndexBoundary(step, workingRange: range, tables: tables, availableWidth: width, scale: 1)
         }
         await pipeline.waitForCurrentPrefetch()
 
         // Fling to top
-        await pipeline.onIndexBoundary(0, workingRange: range, tables: tables, availableWidth: width)
+        await pipeline.onIndexBoundary(0, workingRange: range, tables: tables, availableWidth: width, scale: 1)
         await pipeline.waitForCurrentPrefetch()
 
         // Visible range [0, 10) must be fully populated — zero permanent blank cells
@@ -108,7 +109,7 @@ final class RenderPipelineTests: XCTestCase {
 
         // Issue 50 boundary calls in rapid succession without waiting
         for i in 0..<50 {
-            await pipeline.onIndexBoundary(i, workingRange: range, tables: tables, availableWidth: width)
+            await pipeline.onIndexBoundary(i, workingRange: range, tables: tables, availableWidth: width, scale: 1)
         }
         // Wait for the final task (index 49) to complete
         await pipeline.waitForCurrentPrefetch()
@@ -142,16 +143,82 @@ final class RenderPipelineTests: XCTestCase {
         let range = await WorkingRange(capacity: 60)
         let pipeline = makePipeline()
 
-        await pipeline.onIndexBoundary(5, workingRange: range, tables: tables, availableWidth: 320)
+        await pipeline.onIndexBoundary(5, workingRange: range, tables: tables, availableWidth: 320, scale: 1)
         let after1 = await pipeline.taskStartCount
         XCTAssertEqual(after1, 1)
 
-        await pipeline.onIndexBoundary(5, workingRange: range, tables: tables, availableWidth: 320)
+        await pipeline.onIndexBoundary(5, workingRange: range, tables: tables, availableWidth: 320, scale: 1)
         let after2 = await pipeline.taskStartCount
         XCTAssertEqual(after2, 1, "Duplicate index must not spawn a new task")
     }
 
-    // MARK: - Test 5: Scroll-up resetRange preserves ring buffer invariants
+    // MARK: - Test 5: markInvalidated cancels in-flight prefetch
+
+    func testMarkInvalidatedCancelsInFlightPrefetch() async {
+        // Build tables with real URLs so the image prefetch path is exercised.
+        let url = URL(string: "https://example.com/img.jpg")!
+        func makeURLTable(id: Int) -> NodeTable {
+            NodeTable(
+                itemID: id,
+                nodes: [.image(ImageDescriptor(
+                    url: url, aspectRatio: 1.5, contentMode: 0,
+                    cornerRadius: 0, layoutHash: id, appearanceHash: 0
+                ))],
+                parentIndices: [-1],
+                layoutHash: id,
+                appearanceHash: 0
+            )
+        }
+        let tables = (0..<5).map { makeURLTable(id: $0) }
+        let range = await WorkingRange(capacity: 20)
+
+        let imageActor = ImageActor()
+
+        // Gate that blocks inside prefetch() — confirmed-in-prefetch semaphore lets the test
+        // know that at least one prefetch subtask has entered the actor before we cancel.
+        let confirmedInPrefetch = AsyncSemaphore(value: 0)
+        let gate = AsyncSemaphore(value: 0)
+
+        await imageActor.set_testPrefetchGateHook {
+            await confirmedInPrefetch.signal()
+            try? await gate.wait()   // suspends until gate is opened; ignores CancellationError
+        }
+
+        let pipeline = RenderPipeline(
+            textPool: TextMeasurementPool(),
+            layoutCache: LayoutCache(),
+            imageActor: imageActor,
+            prefetchAhead: 10,
+            prefetchBehind: 3
+        )
+
+        // Spawn prefetch in the background — it will block at the gate.
+        Task {
+            await pipeline.onIndexBoundary(0, workingRange: range, tables: tables, availableWidth: 320, scale: 1)
+        }
+
+        // Wait until at least one prefetch subtask is inside the actor (past layout commit).
+        try? await confirmedInPrefetch.wait()
+
+        let countBefore = await pipeline.taskStartCount
+
+        // Cancel the in-flight prefetch.
+        await pipeline.markInvalidated()
+
+        // Release the gate — subtasks resume, but the prefetchTask is already cancelled.
+        await gate.signal()
+
+        // markInvalidated() must reset lastLeadingIndex so the same index re-spawns a task.
+        await pipeline.onIndexBoundary(0, workingRange: range, tables: tables, availableWidth: 320, scale: 1)
+        let countAfter = await pipeline.taskStartCount
+        XCTAssertEqual(
+            countAfter, countBefore + 1,
+            "markInvalidated() must reset lastLeadingIndex; same index must spawn a fresh prefetch task"
+        )
+        await pipeline.waitForCurrentPrefetch()
+    }
+
+    // MARK: - Test 6: Scroll-up resetRange preserves ring buffer invariants
 
     func testResetRangeRestoresCapacityInvariant() async {
         let range = await WorkingRange(capacity: 10)
