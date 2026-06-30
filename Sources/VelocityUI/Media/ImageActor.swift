@@ -91,7 +91,11 @@ public actor ImageActor {
     )
     private let decodeSemaphore = AsyncSemaphore(value: 3)
 
-    private let cache = NSCache<ImageCacheKey, CachedImage>()
+    // nonisolated(unsafe): NSCache guarantees thread-safe concurrent reads and writes.
+    // The reference itself never rebinds (let), and all mutating paths run on the actor
+    // executor, so data-race safety holds without an additional lock.
+    // Required for cachedImage() — a nonisolated synchronous probe on the hot path.
+    nonisolated(unsafe) private let cache = NSCache<ImageCacheKey, CachedImage>()
     private var inFlight: [ImageCacheKey: Task<DecodeResult, Never>] = [:]
     private let session: URLSession
     /// `nonisolated` so RenderEnvironment can check identity (===) in its designated init.
@@ -548,6 +552,31 @@ public actor ImageActor {
         #endif
         guard !Task.isCancelled else { return DecodeResult(image: nil, rawSourceSize: nil) }
         return await _decode(data: data, targetSize: targetSize, cornerRadius: cornerRadius, scale: scale)
+    }
+
+    /// Synchronous cache probe — callable from any isolation context, including `@MainActor`.
+    ///
+    /// Returns the decoded `CGImage` if the entry is already in the NSCache, or `nil` on:
+    /// - Cache miss (not yet fetched or evicted).
+    /// - In-flight hit (the decode Task exists in `inFlight` but has not stored its result
+    ///   yet). Checking `inFlight` requires actor isolation; this method intentionally omits
+    ///   it. Callers must fall back to `await image(for:…)` on a nil return.
+    ///
+    /// NSCache guarantees thread-safe concurrent reads. The `cache` property is `let`
+    /// (constant reference, no rebinding), satisfying Swift 6's Sendable requirement for
+    /// `nonisolated` access on actor stored properties.
+    ///
+    /// Parameters match `image(for:targetSize:cornerRadius:scale:)` exactly — the key uses
+    /// the same `pixelLength` rounding, so entries written by `image()`, `preload()`, and
+    /// `prefetch()` are all visible here.
+    public nonisolated func cachedImage(
+        for url: URL,
+        targetSize: CGSize,
+        cornerRadius: CGFloat,
+        scale: CGFloat
+    ) -> CGImage? {
+        let key = ImageCacheKey(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: scale)
+        return cache.object(forKey: key)?.image
     }
 
     /// Cancel fetches below the visible range.

@@ -700,6 +700,32 @@ final class ImageActorTests: XCTestCase {
         )
     }
 
+    // MARK: - Test 24: cachedImage() returns non-nil from a non-actor context after warm-up
+
+    func testCachedImageNonNilAfterWarmUp() async throws {
+        let data = jpegData(width: 40, height: 40)
+        let url = URL(string: "https://test.cachedimage.hit.example/a.jpg")!
+        let size = CGSize(width: 40, height: 40)
+        let actor = ImageActor(dimensionCache: DimensionCache())
+
+        await actor.preload(data, for: url, targetSize: size, cornerRadius: 0, scale: 1)
+
+        // XCTestCase is nonisolated — exercises the non-actor call path.
+        let result = actor.cachedImage(for: url, targetSize: size, cornerRadius: 0, scale: 1)
+        XCTAssertNotNil(result, "cachedImage() must return non-nil for a warmed cache entry")
+    }
+
+    // MARK: - Test 25: cachedImage() returns nil on a cold cache
+
+    func testCachedImageNilOnColdCache() {
+        let url = URL(string: "https://test.cachedimage.cold.example/a.jpg")!
+        let size = CGSize(width: 40, height: 40)
+        let actor = ImageActor(dimensionCache: DimensionCache())
+
+        let result = actor.cachedImage(for: url, targetSize: size, cornerRadius: 0, scale: 1)
+        XCTAssertNil(result, "cachedImage() must return nil on a cold cache")
+    }
+
     // MARK: - Test 17: Concurrent same-key image() calls coalesce to one network fetch
 
     func testImageCoalescesConcurrentSameURLRequests() async throws {
