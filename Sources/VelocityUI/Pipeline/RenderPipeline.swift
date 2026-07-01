@@ -102,8 +102,13 @@ public actor RenderPipeline {
             guard !needed.isEmpty, !Task.isCancelled else { return }
 
             // Parallel: check LayoutCache first; fall back to measureNode on a miss.
+            // The for-await consumer fires each item's image prefetches as fire-and-forget
+            // Tasks immediately when that item's layout resolves — cache-hit items dispatch
+            // before cold-measure siblings finish. Prefetch Tasks are unstructured so commit
+            // latency stays on the measure-only critical path, not gated on network+decode.
             var results: [(Int, ResolvedLayout, [Fragment])] = []
             var localHits = 0
+            var spawnedPrefetches: [Task<Void, Never>] = []
             await withTaskGroup(of: (Int, ResolvedLayout, [Fragment], Bool).self) { group in
                 for index in needed {
                     let table = tables[index]
@@ -124,14 +129,26 @@ public actor RenderPipeline {
                         return (index, layout, fragments, false)
                     }
                 }
+                // Consume results in completion order; spawn prefetch immediately per item.
+                // Cancelled results (isHit=false, fragments=[]) are skipped without spawning.
                 for await (i, layout, fragments, isHit) in group {
+                    guard !Task.isCancelled else { continue }
+                    for fragment in fragments {
+                        guard case .image(let d) = fragment.content, let url = d.url else { continue }
+                        spawnedPrefetches.append(Task {
+                            await actor.prefetch(for: url, targetSize: fragment.frame.size, cornerRadius: d.cornerRadius, scale: capturedScale)
+                        })
+                    }
                     if isHit { localHits += 1 }
                     results.append((i, layout, fragments))
                 }
             }
             // Outer guard prevents any commit from a superseded prefetch. Cancelled subtasks
-            // return .placeholder but this guard fires before WorkingRange.commit is reached.
-            guard !Task.isCancelled else { return }
+            // return .placeholder; the consumer skips them, so results holds only valid entries.
+            guard !Task.isCancelled else {
+                spawnedPrefetches.forEach { $0.cancel() }
+                return
+            }
 
             cacheHitCount += localHits
 
@@ -141,24 +158,11 @@ public actor RenderPipeline {
                 }
             }
 
-            // Fire image prefetches for all .image fragments collected above.
-            // Second withTaskGroup so all URLs dispatch in parallel — not serial awaits.
-            // Cancellation already guarded above; if the task was cancelled before
-            // reaching here, this group is never entered.
-            // If a subtask joined an inFlight entry, it awaits the inner unstructured Task to completion
-            // regardless of outer cancellation — per ImageActor.prefetch contract (best-effort cancel).
-            guard !Task.isCancelled else { return }
-            await withTaskGroup(of: Void.self) { group in
-                for (_, _, fragments) in results {
-                    for fragment in fragments {
-                        guard case .image(let d) = fragment.content, let url = d.url else { continue }
-                        let size = fragment.frame.size
-                        let radius = d.cornerRadius
-                        group.addTask {
-                            await actor.prefetch(for: url, targetSize: size, cornerRadius: radius, scale: capturedScale)
-                        }
-                    }
-                }
+            // Await spawned prefetch Tasks so waitForCurrentPrefetch() captures full completion.
+            // Cancellation of prefetchTask doesn't propagate to unstructured Tasks; best-effort
+            // cancel is acceptable per ImageActor.prefetch contract (inner decode Task is unstructured).
+            for task in spawnedPrefetches {
+                await task.value
             }
         }
     }
