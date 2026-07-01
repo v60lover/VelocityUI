@@ -2,7 +2,55 @@
 
 #if canImport(UIKit)
 import XCTest
+import UIKit
+import os
 @testable import VelocityUI
+
+// MARK: - URLProtocol helper (RenderPipelineTests-local)
+
+/// Serves a 2×2 JPEG synchronously and counts per-URL network requests.
+/// Thread-safe: all state protected by _lock.
+/// Mirrors PerURLCountingProtocol in ImagePrefetchIntegrationTests — that class is
+/// private to its file; this class is scoped to this test file only.
+private final class PipelinePrefetchCountingProtocol: URLProtocol {
+    nonisolated(unsafe) private static let _lock = OSAllocatedUnfairLock(
+        initialState: [URL: Int]()
+    )
+
+    static func count(for url: URL) -> Int {
+        _lock.withLock { $0[url, default: 0] }
+    }
+    static func reset() { _lock.withLock { $0.removeAll() } }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for r: URLRequest) -> URLRequest { r }
+
+    override func startLoading() {
+        if let url = request.url {
+            PipelinePrefetchCountingProtocol._lock.withLock { $0[url, default: 0] += 1 }
+        }
+        let fmt = UIGraphicsImageRendererFormat()
+        fmt.scale = 1
+        let data = UIGraphicsImageRenderer(
+            size: CGSize(width: 2, height: 2),
+            format: fmt
+        ).jpegData(withCompressionQuality: 0.9) { ctx in
+            UIColor.systemBlue.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+        }
+        let resp = URLResponse(
+            url: request.url!,
+            mimeType: "image/jpeg",
+            expectedContentLength: data.count,
+            textEncodingName: nil
+        )
+        client?.urlProtocol(self, didReceive: resp, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
 
 final class RenderPipelineTests: XCTestCase {
 
@@ -251,6 +299,95 @@ final class RenderPipelineTests: XCTestCase {
         }
         let start = await range.currentRangeStart
         XCTAssertEqual(start, 0)
+    }
+
+    // MARK: - Test 7: AC(1) — every .image fragment with a non-nil URL triggers prefetch
+
+    /// Verifies VelocityUI-48c AC(1): after onIndexBoundary commits, every .image fragment
+    /// with a non-nil URL has had imageActor.prefetch(for:…) invoked — evidenced by exactly
+    /// one network request per distinct URL reaching PipelinePrefetchCountingProtocol.
+    ///
+    /// Synchronisation: waitForCurrentPrefetch() is the sole happens-before anchor.
+    /// No Task.sleep — the prefetch withTaskGroup in RenderPipeline awaits every prefetch()
+    /// call, and each prefetch() awaits its inner decode Task to completion, so the URLProtocol
+    /// count is fully settled when waitForCurrentPrefetch() returns.
+    func testEveryImageFragmentTriggersPrefetch() async {
+        let n = 5
+        let imageURLs = (0..<n).map { i in
+            URL(string: "https://prefetch-ac1.example.com/\(i).jpg")!
+        }
+
+        // Wire up a URLSession whose only protocol class is the counting interceptor.
+        // DimensionCache and ImageActor share the same session so all network paths are
+        // observable; DimensionCache does not issue requests during the prefetch phase
+        // (classify() reads synchronously from the cache, which starts empty, and never
+        // calls dimensions(for:) asynchronously during measureNode).
+        PipelinePrefetchCountingProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [PipelinePrefetchCountingProtocol.self]
+        let session = URLSession(configuration: config)
+        let dc = DimensionCache(session: session)
+        let imageActor = ImageActor(session: session, dimensionCache: dc)
+        await imageActor._testResetPrefetchedURLs()
+
+        // Build N tables with distinct non-nil image URLs.
+        func makeURLTable(_ id: Int, url: URL) -> NodeTable {
+            NodeTable(
+                itemID: id,
+                nodes: [.image(ImageDescriptor(
+                    url: url, aspectRatio: 1.5, contentMode: 0,
+                    cornerRadius: 0, layoutHash: id, appearanceHash: 0
+                ))],
+                parentIndices: [-1],
+                layoutHash: id,
+                appearanceHash: 0
+            )
+        }
+
+        // N tables with distinct URLs, plus one nil-URL table to confirm nil-URL
+        // fragments are correctly skipped (zero network requests for that slot).
+        var tables = (0..<n).map { makeURLTable($0, url: imageURLs[$0]) }
+        tables.append(makeImageTable(id: n))  // url: nil — must produce no network request
+
+        let range = await WorkingRange(capacity: 30)
+        let pipeline = RenderPipeline(
+            textPool: TextMeasurementPool(),
+            layoutCache: LayoutCache(),
+            imageActor: imageActor,
+            prefetchAhead: n + 5,   // covers all n+1 table indices from leading=0
+            prefetchBehind: 0
+        )
+
+        await pipeline.onIndexBoundary(
+            0, workingRange: range, tables: tables, availableWidth: 320, scale: 2
+        )
+        // waitForCurrentPrefetch() is the happens-before anchor: it awaits the prefetch
+        // Task, which awaits the withTaskGroup, which awaits every actor.prefetch() call,
+        // which in turn awaits its inner decode Task (including the URLSession round-trip).
+        await pipeline.waitForCurrentPrefetch()
+
+        // AC(1): each distinct image URL must have triggered exactly one network fetch.
+        // "Exactly one" proves: (a) prefetch() was invoked (not zero), and (b) no duplicate
+        // fetches were issued for the same fragment (not more than one).
+        for (i, url) in imageURLs.enumerated() {
+            XCTAssertEqual(
+                PipelinePrefetchCountingProtocol.count(for: url),
+                1,
+                "Fragment \(i) URL \(url): expected 1 network fetch, got \(PipelinePrefetchCountingProtocol.count(for: url))"
+            )
+        }
+
+        // Corroborating assertion via the actor-side prefetch hook: confirms prefetch()
+        // entered the cold path (past in-flight and cache checks) for each URL.
+        let prefetchedURLs = await imageActor._testGetPrefetchedURLs()
+        XCTAssertEqual(
+            Set(prefetchedURLs), Set(imageURLs),
+            "ImageActor._testPrefetchedURLs must contain exactly the \(n) image URLs"
+        )
+        XCTAssertEqual(
+            prefetchedURLs.count, n,
+            "Each URL must enter the prefetch cold path exactly once; got \(prefetchedURLs.count) entries for \(n) URLs"
+        )
     }
 }
 #endif
