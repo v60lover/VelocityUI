@@ -12,6 +12,16 @@ import os
 private let log = Logger(subsystem: "com.velocityui", category: "ImageActor")
 #endif
 
+// MARK: - Module-internal types
+
+/// Parameters identifying a prefetch task for batch-cancel by RenderPipeline.
+struct PrefetchSpec: Sendable {
+    let url: URL
+    let targetSize: CGSize
+    let cornerRadius: CGFloat
+    let scale: CGFloat
+}
+
 // MARK: - Private helpers
 
 private struct DecodeResult: @unchecked Sendable {
@@ -210,6 +220,20 @@ public actor ImageActor {
         _testPrefetchGateHook = hook
     }
 
+    /// Injected by unit tests to interpose in `_decode()` after `decodeSemaphore.wait()`
+    /// returns and before `withCheckedContinuation`. Fires with the semaphore slot already
+    /// held — cancel the inner Task during this hook then signal, and verify the slot is
+    /// released (subsequent wait() calls must succeed). Gates the `image()`, `preload()`,
+    /// and `prefetch()` paths since all three funnel through `_decode()` (both `image()`
+    /// and `prefetch()` via `_networkFetchAndDecode`).
+    ///
+    /// Set only from test code via `@testable import VelocityUI`. Never set in production.
+    var _testDecodeBodyGateHook: (@Sendable () async -> Void)?
+
+    func set_testDecodeBodyGateHook(_ hook: (@Sendable () async -> Void)?) {
+        _testDecodeBodyGateHook = hook
+    }
+
     /// URLs that reached the cold-path inside `prefetch()` — populated after the
     /// inFlight/cache checks pass and before the inner Task is created.
     /// Actor-isolated; access with `await actor._testGetPrefetchedURLs()`.
@@ -375,11 +399,18 @@ public actor ImageActor {
     ///                   paired `image(for:…)` call so the cache key aligns.
     ///   - cornerRadius: Rounding radius in points. Pass 0 for no rounding.
     ///   - scale:        Screen scale captured at a @MainActor call site.
+    ///   - isCurrent:    Optional generation-guard closure. Called immediately before the
+    ///                   inner decode Task is spawned — no await between the check and the
+    ///                   spawn. Returns `false` when the originating prefetch batch has been
+    ///                   superseded by a newer `onIndexBoundary` call; the fetch is abandoned
+    ///                   without starting any network work. Pass `nil` to skip the guard
+    ///                   (backwards-compatible default).
     public func prefetch(
         for url: URL,
         targetSize: CGSize,
         cornerRadius: CGFloat,
-        scale: CGFloat
+        scale: CGFloat,
+        isCurrent: (@Sendable () -> Bool)? = nil
     ) async {
         let key = ImageCacheKey(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: scale)
 
@@ -394,6 +425,13 @@ public actor ImageActor {
 
         #if canImport(XCTest)
         if let hook = _testPrefetchGateHook { await hook() }
+        #endif
+
+        // Generation guard: check immediately before spawning — no await between check
+        // and Task creation ensures the check-and-spawn pair is effectively atomic.
+        if let isCurrent, !isCurrent() { return }
+
+        #if canImport(XCTest)
         _testPrefetchedURLs.append(url)
         #endif
 
@@ -413,6 +451,46 @@ public actor ImageActor {
         }
     }
 
+    // MARK: - Pipeline cancel API (internal)
+
+    /// Cancel the in-flight decode Task for each URL+dimensions combination, if any.
+    ///
+    /// Called by `RenderPipeline` when a new `onIndexBoundary` supersedes the previous
+    /// batch — stops network fetches for abandoned URLs that are already past the
+    /// generation-guard check and have a running inner decode Task. No-op for specs with
+    /// no active `inFlight` entry. Cancellation is cooperative: the inner Task's
+    /// `session.data(from:)` respects task cancellation; any acquired decode semaphore
+    /// slot is released by the `guard !Task.isCancelled` path in `_decode()`.
+    ///
+    /// Caution: the `inFlight` map is shared by `image()`, `preload()`, and `prefetch()`.
+    /// A concurrent `image()` caller joined to the same key will receive `nil` when the
+    /// Task is cancelled. This is safe in the typical discrete-jump scenario — cells for
+    /// the abandoned range are recycled before the cancel fires — but two edge windows exist:
+    ///
+    /// (a) Jump-then-jump-back: `boundary(500)` cancels prefetches for [0, 10); the user
+    ///     immediately scrolls back, and `image()` for cells 0–9 may join the
+    ///     still-cancelling Task before its creator clears `inFlight[key]`, receiving
+    ///     `nil` → potential gray flash on remount.
+    ///
+    /// (b) `visibleCount > prefetchAhead`: a visible cell at index
+    ///     `leadingIndex + prefetchAhead + k` falls outside the stale filter's range and
+    ///     can have its prefetch cancelled while a concurrent `image()` call is in-flight
+    ///     for the same key, also receiving `nil`.
+    ///
+    /// Assumption: the cell mount path retries on `nil` — a `nil` return does not
+    /// permanently gray the cell. Verify before widening deep-cancel to larger windows.
+    func cancelInFlightPrefetches(_ specs: [PrefetchSpec]) {
+        for spec in specs {
+            let key = ImageCacheKey(
+                url: spec.url,
+                targetSize: spec.targetSize,
+                cornerRadius: spec.cornerRadius,
+                scale: spec.scale
+            )
+            inFlight[key]?.cancel()
+        }
+    }
+
     // MARK: - Private helpers
 
     /// Acquire a decode slot, run CGImageSource decode on `decodeQueue`, release the slot,
@@ -427,10 +505,11 @@ public actor ImageActor {
         cornerRadius: CGFloat,
         scale: CGFloat
     ) async -> DecodeResult {
-        // Cancellation paths below (`catch` + post-acquire guard) are dormant: this method
-        // runs inside an unstructured `Task<DecodeResult, Never>` whose handle is never
-        // cancelled. Kept as contract surface for VelocityUI-bw1, which wires inner-Task
-        // cancellation through the inFlight map.
+        // Cancellation paths below (`catch` + post-acquire guard) are exercised by
+        // `cancelInFlightPrefetches`, which cancels the inner Task<DecodeResult, Never>
+        // handle via `inFlight[key]?.cancel()`. The catch path fires if cancellation
+        // arrives while blocked on `decodeSemaphore.wait()`; the post-acquire guard
+        // fires if cancellation arrives after the slot is consumed. Both release the slot.
         //
         // Acquire a decode slot. Throws CancellationError if cancelled while waiting;
         // the slot is never consumed on the thrown path — do NOT call signal().
@@ -446,6 +525,16 @@ public actor ImageActor {
             Task { await decodeSemaphore.signal() }
             return DecodeResult(image: nil, rawSourceSize: nil)
         }
+
+        #if canImport(XCTest)
+        // Gate fires with the decode slot held — cancel the inner Task during this hook
+        // then signal; the guard below releases the slot on resumed cancellation.
+        if let hook = _testDecodeBodyGateHook { await hook() }
+        guard !Task.isCancelled else {
+            Task { await decodeSemaphore.signal() }
+            return DecodeResult(image: nil, rawSourceSize: nil)
+        }
+        #endif
 
         let sem = decodeSemaphore
         #if canImport(XCTest)

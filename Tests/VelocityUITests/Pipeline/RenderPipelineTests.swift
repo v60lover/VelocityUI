@@ -498,5 +498,362 @@ final class RenderPipelineTests: XCTestCase {
         XCTAssertEqual(hits, n - 1,
             "Expected \(n - 1) LayoutCache hits (items 1-9 pre-warmed), got \(hits)")
     }
+
+    // MARK: - Test 9: Generation guard bails before inner Task spawn on supersession (AC1)
+
+    /// Verifies VelocityUI-1su.4 AC(1) for the primary generation-guard layer.
+    ///
+    /// Setup: all-cache-hit batch at leadingIndex 0 (prefetch Tasks dispatch quickly).
+    /// Gate hook holds each prefetch at step 3 (after Task.isCancelled, before isCurrent check).
+    /// While all N prefetches are suspended at the gate, a non-overlapping boundary fires,
+    /// bumping the generation. Gate releases — isCurrent() returns false — all bail.
+    ///
+    /// Assertions:
+    /// - _testPrefetchedURLs is empty (no inner Task was spawned → URL never appended)
+    /// - Network count = 0 (no network fetch started for the abandoned URLs)
+    func testGenerationGuardBailsBeforeInnerTaskSpawn() async {
+        let n = 5
+        let imageURLs = (0..<n).map { URL(string: "https://gen-guard.example.com/\($0).jpg")! }
+
+        PipelinePrefetchCountingProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [PipelinePrefetchCountingProtocol.self]
+        let session = URLSession(configuration: config)
+        let dc = DimensionCache(session: session)
+        let imageActor = ImageActor(session: session, dimensionCache: dc)
+        await imageActor._testResetPrefetchedURLs()
+
+        func makeURLTable(_ id: Int, url: URL) -> NodeTable {
+            NodeTable(
+                itemID: id,
+                nodes: [.image(ImageDescriptor(
+                    url: url, aspectRatio: 1.5, contentMode: 0,
+                    cornerRadius: 0, layoutHash: id, appearanceHash: 0
+                ))],
+                parentIndices: [-1],
+                layoutHash: id,
+                appearanceHash: 0
+            )
+        }
+
+        let tables = (0..<n).map { makeURLTable($0, url: imageURLs[$0]) }
+        let layoutCache = LayoutCache()
+        let textPool = TextMeasurementPool()
+        let width: CGFloat = 320
+
+        // Pre-warm LayoutCache: all cache hits → prefetch Tasks spawn in the for-await consumer
+        // almost immediately after the group starts. This maximises the window in which a
+        // superseding boundary can land while prefetches are at the gate.
+        for i in 0..<n {
+            let key = CacheKey(layoutHash: tables[i].layoutHash, width: width)
+            let layout = await measureNode(tables[i], nodeIndex: 0, width: width, textPool: textPool)
+            let fragments = extractFragments(table: tables[i], layout: layout)
+            await layoutCache.set(CellEntry(layout: layout, fragments: fragments), for: key)
+        }
+
+        // Gate: suspends each prefetch Task between isCancelled check and isCurrent check.
+        // confirmedAtGate is signalled once per Task that reaches the gate.
+        let confirmedAtGate = AsyncSemaphore(value: 0)
+        let gate = AsyncSemaphore(value: 0)
+        await imageActor.set_testPrefetchGateHook {
+            await confirmedAtGate.signal()
+            try? await gate.wait()
+        }
+
+        let range = await WorkingRange(capacity: 30)
+        let pipeline = RenderPipeline(
+            textPool: textPool,
+            layoutCache: layoutCache,
+            imageActor: imageActor,
+            prefetchAhead: n + 2,
+            prefetchBehind: 0
+        )
+
+        // Large filler table for boundary 500 — non-overlapping with [0, n).
+        let largeTables = tables + (n..<600).map { makeImageTable(id: $0) }
+
+        // Fire boundary 0 in the background; layout commits quickly (all cache hits),
+        // then the for-await consumer spawns n prefetch Tasks that block at the gate.
+        Task {
+            await pipeline.onIndexBoundary(
+                0, workingRange: range, tables: tables, availableWidth: width, scale: 1
+            )
+        }
+
+        // Wait until all n prefetch Tasks are suspended at the gate — deterministic anchor.
+        // At this point boundary-0's prefetchTask has necessarily passed the post-taskGroup
+        // guard (Task.isCancelled was false; boundary-500 hasn't fired yet), so it is in
+        // `for task in spawnedPrefetches { await task.value }` awaiting the n bailing tasks.
+        for _ in 0..<n { try? await confirmedAtGate.wait() }
+
+        // Capture boundary-0's task BEFORE superseding — needed for the bail anchor below.
+        let boundary0Task = await pipeline.prefetchTask
+
+        // Supersede: new boundary at index 500 bumps the generation.
+        // Deep-cancel has nothing to cancel (no inner Tasks spawned yet — all at the gate).
+        await pipeline.onIndexBoundary(
+            500, workingRange: range, tables: largeTables, availableWidth: width, scale: 1
+        )
+
+        // Release gate — all n prefetch Tasks resume, check isCurrent() → false → bail.
+        for _ in 0..<n { await gate.signal() }
+
+        // Anchor: boundary-0's task is awaiting the n spawned prefetch Tasks.
+        // Each Task wakes, checks isCurrent() → false, returns. After all n return,
+        // boundary-0's `for task in spawnedPrefetches { await task.value }` loop exits.
+        // This ensures every prefetch has decided before _testPrefetchedURLs is read —
+        // without this, a regressed isCurrent() could append and race the assertion.
+        await boundary0Task?.value
+
+        // Drain the boundary-500 task.
+        await pipeline.waitForCurrentPrefetch()
+
+        // AC(1): generation guard fired — no inner Task was spawned, so no URL was appended
+        // to _testPrefetchedURLs and no network fetch was started.
+        let prefetchedURLs = await imageActor._testGetPrefetchedURLs()
+        XCTAssertTrue(
+            prefetchedURLs.isEmpty,
+            "Generation guard must prevent inner Task spawn: expected 0 prefetched URLs, got \(prefetchedURLs.count)"
+        )
+
+        for (i, url) in imageURLs.enumerated() {
+            let count = PipelinePrefetchCountingProtocol.count(for: url)
+            XCTAssertEqual(
+                count, 0,
+                "Generation guard: URL \(i) must have 0 network fetches after bail, got \(count)"
+            )
+        }
+    }
+
+    // MARK: - Test 10: Discrete-jump boundary drains without deadlock (AC1 liveness)
+
+    /// Liveness test for VelocityUI-1su.4 AC(1) — deep cancel layer.
+    ///
+    /// An all-cache-hit batch at leadingIndex 0 is immediately superseded by a non-overlapping
+    /// boundary at index 500. Some prefetch Tasks may have already spawned their inner decode
+    /// Tasks (past step 4) before the supersession fires. The deep-cancel mechanism calls
+    /// inFlight[key]?.cancel() on those Tasks. This test verifies the pipeline reaches
+    /// stable completion without deadlock under rapid supersession.
+    ///
+    /// Property asserted: waitForCurrentPrefetch() returns (no stall).
+    /// Network-level count bounds are verified by testGenerationGuardBailsBeforeInnerTaskSpawn
+    /// (gate-held variant) and testEveryImageFragmentTriggersPrefetch (no-supersession baseline).
+    func testDiscreteJumpBoundaryDrainsWithoutStall() async {
+        let n = 5
+        let imageURLs = (0..<n).map { URL(string: "https://discrete-jump.example.com/\($0).jpg")! }
+
+        PipelinePrefetchCountingProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [PipelinePrefetchCountingProtocol.self]
+        let session = URLSession(configuration: config)
+        let dc = DimensionCache(session: session)
+        let imageActor = ImageActor(session: session, dimensionCache: dc)
+
+        func makeURLTable(_ id: Int, url: URL) -> NodeTable {
+            NodeTable(
+                itemID: id,
+                nodes: [.image(ImageDescriptor(
+                    url: url, aspectRatio: 1.5, contentMode: 0,
+                    cornerRadius: 0, layoutHash: id, appearanceHash: 0
+                ))],
+                parentIndices: [-1],
+                layoutHash: id,
+                appearanceHash: 0
+            )
+        }
+
+        let tables = (0..<n).map { makeURLTable($0, url: imageURLs[$0]) }
+        let largeTables = tables + (n..<600).map { makeImageTable(id: $0) }
+        let layoutCache = LayoutCache()
+        let textPool = TextMeasurementPool()
+        let width: CGFloat = 320
+
+        // Pre-warm LayoutCache so prefetch Tasks spawn quickly after measure completes.
+        for i in 0..<n {
+            let key = CacheKey(layoutHash: tables[i].layoutHash, width: width)
+            let layout = await measureNode(tables[i], nodeIndex: 0, width: width, textPool: textPool)
+            let fragments = extractFragments(table: tables[i], layout: layout)
+            await layoutCache.set(CellEntry(layout: layout, fragments: fragments), for: key)
+        }
+
+        let range = await WorkingRange(capacity: 30)
+        let pipeline = RenderPipeline(
+            textPool: textPool,
+            layoutCache: layoutCache,
+            imageActor: imageActor,
+            prefetchAhead: n + 2,
+            prefetchBehind: 0
+        )
+
+        // Fire boundary 0 immediately followed by boundary 500 — no coordination between them.
+        // Some inner Tasks may have already spawned (deep cancel fires); others may still be
+        // pending (generation guard fires). Both paths must reach stable completion.
+        await pipeline.onIndexBoundary(
+            0, workingRange: range, tables: tables, availableWidth: width, scale: 1
+        )
+        await pipeline.onIndexBoundary(
+            500, workingRange: range, tables: largeTables, availableWidth: width, scale: 1
+        )
+
+        // Liveness assertion: pipeline must drain without deadlock.
+        await pipeline.waitForCurrentPrefetch()
+    }
+
+    // MARK: - Test 11: Smooth-scroll overlapping range produces no duplicate fetches (AC2)
+
+    /// Verifies VelocityUI-1su.4 AC(2): consecutive OVERLAPPING boundaries do not cause
+    /// cancel-thrash or duplicate network fetches for shared URLs.
+    ///
+    /// Setup: N items pre-warmed. Boundary at index 0 covers [0, N). Boundary at index 1
+    /// covers [0, N+1) (overlapping — shifts by 1). URLs 0..N-1 must each receive exactly
+    /// one network fetch regardless of whether the second boundary's prefetch Tasks coalesce
+    /// onto the first boundary's in-flight Tasks or hit the cache.
+    func testSmoothScrollOverlappingRangeNoThrash() async {
+        let n = 8
+        let imageURLs = (0..<n).map { URL(string: "https://smooth-scroll.example.com/\($0).jpg")! }
+        let extraURL = URL(string: "https://smooth-scroll.example.com/\(n).jpg")!
+
+        PipelinePrefetchCountingProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [PipelinePrefetchCountingProtocol.self]
+        let session = URLSession(configuration: config)
+        let dc = DimensionCache(session: session)
+        let imageActor = ImageActor(session: session, dimensionCache: dc)
+
+        func makeURLTable(_ id: Int, url: URL) -> NodeTable {
+            NodeTable(
+                itemID: id,
+                nodes: [.image(ImageDescriptor(
+                    url: url, aspectRatio: 1.5, contentMode: 0,
+                    cornerRadius: 0, layoutHash: id, appearanceHash: 0
+                ))],
+                parentIndices: [-1],
+                layoutHash: id,
+                appearanceHash: 0
+            )
+        }
+
+        var tables = (0..<n).map { makeURLTable($0, url: imageURLs[$0]) }
+        tables.append(makeURLTable(n, url: extraURL))  // index n: new item in second boundary
+
+        let layoutCache = LayoutCache()
+        let textPool = TextMeasurementPool()
+        let width: CGFloat = 320
+
+        // Pre-warm all n+1 items so both boundaries are pure cache-hit batches.
+        for i in 0...n {
+            let key = CacheKey(layoutHash: tables[i].layoutHash, width: width)
+            let layout = await measureNode(tables[i], nodeIndex: 0, width: width, textPool: textPool)
+            let fragments = extractFragments(table: tables[i], layout: layout)
+            await layoutCache.set(CellEntry(layout: layout, fragments: fragments), for: key)
+        }
+
+        let range = await WorkingRange(capacity: 30)
+        let pipeline = RenderPipeline(
+            textPool: textPool,
+            layoutCache: layoutCache,
+            imageActor: imageActor,
+            prefetchAhead: n + 2,
+            prefetchBehind: 0
+        )
+
+        // Boundary at index 0: range [0, n+2) — covers all n+1 tables.
+        await pipeline.onIndexBoundary(
+            0, workingRange: range, tables: tables, availableWidth: width, scale: 1
+        )
+        // Immediately fire overlapping boundary at index 1: range [0, n+2) — same URLs, one
+        // generation bump. Smooth-scroll invariant: shared URLs must not be re-fetched.
+        await pipeline.onIndexBoundary(
+            1, workingRange: range, tables: tables, availableWidth: width, scale: 1
+        )
+        await pipeline.waitForCurrentPrefetch()
+
+        // AC(2): each URL must appear at most once — coalescing (inFlight or cache hit)
+        // must prevent duplicate fetches regardless of timing.
+        for (i, url) in imageURLs.enumerated() {
+            let count = PipelinePrefetchCountingProtocol.count(for: url)
+            XCTAssertLessThanOrEqual(
+                count, 1,
+                "Smooth-scroll no-thrash: URL \(i) must have ≤ 1 fetch, got \(count)"
+            )
+        }
+        // cacheHitCount must be > 0: second boundary resolves at least some items from cache.
+        let hits = await pipeline.cacheHitCount
+        XCTAssertGreaterThan(hits, 0,
+            "Second boundary must hit the LayoutCache for pre-warmed items; cacheHitCount=\(hits)")
+    }
+
+    // MARK: - Test 12: Deep cancel releases decode slot (AC1 secondary layer + bw1 hook)
+
+    /// Verifies VelocityUI-1su.4 AC(1) deep-cancel layer and bw1 hook wiring.
+    ///
+    /// Three prefetches acquire decode slots and block at `_testDecodeBodyGateHook`.
+    /// `cancelInFlightPrefetches` cancels all three inner Tasks — cancellation propagates
+    /// into `gate.wait()` inside the hook via `withTaskCancellationHandler` in AsyncSemaphore,
+    /// unblocking each task. The post-hook `guard !Task.isCancelled` in `_decode()` releases
+    /// the slot. A fourth "witness" prefetch acquires a freed slot and completes, proving
+    /// no slot leak under deep cancel.
+    ///
+    /// Assertions:
+    /// - Witness URL receives ≥ 1 network fetch (slot was released; witness proceeded).
+    /// - Each cancelled URL receives exactly 1 network fetch (no retry after cancel).
+    func testDeepCancelReleasesDecodeSlot() async {
+        // 3 cancel URLs == AsyncSemaphore(value: 3) in ImageActor.swift:102.
+        // Filling all slots proves the witness must wait; change this if the semaphore cap changes.
+        let cancelURLs = (0..<3).map { URL(string: "https://deep-cancel.example.com/cancel\($0).jpg")! }
+        let witnessURL = URL(string: "https://deep-cancel.example.com/witness.jpg")!
+
+        PipelinePrefetchCountingProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [PipelinePrefetchCountingProtocol.self]
+        let session = URLSession(configuration: config)
+        let dc = DimensionCache(session: session)
+        let actor = ImageActor(session: session, dimensionCache: dc)
+
+        // First 3 hook invocations (cancel URLs) block; 4th+ (witness) pass through immediately.
+        let invocationCount = OSAllocatedUnfairLock<Int>(initialState: 0)
+        let atGate = AsyncSemaphore(value: 0)
+        let gate = AsyncSemaphore(value: 0)
+        await actor.set_testDecodeBodyGateHook {
+            let n = invocationCount.withLock { $0 += 1; return $0 }
+            guard n <= 3 else { return }   // witness: pass through
+            await atGate.signal()          // notify test: one decode slot is now held
+            try? await gate.wait()         // hold until cancelled or explicitly signalled
+        }
+
+        let targetSize = CGSize(width: 100, height: 100)
+
+        // Start 3 prefetches concurrently — each network-fetches (synchronous URLProtocol),
+        // enters _decode(), acquires a slot, and blocks at the hook.
+        for url in cancelURLs {
+            let capturedURL = url
+            Task { await actor.prefetch(for: capturedURL, targetSize: targetSize, cornerRadius: 0, scale: 1) }
+        }
+
+        // Deterministic anchor: wait until all 3 decode slots are held.
+        for _ in 0..<3 { try? await atGate.wait() }
+
+        // Deep cancel: inFlight[key]?.cancel() for each cancel URL.
+        // Cancellation propagates into gate.wait() via AsyncSemaphore.withTaskCancellationHandler,
+        // unblocking each task without an explicit gate signal.
+        let specs = cancelURLs.map { PrefetchSpec(url: $0, targetSize: targetSize, cornerRadius: 0, scale: 1) }
+        await actor.cancelInFlightPrefetches(specs)
+
+        // Witness starts with 3 slots in-cancellation; blocks at decodeSemaphore.wait()
+        // until a cancelled task releases its slot, then proceeds through the hook no-op path.
+        let witnessTask = Task { await actor.prefetch(for: witnessURL, targetSize: targetSize, cornerRadius: 0, scale: 1) }
+        await witnessTask.value
+
+        XCTAssertGreaterThanOrEqual(
+            PipelinePrefetchCountingProtocol.count(for: witnessURL), 1,
+            "Witness prefetch must complete — cancelled tasks must release their decode slots"
+        )
+        for (i, url) in cancelURLs.enumerated() {
+            XCTAssertEqual(
+                PipelinePrefetchCountingProtocol.count(for: url), 1,
+                "Cancelled URL \(i) must have exactly 1 network fetch — no retry after deep cancel"
+            )
+        }
+    }
 }
 #endif

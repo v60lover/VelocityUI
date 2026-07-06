@@ -3,6 +3,40 @@
 #if canImport(UIKit)
 import Foundation
 import CoreGraphics
+import os
+
+/// Monotonic generation counter for the prefetch generation guard (primary supersession layer).
+///
+/// Bumped once per `onIndexBoundary` call. Each spawned prefetch Task captures its generation
+/// value and the shared token, then checks `token.generation == gen` immediately before
+/// launching the inner decode Task — if a newer boundary has fired the check returns false
+/// and the task bails without starting any network work.
+private final class PrefetchGenerationToken: Sendable {
+    private let lock = OSAllocatedUnfairLock<Int>(initialState: 0)
+
+    var generation: Int { lock.withLock { $0 } }
+
+    @discardableResult
+    func advance() -> Int {
+        lock.withLock {
+            $0 += 1
+            return $0
+        }
+    }
+}
+
+/// Returns the half-open prefetch index range for a given leading visible index.
+///
+/// Single authoritative formula shared by the deep-cancel stale filter and the measure
+/// loop — both call this function so they can never silently diverge (e.g. the stale
+/// filter cancelling items the measure loop still wants, or missing items it abandons).
+private func prefetchRange(leadingIndex: Int, ahead: Int, behind: Int, count: Int) -> Range<Int> {
+    let start = max(0, leadingIndex - behind)
+    let end = min(leadingIndex + ahead, count)
+    // Clamp to avoid a trap: if leadingIndex is at or beyond count (feed shrank under a
+    // stale boundary), start can exceed end. Both call sites handle empty ranges correctly.
+    return start..<max(start, end)
+}
 
 /// Prefetch actor — runs off MainActor, writes back to WorkingRange via MainActor.run.
 /// Called by the scroll container on leading-index boundary crossings (not every frame).
@@ -24,6 +58,23 @@ public actor RenderPipeline {
 
     private let prefetchAhead: Int
     private let prefetchBehind: Int
+
+    // MARK: - Supersession guard state
+
+    /// Generation counter shared with every spawned prefetch Task.
+    private let generationToken = PrefetchGenerationToken()
+
+    /// One record per image fragment prefetched in the current batch.
+    /// Populated incrementally in the for-await consumer loop (actor-isolated).
+    /// Cleared and replaced on each new boundary call.
+    private struct ActivePrefetchItem: Sendable {
+        let index: Int
+        let url: URL
+        let targetSize: CGSize
+        let cornerRadius: CGFloat
+        let scale: CGFloat
+    }
+    private var activePrefetchItems: [ActivePrefetchItem] = []
 
     public init(
         textPool: TextMeasurementPool,
@@ -71,8 +122,28 @@ public actor RenderPipeline {
     ) {
         guard leadingIndex != lastLeadingIndex else { return }
         lastLeadingIndex = leadingIndex
+
+        // Deep cancel (secondary layer): items from the previous batch whose index falls
+        // outside the new range are guaranteed not to be needed. Cancel their in-flight
+        // inner decode Tasks before they consume more network/decode budget.
+        let newRange = prefetchRange(leadingIndex: leadingIndex, ahead: prefetchAhead, behind: prefetchBehind, count: tables.count)
+        let staleItems = activePrefetchItems.filter { !newRange.contains($0.index) }
+        if !staleItems.isEmpty {
+            let actor = imageActor
+            let specs = staleItems.map {
+                PrefetchSpec(url: $0.url, targetSize: $0.targetSize, cornerRadius: $0.cornerRadius, scale: $0.scale)
+            }
+            Task { await actor.cancelInFlightPrefetches(specs) }
+        }
+        activePrefetchItems = []  // new batch populates incrementally via for-await loop
+
         prefetchTask?.cancel()
         taskStartCount += 1
+
+        // Bump generation after clearing active items and before spawning new prefetches —
+        // any prefetch that passed its guard in the old batch is stale by definition.
+        let token = generationToken
+        let myGen = token.advance()
 
         // Capture actor state before entering the Task — group.addTask closures are
         // @Sendable nonisolated and cannot reference actor-isolated self directly.
@@ -84,20 +155,19 @@ public actor RenderPipeline {
         let behind = prefetchBehind
 
         prefetchTask = Task {
-            let rangeStart = max(0, leadingIndex - behind)
-            let rangeEnd = min(leadingIndex + ahead, tables.count)
-            guard rangeEnd > rangeStart else { return }
+            let range = prefetchRange(leadingIndex: leadingIndex, ahead: ahead, behind: behind, count: tables.count)
+            guard !range.isEmpty else { return }
 
             // Single MainActor hop: advance or reset the ring buffer, then collect nil slots.
             // Combining both operations avoids N serial @MainActor awaits.
             let needed: [Int] = await MainActor.run {
-                if rangeStart < workingRange.currentRangeStart {
+                if range.lowerBound < workingRange.currentRangeStart {
                     // Scrolled backward past the window start — O(capacity) rebuild.
-                    workingRange.resetRange(to: rangeStart)
+                    workingRange.resetRange(to: range.lowerBound)
                 } else {
-                    workingRange.advance(to: rangeStart)
+                    workingRange.advance(to: range.lowerBound)
                 }
-                return (rangeStart..<rangeEnd).filter { workingRange.entry(at: $0) == nil }
+                return range.filter { workingRange.entry(at: $0) == nil }
             }
             guard !needed.isEmpty, !Task.isCancelled else { return }
 
@@ -135,9 +205,29 @@ public actor RenderPipeline {
                     guard !Task.isCancelled else { continue }
                     for fragment in fragments {
                         guard case .image(let d) = fragment.content, let url = d.url else { continue }
+                        let capturedURL = url
+                        let capturedSize = fragment.frame.size
+                        let capturedRadius = d.cornerRadius
+                        let gen = myGen
                         spawnedPrefetches.append(Task {
-                            await actor.prefetch(for: url, targetSize: fragment.frame.size, cornerRadius: d.cornerRadius, scale: capturedScale)
+                            await actor.prefetch(
+                                for: capturedURL,
+                                targetSize: capturedSize,
+                                cornerRadius: capturedRadius,
+                                scale: capturedScale,
+                                isCurrent: { token.generation == gen }
+                            )
                         })
+                        // Track for deep-cancel on the next superseding boundary.
+                        // The for-await body runs isolated to RenderPipeline's actor, so
+                        // appending to the actor-stored array is safe without additional locks.
+                        self.activePrefetchItems.append(ActivePrefetchItem(
+                            index: i,
+                            url: capturedURL,
+                            targetSize: capturedSize,
+                            cornerRadius: capturedRadius,
+                            scale: capturedScale
+                        ))
                     }
                     if isHit { localHits += 1 }
                     results.append((i, layout, fragments))
@@ -175,6 +265,14 @@ public actor RenderPipeline {
         lastLeadingIndex = -1
         prefetchTask?.cancel()
         prefetchTask = nil
+        if !activePrefetchItems.isEmpty {
+            let actor = imageActor
+            let specs = activePrefetchItems.map {
+                PrefetchSpec(url: $0.url, targetSize: $0.targetSize, cornerRadius: $0.cornerRadius, scale: $0.scale)
+            }
+            Task { await actor.cancelInFlightPrefetches(specs) }
+            activePrefetchItems = []
+        }
     }
 
     /// Awaits the current prefetch task. Used in tests to synchronise assertions.
