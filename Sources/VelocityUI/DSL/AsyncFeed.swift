@@ -209,6 +209,96 @@ public struct AsyncFeed<
         )
     }
 
+    // MARK: - warmUp
+
+    /// Warms the image and layout caches for the given items before first mount.
+    ///
+    /// Call before assigning `items` to `AsyncFeed` — typically inside a `Task` in the
+    /// view's data-loading path. Await the returned `Task` to ensure both caches are
+    /// populated before the view hierarchy is built and `layoutSubviews` fires.
+    ///
+    /// Contract: `width` and `scale` must match what `FeedScrollView` will use at mount
+    /// time. A mismatch on either dimension produces `CacheKey` misses and silently falls
+    /// back to the standard pipeline path — no crash, just one gray frame.
+    /// Pass a bounded head-set (typically the first 10–20 items); warmUp has no internal
+    /// fan-out cap and will decode every item's images regardless of list length.
+    ///
+    /// Side effects:
+    /// - Populates `environment.layoutCache` with a `CellEntry` for each item.
+    /// - Populates `environment.imageActor`'s image cache with decoded images for all
+    ///   image fragments at the fragment-computed target sizes.
+    ///
+    /// Cancellation: cancelling the returned `Task` stops new prefetches from being
+    /// issued. In-flight decode tasks inside `ImageActor` complete naturally.
+    ///
+    /// Idempotent: a second call for the same items, width, and scale hits
+    /// `LayoutCache` and `ImageActor`'s cache immediately and returns fast.
+    @MainActor
+    public static func warmUp(
+        items: [Item],
+        width: CGFloat,
+        scale: CGFloat,
+        environment: RenderEnvironment,
+        cellBuilder: @escaping @MainActor (Item) -> Cell
+    ) -> Task<Void, Never> {
+        guard !items.isEmpty else { return Task {} }
+
+        // Mirror the scale floor in FeedScrollView.spawnMediaFetches: a sub-1 or zero
+        // scale produces a different ImageCacheKey than the one mount-time uses, so the
+        // warmUp hit never lands. Floor to 1 matches the mount-path floor exactly.
+        let capturedScale = max(1, scale)
+        let tables = items.map { item in flatten(cellBuilder(item).renderBody, itemID: item.id) }
+        let cache = environment.layoutCache
+        let pool = environment.textPool
+        let actor = environment.imageActor
+        let capturedWidth = width
+
+        return Task {
+            var allFragments: [[Fragment]] = []
+            allFragments.reserveCapacity(tables.count)
+
+            await withTaskGroup(of: [Fragment].self) { group in
+                for table in tables {
+                    let key = CacheKey(layoutHash: table.layoutHash, width: capturedWidth)
+                    group.addTask {
+                        if let entry = await cache.get(key) {
+                            return entry.fragments
+                        }
+                        guard !Task.isCancelled else { return [] }
+                        let layout = await measureNode(
+                            table, nodeIndex: 0,
+                            width: capturedWidth,
+                            textPool: pool
+                        )
+                        let fragments = extractFragments(table: table, layout: layout)
+                        await cache.set(CellEntry(layout: layout, fragments: fragments), for: key)
+                        return fragments
+                    }
+                }
+                for await fragments in group {
+                    allFragments.append(fragments)
+                }
+            }
+
+            guard !Task.isCancelled else { return }
+
+            await withTaskGroup(of: Void.self) { group in
+                for fragments in allFragments {
+                    for fragment in fragments {
+                        guard case .image(let d) = fragment.content, let url = d.url else { continue }
+                        guard !Task.isCancelled else { return }
+                        let u = url
+                        let s = fragment.frame.size
+                        let r = d.cornerRadius
+                        group.addTask {
+                            await actor.prefetch(for: u, targetSize: s, cornerRadius: r, scale: capturedScale)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Private helpers
 
     // Snap policy: Phase 1 always disables CALayer animations. Phase 6+ extension hook —
