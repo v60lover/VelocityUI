@@ -1401,5 +1401,154 @@ final class FeedScrollViewTests: XCTestCase {
         XCTAssertEqual(pl?.opacity ?? 1, 0,
             "placeholderLayer must be hidden (opacity 0) when sync map covers all image fragments (AC6)")
     }
+
+    // MARK: - 24. LayoutCache-hit WR-miss inline materialization (VelocityUI-1su.2)
+
+    /// Warms LayoutCache for a head-set of items exactly the way `AsyncFeed.warmUp` does
+    /// (same `CacheKey(layoutHash:width:)` construction, same measure→extractFragments→set
+    /// pipeline), so the resulting entries are indistinguishable from what warmUp would have
+    /// produced. Returns nothing — side effect is entirely in `env.layoutCache`.
+    private func warmLayoutCache<I: Identifiable & Sendable>(
+        items: [I],
+        width: CGFloat,
+        cellBuilder: (I) -> any RenderNode,
+        environment: RenderEnvironment
+    ) async where I.ID: Sendable {
+        for item in items {
+            let table = flatten(cellBuilder(item), itemID: item.id)
+            let key = CacheKey(layoutHash: table.layoutHash, width: width)
+            let layout = await measureNode(table, nodeIndex: 0, width: width, textPool: environment.textPool)
+            let fragments = extractFragments(table: table, layout: layout)
+            await environment.layoutCache.set(CellEntry(layout: layout, fragments: fragments), for: key)
+        }
+    }
+
+    /// AC(2)(3): after LayoutCache is warmed for the head-set (mirroring `warmUp`), the FIRST
+    /// `layoutSubviews` after items are assigned must deliver real fragments to every visible
+    /// cell in the SAME pass — zero `applyLayout([])` gradient-only frames, and WorkingRange
+    /// itself must be materialized (not just the cell painted) so subsequent frames take the
+    /// WR-hit branch instead of falling through refineKnownFrames bookkeeping.
+    ///
+    /// Trigger: LayoutCache warmed BEFORE `feed.items` is assigned and BEFORE the pipeline's
+    /// notifyPipelineIfNeeded Task has any chance to run (we assert immediately after the
+    /// single synchronous `layoutSubviews()` call, before yielding back to the run loop) — this
+    /// is the exact window where WorkingRange is empty but LayoutCache is hot, which is the
+    /// failure mode this bead fixes.
+    func testWarmUpEliminatesFirstFrameGrayPlaceholder() async throws {
+        let url = try writeTempJPEG(width: 60, height: 60)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let env = makeEnvironment()
+        let width: CGFloat = 375
+        struct ImageItem: Identifiable, Sendable {
+            let id: Int
+            let imageURL: URL?
+        }
+        let testItems = (0..<5).map { ImageItem(id: $0, imageURL: url) }
+        let builder: (ImageItem) -> any RenderNode = { item in
+            AsyncImageNode(url: item.imageURL, aspectRatio: 1.0)
+        }
+
+        // Also warm ImageActor's decode cache so the sync-content map covers every fragment —
+        // isolates this test to the LayoutCache/WorkingRange materialization path rather than
+        // conflating it with the image-decode cache-hit path (already covered by VelocityUI-1ho's
+        // testSyncPaintSetsContentsWithinRefineKnownFrames).
+        _ = await env.imageActor.image(for: url, targetSize: CGSize(width: width, height: width),
+                                        cornerRadius: 0, scale: 1)
+
+        await warmLayoutCache(items: testItems, width: width, cellBuilder: builder, environment: env)
+
+        let feed = FeedScrollView<ImageItem>(environment: env, frame: CGRect(x: 0, y: 0, width: width, height: 812))
+        feed.cellBuilder = { item in builder(item) }
+        feed.items = testItems
+
+        // Single synchronous layoutSubviews — the FIRST one after mount. No yield before the
+        // assertions below: if the fix regresses to applyLayout([]) on this exact call, the
+        // pending-set assertion catches it before any async pipeline pass could paper over it.
+        feed.layoutSubviews()
+
+        XCTAssertEqual(feed._pendingFragmentIndicesCount, 0,
+            "AC(2)(3): zero cells should be left pending fragment delivery when LayoutCache "
+            + "was warm for all visible indices at mount time — got \(feed._pendingFragmentIndicesCount)")
+
+        // Only indices actually mounted as visible cells are relevant — with the default
+        // estimatedItemHeight (300pt) + spacing (8pt), an 812pt viewport shows ~3 of the 5
+        // warmed items on the first pass; the rest mount lazily as the test scrolls (not
+        // exercised here). The invariant under test is about VISIBLE cells, not every item.
+        let visibleIndices = (0..<testItems.count).filter { feed._cellLayer(at: $0) != nil }
+        XCTAssertFalse(visibleIndices.isEmpty, "Precondition: at least one cell must be visible after layoutSubviews")
+
+        for index in visibleIndices {
+            XCTAssertEqual(feed._workingRangeMissCount(from: index, to: index + 1), 0,
+                "AC(2): WorkingRange must be materialized inline from the LayoutCache hit for "
+                + "visible index \(index), not just the cell painted — subsequent layoutSubviews "
+                + "calls must take the WR-hit branch")
+
+            guard let cellLayer = feed._cellLayer(at: index) else {
+                XCTFail("Cell at index \(index) must be visible immediately after the first layoutSubviews")
+                continue
+            }
+            let hasContentSublayer = cellLayer.sublayers?.contains { !($0 is CAGradientLayer) && ($0.sublayers?.isEmpty == false) } ?? false
+            XCTAssertTrue(hasContentSublayer,
+                "AC(3): cell \(index) must have fragment sublayers from the LayoutCache hit, "
+                + "not an empty applyLayout([]) placeholder-only layer")
+        }
+    }
+
+    /// Regression test for a second `layoutSubviews()` call being a true no-op once the
+    /// LayoutCache-hit inline materialization (this bead) has already committed a WR entry
+    /// on the first pass. NOTE: this does NOT exercise `WorkingRange.commit`'s double-commit
+    /// idempotency contract — after the first `layoutSubviews()`, index 0 is already in
+    /// `visibleCells`, so `updateVisibleCells`'s mount-skip guard
+    /// (`guard visibleCells[index] == nil else { continue }`) short-circuits the second call
+    /// before `commit()` is ever invoked again for that index. The direct double-commit
+    /// idempotency check lives in `WorkingRangeTests.testDoubleCommitWithIdenticalDataIsIdempotent`,
+    /// which calls `WorkingRange.commit(_:_:at:)` twice with identical arguments and asserts
+    /// `entry(at:)` is unchanged — see Tests/VelocityUITests/Pipeline/WorkingRangeTests.swift.
+    func testSecondLayoutSubviewsCallAfterLayoutCacheHitIsInert() async throws {
+        let url = try writeTempJPEG(width: 60, height: 60)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let env = makeEnvironment()
+        let width: CGFloat = 375
+        struct ImageItem: Identifiable, Sendable {
+            let id: Int
+            let imageURL: URL?
+        }
+        let testItems = [ImageItem(id: 0, imageURL: url)]
+        let builder: (ImageItem) -> any RenderNode = { item in
+            AsyncImageNode(url: item.imageURL, aspectRatio: 1.0)
+        }
+
+        await warmLayoutCache(items: testItems, width: width, cellBuilder: builder, environment: env)
+
+        let feed = FeedScrollView<ImageItem>(environment: env, frame: CGRect(x: 0, y: 0, width: width, height: 812))
+        feed.cellBuilder = { item in builder(item) }
+        feed.items = testItems
+
+        // First layoutSubviews: WR-miss branch hits LayoutCache and commits inline (this bead).
+        feed.layoutSubviews()
+        XCTAssertEqual(feed._workingRangeMissCount(from: 0, to: 1), 0,
+            "Precondition: WorkingRange must already be materialized from the first layoutSubviews")
+
+        let cellLayerBefore = feed._cellLayer(at: 0)
+        let sublayerCountBefore = cellLayerBefore?.sublayers?.count ?? -1
+        let frameBefore = cellLayerBefore?.frame
+
+        // Index 0 is already in visibleCells after the first layoutSubviews, so
+        // updateVisibleCells' mount-skip guard (`guard visibleCells[index] == nil else { continue }`)
+        // means this second call does NOT re-invoke workingRange.commit for index 0 — it is a
+        // true no-op for already-mounted cells. This assertion is about mount-loop stability,
+        // not commit idempotency (see the class doc comment above).
+        feed.layoutSubviews()
+
+        let cellLayerAfter = feed._cellLayer(at: 0)
+        XCTAssertEqual(cellLayerAfter?.sublayers?.count, sublayerCountBefore,
+            "A second layoutSubviews with no state change must not alter the mounted cell's sublayer count")
+        XCTAssertEqual(cellLayerAfter?.frame, frameBefore,
+            "A second layoutSubviews with no state change must not alter the mounted cell's frame")
+        XCTAssertEqual(feed._workingRangeMissCount(from: 0, to: 1), 0,
+            "WorkingRange entry must remain present after a second, no-op layoutSubviews call")
+    }
 }
 #endif

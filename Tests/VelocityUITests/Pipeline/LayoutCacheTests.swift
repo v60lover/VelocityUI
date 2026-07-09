@@ -135,6 +135,77 @@ final class LayoutCacheTests: XCTestCase {
         XCTAssertEqual(countAfterEviction, cap)
     }
 
+    // MARK: - cachedEntry (nonisolated peek, VelocityUI-1su.2)
+
+    /// Invariant: `cachedEntry(for:)` returns the entry written by `set()`, callable with
+    /// zero `await` from any isolation context (AC1).
+    func testCachedEntrySynchronousPeekAfterSet() async {
+        let cache = LayoutCache()
+        let key = CacheKey(layoutHash: 7, width: 375)
+        await cache.set(makeEntry(height: 250), for: key)
+
+        // No `await` here — this is the point of the test. If cachedEntry required
+        // actor isolation this line would fail to compile.
+        let result = cache.cachedEntry(for: key)
+        XCTAssertEqual(result?.layout.totalFrame.height, 250)
+    }
+
+    /// Invariant: a miss (never set, or different key) returns nil rather than triggering work.
+    func testCachedEntryMissReturnsNil() async {
+        let cache = LayoutCache()
+        let key = CacheKey(layoutHash: 8, width: 375)
+        XCTAssertNil(cache.cachedEntry(for: key))
+
+        // Populate a sibling key — must not satisfy the miss key.
+        await cache.set(makeEntry(), for: CacheKey(layoutHash: 9, width: 375))
+        XCTAssertNil(cache.cachedEntry(for: key))
+    }
+
+    /// Invariant: the nonisolated read-mirror stays in lockstep with the authoritative store —
+    /// `invalidate` and `invalidateAll` must be visible to `cachedEntry`, not just `get`.
+    func testCachedEntryReflectsInvalidateAndInvalidateAll() async {
+        let cache = LayoutCache()
+        let key1 = CacheKey(layoutHash: 10, width: 375)
+        let key2 = CacheKey(layoutHash: 11, width: 375)
+        await cache.set(makeEntry(height: 40), for: key1)
+        await cache.set(makeEntry(height: 60), for: key2)
+        XCTAssertNotNil(cache.cachedEntry(for: key1))
+        XCTAssertNotNil(cache.cachedEntry(for: key2))
+
+        await cache.invalidate(key1)
+        XCTAssertNil(cache.cachedEntry(for: key1), "invalidate must remove the entry from the read-mirror too")
+        XCTAssertNotNil(cache.cachedEntry(for: key2), "invalidate must not affect other keys' mirror entries")
+
+        await cache.invalidateAll()
+        XCTAssertNil(cache.cachedEntry(for: key2), "invalidateAll must clear the read-mirror too")
+    }
+
+    /// Invariant: re-setting an existing key (in-place update path) updates the mirror, not
+    /// just the authoritative store.
+    func testCachedEntryReflectsInPlaceUpdate() async {
+        let cache = LayoutCache()
+        let key = CacheKey(layoutHash: 12, width: 375)
+        await cache.set(makeEntry(height: 10), for: key)
+        await cache.set(makeEntry(height: 20), for: key)
+        XCTAssertEqual(cache.cachedEntry(for: key)?.layout.totalFrame.height, 20,
+            "In-place update must be reflected in the nonisolated read-mirror")
+    }
+
+    /// Invariant: FIFO eviction from the authoritative store must also evict the entry from
+    /// the read-mirror — otherwise cachedEntry would serve a stale hit for an evicted key.
+    func testCachedEntryClearedOnFIFOEviction() async {
+        let cap = 3
+        let cache = LayoutCache(capacity: cap)
+        let oldestKey = CacheKey(layoutHash: 0, width: 375)
+        await cache.set(makeEntry(height: 10), for: oldestKey)
+        await cache.set(makeEntry(height: 20), for: CacheKey(layoutHash: 1, width: 375))
+        await cache.set(makeEntry(height: 30), for: CacheKey(layoutHash: 2, width: 375))
+        await cache.set(makeEntry(height: 40), for: CacheKey(layoutHash: 3, width: 375))
+
+        XCTAssertNil(cache.cachedEntry(for: oldestKey),
+            "Evicted key must not be servable via cachedEntry — mirror must evict in lockstep")
+    }
+
     // MARK: - Concurrent access
 
     func testConcurrentAccessIsRaceFree() async {

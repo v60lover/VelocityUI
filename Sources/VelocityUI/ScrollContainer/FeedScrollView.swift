@@ -139,6 +139,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         visibleCells[index]?.layer
     }
 
+    /// Count of indices still awaiting fragment delivery via refineKnownFrames — i.e. cells
+    /// mounted with `applyLayout([])` during a WorkingRange miss that LayoutCache could not
+    /// resolve inline. Should be 0 whenever LayoutCache is warm for all visible indices at
+    /// mount time — the inline materialization path bypasses this bookkeeping entirely.
+    var _pendingFragmentIndicesCount: Int { _pendingFragmentIndices.count }
+
     /// Called on @MainActor after a successful `applyContent` delivery.
     /// Used in tests to await image settlement without Task.sleep.
     /// Async: allows callers to await actor-isolated signals (e.g. AsyncSemaphore.signal()).
@@ -385,7 +391,26 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                 refined.append(index)
                 continue
             }
-            guard let entry = workingRange.entry(at: index) else { continue }
+            let entry: CellEntry
+            if let wrEntry = workingRange.entry(at: index) {
+                entry = wrEntry
+            } else if _pendingFragmentIndices.contains(index), index < tables.count,
+                      let cacheEntry = environment.layoutCache.cachedEntry(
+                          for: CacheKey(layoutHash: tables[index].layoutHash, width: lastLayoutWidth)
+                      ) {
+                // WorkingRange still hasn't been populated by the pipeline for this index
+                // (e.g. a fast leading-index advance outran notifyPipelineIfNeeded), but
+                // LayoutCache already has the entry. Materialize inline — same fallback as
+                // updateVisibleCells' WR-miss branch, lower priority per bead since
+                // refineKnownFrames normally runs after the pipeline has already committed.
+                // Gated on _pendingFragmentIndices (the small, mount-bounded set) — NOT on
+                // estimatedIndices, which spans the whole feed and would turn this into an
+                // NSCache probe + CacheKeyBox allocation per far-off, never-mounted index.
+                workingRange.commit(cacheEntry.layout, cacheEntry.fragments, at: index)
+                entry = cacheEntry
+            } else {
+                continue
+            }
             let realHeight = entry.layout.totalFrame.height
             guard realHeight > 0 else { continue }
 
@@ -479,6 +504,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             }
         }
 
+        // Set when a LayoutCache-hit mount below refines resolvedFrames for an index whose
+        // real height differs from the estimatedItemHeight placeholder — signals that
+        // already-mounted cells at later indices (not touched by this loop, since
+        // visibleCells[index] == nil gates re-entry) may need repositioning below.
+        var didRefineDuringMount = false
+
         // Mount newly visible cells.
         for index in visRange {
             guard index < resolvedFrames.count, index < tables.count else { continue }
@@ -496,6 +527,41 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                 cell.applyLayout(entry.fragments, synchronousContent: syncMap)
                 spawnMediaFetches(for: cell, fragments: entry.fragments, itemID: table.itemID,
                                   syncMap: syncMap)
+            } else if let entry = environment.layoutCache.cachedEntry(
+                for: CacheKey(layoutHash: table.layoutHash, width: lastLayoutWidth)
+            ) {
+                // WorkingRange miss, but LayoutCache already has the entry — from a prior
+                // pipeline pass at this width, or from AsyncFeed.warmUp() before mount.
+                // Materialize inline so this cell gets real fragments in THIS layoutSubviews
+                // pass instead of one+ frames of gradient placeholder. Subsequent layoutSubviews
+                // calls now hit the WR-hit branch above; refineKnownFrames is bypassed for this
+                // index (not added to _pendingFragmentIndices). See WorkingRange.commit's
+                // docstring for why a possible double-commit with notifyPipelineIfNeeded's
+                // pipeline Task (same index, same LayoutCache-sourced data) is safe.
+                workingRange.commit(entry.layout, entry.fragments, at: index)
+
+                // resolvedFrames[index] may still hold the estimatedItemHeight placeholder —
+                // this is the first layoutSubviews to see this index, so refineKnownFrames
+                // (which runs before this function) had nothing in WorkingRange yet to refine
+                // from. Refine here, inline, from the same LayoutCache-sourced layout, so the
+                // cell mounts at its real height instead of the stale estimate.
+                let realHeight = entry.layout.totalFrame.height
+                var mountFrame = frame
+                if realHeight > 0 {
+                    let delta = VerticalLayoutProvider.refineFrames(&resolvedFrames, at: index, newHeight: realHeight)
+                    if delta != 0 {
+                        contentSize.height += delta
+                        didRefineDuringMount = true
+                    }
+                    mountFrame = resolvedFrames[index]
+                    estimatedIndices.remove(index)
+                }
+
+                cell.layer.frame = mountFrame
+                let syncMap = buildSyncMap(for: entry.fragments)
+                cell.applyLayout(entry.fragments, synchronousContent: syncMap)
+                spawnMediaFetches(for: cell, fragments: entry.fragments, itemID: table.itemID,
+                                  syncMap: syncMap)
             } else {
                 // WorkingRange miss: placeholder gradient at estimated frame.
                 // Real fragments arrive via refineKnownFrames once the pipeline commits.
@@ -506,6 +572,17 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
             layer.addSublayer(cell.layer)
             visibleCells[index] = cell
+        }
+
+        // A LayoutCache-hit refine above only shifts resolvedFrames for indices AFTER the
+        // refined one — any cell already mounted (from a prior pass) at a higher index needs
+        // its layer.frame re-synced. Cheap no-op in the common case (didRefineDuringMount is
+        // false whenever every visible index either WR-hits or has no LayoutCache entry yet).
+        if didRefineDuringMount {
+            for (i, cell) in visibleCells {
+                guard i < resolvedFrames.count else { continue }
+                cell.layer.frame = resolvedFrames[i]
+            }
         }
 
         syncContentSize()

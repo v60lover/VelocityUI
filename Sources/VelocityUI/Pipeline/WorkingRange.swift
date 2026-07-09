@@ -44,6 +44,14 @@ public final class WorkingRange {
     }
 
     /// Primary commit — called by RenderPipeline after measure + extractFragments.
+    ///
+    /// Idempotent under identical inputs: this is a pure array-index write
+    /// (`buffer[offset] = CellEntry(...)`) with no accumulation or counter, so
+    /// two callers committing the same `(layout, fragments, index)` — e.g. the
+    /// scroll path's LayoutCache-hit inline materialization racing the
+    /// pipeline's `notifyPipelineIfNeeded` Task, both sourced from the same
+    /// LayoutCache entry — simply overwrite the same slot with byte-identical
+    /// data. Safe to call more than once for the same index.
     public func commit(_ layout: ResolvedLayout, _ fragments: [Fragment], at index: Int) {
         let offset = index - rangeStart
         guard offset >= 0, offset < capacity else { return }
