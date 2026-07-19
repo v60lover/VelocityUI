@@ -48,6 +48,10 @@ public final class RenderCell {
 
     private var sublayers: [Int: CALayer] = [:]
     private var mediaFragmentIDs: Set<Int> = []
+    /// Fragment ids whose sublayer currently shows a decode-guaranteed thumbnail/BlurHash
+    /// placeholder (as opposed to real content or the systemGray5 tint). Consulted by
+    /// applyContent to report which physics-fallback path a real-image delivery replaced.
+    private var placeholderPaintedFragmentIDs: Set<Int> = []
     private var mediaHandles: [MediaHandle] = []
     /// Sticky true once all media has loaded for the current item; cleared on cross-item recycle.
     private var allMediaLoaded = false
@@ -106,6 +110,7 @@ public final class RenderCell {
             for sub in sublayers.values { sub.removeFromSuperlayer() }
             sublayers.removeAll(keepingCapacity: true)
             mediaFragmentIDs.removeAll(keepingCapacity: true)
+            placeholderPaintedFragmentIDs.removeAll(keepingCapacity: true)
             placeholderLayer.opacity = 1
             contentLayer.opacity = 0
             CATransaction.commit()
@@ -155,6 +160,7 @@ public final class RenderCell {
                 sublayers[id]?.removeFromSuperlayer()
                 sublayers.removeValue(forKey: id)
                 mediaFragmentIDs.remove(id)
+                placeholderPaintedFragmentIDs.remove(id)
             }
         }
 
@@ -173,21 +179,31 @@ public final class RenderCell {
 
             // Classify on EVERY iteration — handles id-reuse across content types so
             // mediaFragmentIDs never becomes stale relative to the current fragment set.
-            if case .image = fragment.content {
+            if case .image(let descriptor) = fragment.content {
                 if let image = synchronousContent[fragment.id] {
                     // Sync paint: image is already decoded — set contents inline.
                     // No gray tint (image is present), no CATransition (no delay to mask).
                     sub.contents = image
                     sub.backgroundColor = nil
+                    placeholderPaintedFragmentIDs.remove(fragment.id)
                 } else if sub.contents == nil {
-                    // Gray placeholder tint only while no content is loaded
-                    sub.backgroundColor = UIColor.systemGray5.cgColor
+                    if let placeholder = decodePlaceholder(descriptor, targetSize: fragment.frame.size) {
+                        // Decode-guaranteed first paint: thumbnail/BlurHash decoded synchronously.
+                        // No gray tint — a real applyContent delivery later crossfades over this.
+                        sub.contents = placeholder
+                        sub.backgroundColor = nil
+                        placeholderPaintedFragmentIDs.insert(fragment.id)
+                    } else {
+                        // Gray placeholder tint only while no content is loaded
+                        sub.backgroundColor = UIColor.systemGray5.cgColor
+                    }
                 }
                 mediaFragmentIDs.insert(fragment.id)
             } else {
                 sub.backgroundColor = nil
                 sub.contents = nil  // image→geometry reclassification must not leave stale image visible
                 mediaFragmentIDs.remove(fragment.id)
+                placeholderPaintedFragmentIDs.remove(fragment.id)
             }
 
             sub.frame = fragment.frame
@@ -220,6 +236,15 @@ public final class RenderCell {
 
     // MARK: - Content
 
+    /// Which physics-fallback path a real-image `applyContent` delivery replaced.
+    /// Reported so callers (FeedScrollView) can distinguish a true gray→image transition
+    /// (prefetch never landed a placeholder either) from a thumbnail/BlurHash→image
+    /// transition (the decode-guaranteed placeholder engaged before the real image arrived).
+    public enum ContentTransitionKind: Sendable, Equatable {
+        case fromGrayPlaceholder
+        case fromThumbnailPlaceholder
+    }
+
     #if canImport(XCTest)
     /// Counts applyContent privacy-guard rejections (stale itemID deliveries).
     /// In normal fast-scroll operation this should be zero — cancelled Tasks return nil before
@@ -244,16 +269,25 @@ public final class RenderCell {
     /// `itemID` must match `currentItemID`. Passing the ID captured at fetch-start lets
     /// RenderCell self-defend against stale callbacks that race a cross-item recycle — a
     /// privacy guarantee: another item's image must never paint on this cell's sublayers.
-    public func applyContent(id: Int, image: CGImage, for itemID: AnyHashable) {
+    ///
+    /// Returns the `ContentTransitionKind` this delivery replaced, or nil if the delivery
+    /// was rejected (privacy guard) or the fragment id has no sublayer. Callers that don't
+    /// need to distinguish gray-tint from thumbnail-placeholder deliveries may ignore it.
+    @discardableResult
+    public func applyContent(id: Int, image: CGImage, for itemID: AnyHashable) -> ContentTransitionKind? {
         // Privacy guard: reject stale callbacks from a previous item's fetch.
         // nil currentItemID means the cell is fresh/unbound — any delivery is accepted.
         if let currentID = currentItemID, currentID != itemID {
             #if canImport(XCTest)
             RenderCell._privacyGuardFiredCount += 1
             #endif
-            return
+            return nil
         }
-        guard let sub = sublayers[id] else { return }
+        guard let sub = sublayers[id] else { return nil }
+
+        let transitionKind: ContentTransitionKind = placeholderPaintedFragmentIDs.remove(id) != nil
+            ? .fromThumbnailPlaceholder
+            : .fromGrayPlaceholder
 
         let fade = CATransition()
         fade.type = .fade
@@ -272,6 +306,8 @@ public final class RenderCell {
         #if DEBUG
         RenderCell._debugApplyContentCount += 1
         #endif
+
+        return transitionKind
     }
 
     // MARK: - Media Handles
@@ -293,6 +329,28 @@ public final class RenderCell {
     }
 
     // MARK: - Private
+
+    /// Decodes a fragment's thumbnail/BlurHash into a first-paint placeholder image.
+    /// Thumbnail takes precedence over BlurHash when both are set. Runs synchronously on
+    /// MainActor — callers must only invoke this when `sub.contents == nil` (the gate in
+    /// applyLayout already enforces a decode-once-per-fragment-lifetime budget).
+    /// Neither decode path needs a screen-scale parameter — both are bounded to a small
+    /// fixed pixel size independent of `targetSize`/scale; see `placeholderMaxPixelSize`.
+    private func decodePlaceholder(_ descriptor: ImageDescriptor, targetSize: CGSize) -> CGImage? {
+        if let data = descriptor.thumbnailData,
+           let image = decodeThumbnailPlaceholder(
+               data, targetSize: targetSize, cornerRadius: descriptor.cornerRadius
+           ) {
+            return image
+        }
+        if let hash = descriptor.blurHash,
+           let image = decodeBlurHashPlaceholder(
+               hash, targetSize: targetSize, cornerRadius: descriptor.cornerRadius
+           ) {
+            return image
+        }
+        return nil
+    }
 
     private func fadeOutPlaceholderIfAllReady() {
         guard !allMediaLoaded else { return }  // already revealed — skip O(N) check

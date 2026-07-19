@@ -230,23 +230,44 @@ public struct AsyncImageNode: RenderNode {
     /// Rounding applied at decode time via CGContext clip — never set on CALayer.
     /// Appearance-only: a cornerRadius change requires re-decode but does not affect layout geometry.
     public let cornerRadius: CGFloat
+    /// Small (~4KB) JPEG bytes decoded synchronously on MainActor for an instant first
+    /// paint when the real image has not finished fetching. Takes precedence over
+    /// `blurHash` when both are set. Appearance-only — never affects layout geometry.
+    public let thumbnailData: Data?
+    /// Compact (~30 char) BlurHash string decoded synchronously on MainActor as a
+    /// fallback first paint when `thumbnailData` is nil. Appearance-only — never
+    /// affects layout geometry.
+    public let blurHash: String?
 
     public init(url: URL?, aspectRatio: CGFloat? = nil, contentMode: VContentMode = .fit) {
         self.url = url
         self.aspectRatio = aspectRatio
         self.contentMode = contentMode
         self.cornerRadius = 0
+        self.thumbnailData = nil
+        self.blurHash = nil
     }
 
-    private init(url: URL?, aspectRatio: CGFloat?, contentMode: VContentMode, cornerRadius: CGFloat) {
+    private init(
+        url: URL?,
+        aspectRatio: CGFloat?,
+        contentMode: VContentMode,
+        cornerRadius: CGFloat,
+        thumbnailData: Data?,
+        blurHash: String?
+    ) {
         self.url = url
         self.aspectRatio = aspectRatio
         self.contentMode = contentMode
         self.cornerRadius = cornerRadius
+        self.thumbnailData = thumbnailData
+        self.blurHash = blurHash
     }
 
     /// layoutHash covers url, aspectRatio, and contentMode.
-    /// cornerRadius is intentionally excluded: it is appearance-only.
+    /// cornerRadius, thumbnailData, and blurHash are intentionally excluded: all three
+    /// are appearance-only (they affect what gets painted before the real image arrives,
+    /// never the fragment's geometry).
     public var layoutHash: Int {
         var h = Hasher()
         h.combine(url)
@@ -255,20 +276,45 @@ public struct AsyncImageNode: RenderNode {
         return h.finalize()
     }
 
-    /// appearanceHash covers cornerRadius only.
+    /// appearanceHash covers cornerRadius, thumbnailData, and blurHash.
     /// Note: changing cornerRadius triggers a re-decode of the image (rounding happens
     /// at decode time via CGContext clip), so the cost is higher than a typical appearance update.
     public var appearanceHash: Int {
         var h = Hasher()
         h.combine(cornerRadius)
+        h.combine(thumbnailData)
+        h.combine(blurHash)
         return h.finalize()
     }
 
     public func cornerRadius(_ radius: CGFloat) -> AsyncImageNode {
-        AsyncImageNode(url: url, aspectRatio: aspectRatio, contentMode: contentMode, cornerRadius: radius)
+        AsyncImageNode(
+            url: url, aspectRatio: aspectRatio, contentMode: contentMode, cornerRadius: radius,
+            thumbnailData: thumbnailData, blurHash: blurHash
+        )
     }
 
     public func aspectRatio(_ ratio: CGFloat) -> AsyncImageNode {
-        AsyncImageNode(url: url, aspectRatio: ratio, contentMode: contentMode, cornerRadius: cornerRadius)
+        AsyncImageNode(
+            url: url, aspectRatio: ratio, contentMode: contentMode, cornerRadius: cornerRadius,
+            thumbnailData: thumbnailData, blurHash: blurHash
+        )
+    }
+
+    /// Sets the decode-guaranteed first-paint thumbnail. Takes precedence over
+    /// `.placeholder(blurHash:)` when both are set on the same node.
+    public func placeholder(thumbnail: Data?) -> AsyncImageNode {
+        AsyncImageNode(
+            url: url, aspectRatio: aspectRatio, contentMode: contentMode, cornerRadius: cornerRadius,
+            thumbnailData: thumbnail, blurHash: blurHash
+        )
+    }
+
+    /// Sets the decode-guaranteed first-paint BlurHash fallback, used when `thumbnailData` is nil.
+    public func placeholder(blurHash: String?) -> AsyncImageNode {
+        AsyncImageNode(
+            url: url, aspectRatio: aspectRatio, contentMode: contentMode, cornerRadius: cornerRadius,
+            thumbnailData: thumbnailData, blurHash: blurHash
+        )
     }
 }

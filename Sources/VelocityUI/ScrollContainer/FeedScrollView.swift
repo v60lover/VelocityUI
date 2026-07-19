@@ -154,9 +154,20 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     #endif
 
     #if DEBUG
-    /// Called on @MainActor after each successful `applyContent` delivery.
-    /// Used by BenchmarkHost to count gray→image transitions.
-    var _onContentDeliveredDebug: (() -> Void)?
+    /// Called on @MainActor after each successful `applyContent` delivery whose sublayer
+    /// previously showed the systemGray5 tint (no placeholder data was available).
+    /// Used by BenchmarkHost to count true gray→image transitions.
+    ///
+    /// `@_spi(BenchmarkHost)`: cross-module DEBUG-only instrumentation hook, not a public
+    /// library API. BenchmarkHost must import with `@_spi(BenchmarkHost) import VelocityUI`.
+    @_spi(BenchmarkHost)
+    public var _onContentDeliveredDebug: (() -> Void)?
+
+    /// Called on @MainActor after each successful `applyContent` delivery whose sublayer
+    /// previously showed a decode-guaranteed thumbnail/BlurHash placeholder — the
+    /// max-fling physics fallback engaged. Used by BenchmarkHost's maxFlingNoGray scenario.
+    @_spi(BenchmarkHost)
+    public var _onThumbnailReplacedDebug: (() -> Void)?
     #endif
 
     // MARK: - Init
@@ -711,6 +722,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         #endif
         #if DEBUG
         let onDebug = _onContentDeliveredDebug
+        let onThumbnailDebug = _onThumbnailReplacedDebug
         #endif
 
         for fragment in fragments {
@@ -735,12 +747,16 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                 // applyContent's itemID privacy guard is a defense-in-depth backup for races
                 // where cancellation and content delivery coincide after isCancelled is checked.
                 guard !Task.isCancelled else { return }
-                cell?.applyContent(id: fragmentID, image: img, for: itemID)
+                let transition = cell?.applyContent(id: fragmentID, image: img, for: itemID)
                 #if canImport(XCTest)
                 await onDelivery?()
                 #endif
                 #if DEBUG
-                onDebug?()
+                switch transition {
+                case .fromGrayPlaceholder:     onDebug?()
+                case .fromThumbnailPlaceholder: onThumbnailDebug?()
+                case nil:                       break
+                }
                 #endif
             }
             cell.addMediaHandle(MediaHandle(task: task))

@@ -15,19 +15,25 @@ final class RenderCellTests: XCTestCase {
         return cell
     }
 
-    private func imageFragment(id: Int, frame: CGRect) -> Fragment {
+    private func geometryFragment(id: Int, frame: CGRect) -> Fragment {
+        Fragment(id: id, content: .geometry, frame: frame)
+    }
+
+    /// Known-valid canonical BlurHash string (public example from https://blurha.sh).
+    private let validBlurHash = "L6PZfSi_.AyE_3t7t7R**0o#DgR4"
+
+    private func imageFragment(
+        id: Int, frame: CGRect, thumbnailData: Data? = nil, blurHash: String? = nil
+    ) -> Fragment {
         Fragment(
             id: id,
             content: .image(ImageDescriptor(
                 url: nil, aspectRatio: 1.0, contentMode: 0,
-                cornerRadius: 0, layoutHash: id, appearanceHash: id
+                cornerRadius: 0, layoutHash: id, appearanceHash: id,
+                thumbnailData: thumbnailData, blurHash: blurHash
             )),
             frame: frame
         )
-    }
-
-    private func geometryFragment(id: Int, frame: CGRect) -> Fragment {
-        Fragment(id: id, content: .geometry, frame: frame)
     }
 
     private func makeCGImage(width: Int = 10, height: Int = 10) -> CGImage {
@@ -547,6 +553,85 @@ final class RenderCellTests: XCTestCase {
         let sub = cl.sublayers?.first
         XCTAssertNil(sub?.contents, "No sync content — sublayer must have nil contents")
         XCTAssertNotNil(sub?.backgroundColor, "No sync content — gray placeholder tint must be applied")
+    }
+
+    // MARK: - Tests 22-27: decode-guaranteed placeholder (VelocityUI-1su.3)
+
+    func testApplyLayoutDecodesBlurHashPlaceholderAndSkipsGrayTint() {
+        let cell = makeCell()
+        let frag = imageFragment(id: 0, frame: CGRect(x: 0, y: 0, width: 40, height: 40), blurHash: validBlurHash)
+
+        cell.applyLayout([frag])
+
+        guard let cl = contentLayer(of: cell) else { XCTFail("contentLayer missing"); return }
+        let sub = cl.sublayers?.first
+        XCTAssertNotNil(sub?.contents,
+            "BlurHash placeholder must be decoded synchronously and set as sub.contents")
+        XCTAssertNil(sub?.backgroundColor,
+            "Placeholder decode must skip the systemGray5 gray tint")
+    }
+
+    func testApplyLayoutMalformedBlurHashFallsBackToGrayTint() {
+        let cell = makeCell()
+        let frag = imageFragment(id: 0, frame: CGRect(x: 0, y: 0, width: 40, height: 40), blurHash: "not-a-blurhash")
+
+        cell.applyLayout([frag])
+
+        guard let cl = contentLayer(of: cell) else { XCTFail("contentLayer missing"); return }
+        let sub = cl.sublayers?.first
+        XCTAssertNil(sub?.contents, "Malformed BlurHash must decode to nil, not crash")
+        XCTAssertNotNil(sub?.backgroundColor, "Malformed BlurHash must fall back to gray tint")
+    }
+
+    func testApplyLayoutNoPlaceholderDataPreservesExistingGrayTintBehavior() {
+        // AC7 backward compatibility: absent placeholder data must behave identically
+        // to pre-VelocityUI-1su.3 RenderCell.
+        let cell = makeCell()
+        let frag = imageFragment(id: 0, frame: CGRect(x: 0, y: 0, width: 320, height: 200))
+
+        cell.applyLayout([frag])
+
+        guard let cl = contentLayer(of: cell) else { XCTFail("contentLayer missing"); return }
+        let sub = cl.sublayers?.first
+        XCTAssertNil(sub?.contents)
+        XCTAssertNotNil(sub?.backgroundColor)
+    }
+
+    func testApplyLayoutDoesNotRedecodePlaceholderOnSubsequentLayoutPasses() {
+        let cell = makeCell()
+        let frag = imageFragment(id: 0, frame: CGRect(x: 0, y: 0, width: 40, height: 40), blurHash: validBlurHash)
+
+        cell.applyLayout([frag])
+        guard let cl = contentLayer(of: cell) else { XCTFail("contentLayer missing"); return }
+        let firstContents = cl.sublayers?.first?.contents as! CGImage?
+
+        cell.applyLayout([frag])  // second pass — sub.contents is already non-nil
+        let secondContents = cl.sublayers?.first?.contents as! CGImage?
+
+        XCTAssertTrue(firstContents === secondContents,
+            "Placeholder must decode once per fragment lifetime — the gate is sub.contents == nil")
+    }
+
+    func testApplyContentReplacingThumbnailPlaceholderReportsFromThumbnailPlaceholder() {
+        let cell = makeCell()
+        let frag = imageFragment(id: 0, frame: CGRect(x: 0, y: 0, width: 40, height: 40), blurHash: validBlurHash)
+        cell.applyLayout([frag])
+
+        let transition = cell.applyContent(id: 0, image: makeCGImage(), for: AnyHashable("item"))
+
+        XCTAssertEqual(transition, .fromThumbnailPlaceholder,
+            "Replacing a placeholder-painted sublayer must report .fromThumbnailPlaceholder")
+    }
+
+    func testApplyContentReplacingGrayTintReportsFromGrayPlaceholder() {
+        let cell = makeCell()
+        let frag = imageFragment(id: 0, frame: CGRect(x: 0, y: 0, width: 320, height: 200))
+        cell.applyLayout([frag])
+
+        let transition = cell.applyContent(id: 0, image: makeCGImage(), for: AnyHashable("item"))
+
+        XCTAssertEqual(transition, .fromGrayPlaceholder,
+            "Replacing a gray-tint sublayer (no placeholder data) must report .fromGrayPlaceholder")
     }
 
     // MARK: - Test 16: applyContent with mismatched itemID is a no-op (Latent 3 privacy guard)

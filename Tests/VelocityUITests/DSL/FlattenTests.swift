@@ -129,6 +129,45 @@ final class FlattenTests: XCTestCase {
         XCTAssertEqual(d.cornerRadius, 8)
     }
 
+    // MARK: - Placeholder (VelocityUI-1su.3)
+
+    @MainActor func testFlatten_asyncImageNode_mapsPlaceholderFields() {
+        let thumb = Data([0xFF, 0xD8, 0xFF])
+        let node = AsyncImageNode(url: nil, aspectRatio: 1.0)
+            .placeholder(thumbnail: thumb)
+            .placeholder(blurHash: "L6PZfSi_.AyE_3t7t7R**0o#DgR4")
+        let table = flatten(VStackNode { node }, itemID: "i")
+        guard case .image(let d) = table.nodes[1] else { XCTFail(); return }
+        XCTAssertEqual(d.thumbnailData, thumb)
+        XCTAssertEqual(d.blurHash, "L6PZfSi_.AyE_3t7t7R**0o#DgR4")
+    }
+
+    @MainActor func testPlaceholder_doesNotAffectLayoutHash() {
+        let base = AsyncImageNode(url: nil, aspectRatio: 1.0)
+        let withPlaceholder = base.placeholder(blurHash: "L6PZfSi_.AyE_3t7t7R**0o#DgR4")
+        XCTAssertEqual(base.layoutHash, withPlaceholder.layoutHash,
+            "placeholder data is appearance-only — must not affect layoutHash")
+    }
+
+    @MainActor func testPlaceholder_changesAppearanceHash() {
+        let base = AsyncImageNode(url: nil, aspectRatio: 1.0)
+        let withPlaceholder = base.placeholder(blurHash: "L6PZfSi_.AyE_3t7t7R**0o#DgR4")
+        XCTAssertNotEqual(base.appearanceHash, withPlaceholder.appearanceHash,
+            "setting a placeholder must change appearanceHash so classify() re-commits it")
+    }
+
+    @MainActor func testPlaceholder_thumbnailTakesPrecedenceOverBlurHashInDescriptor() {
+        let thumb = Data([0xFF, 0xD8, 0xFF])
+        let node = AsyncImageNode(url: nil, aspectRatio: 1.0)
+            .placeholder(blurHash: "L6PZfSi_.AyE_3t7t7R**0o#DgR4")
+            .placeholder(thumbnail: thumb)
+        let table = flatten(VStackNode { node }, itemID: "i")
+        guard case .image(let d) = table.nodes[1] else { XCTFail(); return }
+        // Both are carried through — precedence is applied at decode time (RenderCell), not here.
+        XCTAssertEqual(d.thumbnailData, thumb)
+        XCTAssertEqual(d.blurHash, "L6PZfSi_.AyE_3t7t7R**0o#DgR4")
+    }
+
     @MainActor func testFlatten_textNode_mapsAllFields() {
         let node = TextNode("abc", font: VFontDescriptor(size: 20, weight: 700),
                             color: .white, lineLimit: 3, lineBreakMode: .byTruncatingTail)

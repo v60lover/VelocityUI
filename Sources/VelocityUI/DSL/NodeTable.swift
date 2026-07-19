@@ -92,6 +92,32 @@ public struct ImageDescriptor: Sendable {
     public let cornerRadius: CGFloat  // decode-time rounding — never set on CALayer
     public let layoutHash: Int
     public let appearanceHash: Int
+    /// Small (~4KB) JPEG bytes for a decode-guaranteed first paint. Takes precedence
+    /// over `blurHash` when both are set. See AsyncImageNode.placeholder(thumbnail:).
+    public let thumbnailData: Data?
+    /// Compact BlurHash string, decoded when `thumbnailData` is nil.
+    /// See AsyncImageNode.placeholder(blurHash:).
+    public let blurHash: String?
+
+    public init(
+        url: URL?,
+        aspectRatio: CGFloat?,
+        contentMode: Int,
+        cornerRadius: CGFloat,
+        layoutHash: Int,
+        appearanceHash: Int,
+        thumbnailData: Data? = nil,
+        blurHash: String? = nil
+    ) {
+        self.url = url
+        self.aspectRatio = aspectRatio
+        self.contentMode = contentMode
+        self.cornerRadius = cornerRadius
+        self.layoutHash = layoutHash
+        self.appearanceHash = appearanceHash
+        self.thumbnailData = thumbnailData
+        self.blurHash = blurHash
+    }
 }
 
 public struct GIFDescriptor: Sendable {
