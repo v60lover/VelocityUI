@@ -93,6 +93,11 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     private var lastNotifiedLeadingIndex: Int = -1
 
     private var lastLayoutWidth: CGFloat = 0
+    /// False until the first `layoutSubviews` width transition has been handled. Distinguishes
+    /// the initial `0 -> bounds.width` sentinel transition (nothing stale to evict — WorkingRange
+    /// and LayoutCache are either empty or hold entries `warmUp` populated at this exact width)
+    /// from a genuine width change (rotation/resize), where prior-width entries ARE stale.
+    private var hasLaidOutOnce: Bool = false
     private var reachEndFired: Bool = false
 
     /// Pre-allocated scratch buffer for the recycle loop — avoids a per-frame Array allocation.
@@ -240,8 +245,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
         let w = bounds.width
         if w > 0, w != lastLayoutWidth {
+            let isFirstLayout = !hasLaidOutOnce
             lastLayoutWidth = w
-            handleWidthChange()
+            hasLaidOutOnce = true
+            handleWidthChange(isFirstLayout: isFirstLayout)
         }
 
         refineKnownFrames()
@@ -461,20 +468,28 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
     // MARK: - Width change
 
-    private func handleWidthChange() {
-        workingRange.invalidateAll()
-        let pipeline = self.pipeline
-        Task { await pipeline.markInvalidated() }
+    /// - Parameter isFirstLayout: `true` only for the very first width transition (the
+    ///   `0 -> bounds.width` sentinel). On first layout there is no prior width whose entries
+    ///   could be stale — `WorkingRange` is empty and any `LayoutCache` entries were populated by
+    ///   `AsyncFeed.warmUp` at this SAME width — so the WR/LayoutCache invalidation side effects
+    ///   are skipped. `rebuildFrames` + `syncContentSize` still run unconditionally: the frames
+    ///   must be (re)computed against the now-known width either way.
+    private func handleWidthChange(isFirstLayout: Bool) {
+        if !isFirstLayout {
+            workingRange.invalidateAll()
+            let pipeline = self.pipeline
+            Task { await pipeline.markInvalidated() }
+            // LayoutCache eviction is async (actor-isolated). Between here and when invalidateAll()
+            // completes, a boundary-crossing notifyPipelineIfNeeded will miss on the new-width key —
+            // harmless. An in-flight old-width prefetch can still write back entries, but old-width
+            // CacheKeys (layoutHash, oldWidth) never collide with new-width keys (layoutHash, newWidth),
+            // so no stale data pollutes the new-width lookup path.
+            let cache = environment.layoutCache
+            Task { await cache.invalidateAll() }
+        }
         lastNotifiedLeadingIndex = -1
         rebuildFrames(oldFrames: [], survivors: [])
         syncContentSize()
-        // LayoutCache eviction is async (actor-isolated). Between here and when invalidateAll()
-        // completes, a boundary-crossing notifyPipelineIfNeeded will miss on the new-width key —
-        // harmless. An in-flight old-width prefetch can still write back entries, but old-width
-        // CacheKeys (layoutHash, oldWidth) never collide with new-width keys (layoutHash, newWidth),
-        // so no stale data pollutes the new-width lookup path.
-        let cache = environment.layoutCache
-        Task { await cache.invalidateAll() }
     }
 
     // MARK: - Synchronous scroll path

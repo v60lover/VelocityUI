@@ -1495,6 +1495,62 @@ final class FeedScrollViewTests: XCTestCase {
         }
     }
 
+    /// Regression test for VelocityUI-ket: `layoutSubviews`' first width transition (the
+    /// `0 -> bounds.width` sentinel) was handled identically to a genuine width change
+    /// (rotation/resize), so `handleWidthChange()` unconditionally spawned
+    /// `Task { await cache.invalidateAll() }` — wiping LayoutCache entries `AsyncFeed.warmUp`
+    /// populated for items beyond the very first visible screen, even though nothing about
+    /// those entries was stale (same width, first-ever mount). Warms 30 items, mounts a
+    /// viewport that only fits the first at the default 300pt `estimatedItemHeight`, and
+    /// asserts the off-screen item's warmed entry survives well past the first
+    /// `layoutSubviews` call. The yield-drain loop gives any (buggy) async invalidation
+    /// Task every chance to run — same idiom as this file's other async-completion polls
+    /// (e.g. `testCrossItemRecycleDoesNotDeliverStaleImage`), just bounded by iteration
+    /// count instead of a deterministic condition, since the assertion here is about
+    /// absence of a state change rather than its arrival.
+    func testWarmUpEntriesForOffscreenItemsSurviveFirstMountWidthTransition() async {
+        let env = makeEnvironment()
+        let width: CGFloat = 375
+        // 30 items, each with a DISTINCT aspectRatio: AsyncImageNode.layoutHash covers
+        // url/aspectRatio/contentMode (not item.id — see Nodes.swift), so identical-shaped
+        // items collapse onto the SAME CacheKey. A shared key would let RenderPipeline's own
+        // post-invalidation re-prefetch (which covers indices 0..<10 from leading index 0,
+        // default prefetchAheadCount 10 / prefetchBehindCount 3) silently repopulate the
+        // "off-screen" key too, masking the bug this test guards against. Distinct aspect
+        // ratios give every index a distinct layoutHash/CacheKey, so index 20's entry can
+        // ONLY come from warmUp — the pipeline's own window never reaches past index 9.
+        let testItems = (0..<30).map { TestItem(id: $0, aspectRatio: 1.0 + CGFloat($0) * 0.01) }
+        let builder: (TestItem) -> any RenderNode = { item in
+            AsyncImageNode(url: nil, aspectRatio: item.aspectRatio)
+        }
+
+        await warmLayoutCache(items: testItems, width: width, cellBuilder: builder, environment: env)
+
+        let offscreenItem = testItems[20]
+        let offscreenTable = flatten(builder(offscreenItem), itemID: offscreenItem.id)
+        let offscreenKey = CacheKey(layoutHash: offscreenTable.layoutHash, width: width)
+        XCTAssertNotNil(env.layoutCache.cachedEntry(for: offscreenKey),
+            "Precondition: warmUp populated the off-screen item's LayoutCache entry")
+
+        // Small viewport: only index 0 fits at the default 300pt estimatedItemHeight, so
+        // index 20 is off-screen and never inline-materialized by updateVisibleCells here.
+        let feed = FeedScrollView<TestItem>(environment: env, frame: CGRect(x: 0, y: 0, width: width, height: 200))
+        feed.cellBuilder = { item in builder(item) }
+        feed.items = testItems
+
+        // First layoutSubviews: bounds.width (nonzero) != lastLayoutWidth (0 sentinel) —
+        // the exact first-mount transition this bead's bug conflated with a real width change.
+        feed.layoutSubviews()
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while ContinuousClock.now < deadline { await Task.yield() }
+
+        XCTAssertNotNil(env.layoutCache.cachedEntry(for: offscreenKey),
+            "warmUp's LayoutCache entry for an off-screen item must survive the FIRST "
+            + "layoutSubviews' 0->width sentinel transition — there is no prior width for it "
+            + "to have gone stale from")
+    }
+
     /// Regression test for a second `layoutSubviews()` call being a true no-op once the
     /// LayoutCache-hit inline materialization (this bead) has already committed a WR entry
     /// on the first pass. NOTE: this does NOT exercise `WorkingRange.commit`'s double-commit
