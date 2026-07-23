@@ -138,6 +138,14 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         return (start..<clampedEnd).filter { workingRange.entry(at: $0) == nil }.count
     }
 
+    /// Resolved frame for an index, in scroll-content coordinates. nil if the index has never
+    /// been laid out. Used by tests to compute a scroll offset that lands a specific index in
+    /// the viewport from the item's real (post-measure) frame rather than a hardcoded estimate —
+    /// `estimatedItemHeight`-based math silently drifts once WorkingRange refines real heights.
+    func _debugResolvedFrame(at index: Int) -> CGRect? {
+        index < resolvedFrames.count ? resolvedFrames[index] : nil
+    }
+
     /// Returns the root CALayer of the cell mounted at item index, or nil if not visible.
     /// Used by integration tests to compare layer identity across itemsDidChange calls.
     func _cellLayer(at index: Int) -> CALayer? {
@@ -150,12 +158,24 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// mount time — the inline materialization path bypasses this bookkeeping entirely.
     var _pendingFragmentIndicesCount: Int { _pendingFragmentIndices.count }
 
-    /// Called on @MainActor after a successful `applyContent` delivery.
-    /// Used in tests to await image settlement without Task.sleep.
+    /// `AnyHashable`'s `Sendable` conformance is explicitly unavailable in the standard library,
+    /// even though every itemID it boxes is `Hashable & Sendable` at construction (see
+    /// NodeTable.itemID's docstring) — so it cannot cross a `@Sendable` closure boundary as-is.
+    /// Test-only carrier box; `@unchecked` is safe because the boxed value is read-only after
+    /// construction and never mutated concurrently.
+    struct _SendableItemID: @unchecked Sendable {
+        let value: AnyHashable
+    }
+
+    /// Called on @MainActor after a successful `applyContent` delivery, with the itemID the
+    /// delivery landed on. Used in tests to await settlement for a specific item without
+    /// Task.sleep — a multi-cell mount (e.g. after a scroll that brings several indices into
+    /// view at once) can deliver content for a neighboring index first, so callers that care
+    /// about one item must filter on the itemID rather than treating any delivery as a signal.
     /// Async: allows callers to await actor-isolated signals (e.g. AsyncSemaphore.signal()).
     /// @Sendable: captured by value into a Task { } body before invocation.
-    var _onContentDelivered: (@Sendable () async -> Void)?
-    func _setOnContentDelivered(_ h: (@Sendable () async -> Void)?) { _onContentDelivered = h }
+    var _onContentDelivered: (@Sendable (_SendableItemID) async -> Void)?
+    func _setOnContentDelivered(_ h: (@Sendable (_SendableItemID) async -> Void)?) { _onContentDelivered = h }
     #endif
 
     #if DEBUG
@@ -764,7 +784,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                 guard !Task.isCancelled else { return }
                 let transition = cell?.applyContent(id: fragmentID, image: img, for: itemID)
                 #if canImport(XCTest)
-                await onDelivery?()
+                await onDelivery?(_SendableItemID(value: itemID))
                 #endif
                 #if DEBUG
                 switch transition {
