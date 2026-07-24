@@ -55,6 +55,14 @@ private final class PerURLCountingProtocol: URLProtocol {
 @MainActor
 final class ImagePrefetchIntegrationTests: XCTestCase {
 
+    /// One-time settle window after the whole class finishes, in addition to each test's own
+    /// drainFeedWork(_:) call — real prefetch batches + mocked-network decode work. See
+    /// VelocityUI-1su.6.
+    nonisolated override class func tearDown() {
+        Thread.sleep(forTimeInterval: 1.0)
+        super.tearDown()
+    }
+
     struct FeedItem: Identifiable, Sendable {
         let id: Int
         let url: URL
@@ -140,6 +148,7 @@ final class ImagePrefetchIntegrationTests: XCTestCase {
                 "Expected prefetch for index \(idx) (URL: \(items[idx].url)) to have fired"
             )
         }
+        await drainFeedWork(feed)
     }
 
     // MARK: - Test 2: cell mounts with non-nil contents after prefetch
@@ -253,6 +262,7 @@ final class ImagePrefetchIntegrationTests: XCTestCase {
         )
 
         feed._setOnContentDelivered(nil)
+        await drainFeedWork(feed)
     }
 }
 #endif

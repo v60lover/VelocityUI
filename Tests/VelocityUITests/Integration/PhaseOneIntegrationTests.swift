@@ -18,6 +18,17 @@ import os
 @MainActor
 final class PhaseOneIntegrationTests: XCTestCase {
 
+    /// One-time settle window after the whole class finishes. This suite deliberately does
+    /// real (no-mock) ImageActor/RenderPipeline work, including a 50-fetch concurrent decode
+    /// burst — heavy GCD queue churn that can throttle a freshly-created queue in whichever
+    /// class runs next. See VelocityUI-1su.6 — confirmed via full-suite bisection that this
+    /// class running immediately before PlaceholderDecodeTests/RenderDifferTests caused their
+    /// perf-threshold assertions to intermittently miss.
+    nonisolated override class func tearDown() {
+        Thread.sleep(forTimeInterval: 1.0)
+        super.tearDown()
+    }
+
     // MARK: - Item model
 
     struct FeedItem: Identifiable, Sendable {

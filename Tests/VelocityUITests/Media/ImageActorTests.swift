@@ -94,6 +94,19 @@ private final class BarrierURLProtocol: URLProtocol {
 
 final class ImageActorTests: XCTestCase {
 
+    /// One-time settle window after the whole class finishes. Every test here spins up its
+    /// own `ImageActor` (own DispatchQueueExecutor + concurrent decode queue); back-to-back
+    /// across ~25 tests that churns a lot of short-lived GCD queues at once. Swift's
+    /// cooperative thread pool and GCD's QoS-scoped worker pool are both process-wide, so a
+    /// class immediately following this one can have its own real decode/network work
+    /// throttled by leftover pool pressure — see VelocityUI-1su.6 (confirmed via bisection:
+    /// this class alone, with no FeedScrollViewTests beforehand, is enough to make
+    /// ImagePrefetchIntegrationTests.testPrefetchedIndexMountsWithContent miss its 5s window).
+    override class func tearDown() {
+        Thread.sleep(forTimeInterval: 1.0)
+        super.tearDown()
+    }
+
     // MARK: - Fixture helpers
 
     private func makeFormat(scale: CGFloat = 1) -> UIGraphicsImageRendererFormat {

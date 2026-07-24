@@ -12,6 +12,13 @@ import UIKit
 @MainActor
 final class Spike4Tests: XCTestCase {
 
+    /// One-time settle window after the whole class finishes — exercises a withTaskGroup
+    /// rasterizing 100 TextDescriptors concurrently. See VelocityUI-1su.6.
+    nonisolated override class func tearDown() {
+        Thread.sleep(forTimeInterval: 1.0)
+        super.tearDown()
+    }
+
     // MARK: - Corpus
 
     private func makeCorpus() -> [TextDescriptor] {

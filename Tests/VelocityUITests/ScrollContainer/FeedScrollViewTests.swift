@@ -8,6 +8,20 @@ import Darwin
 @MainActor
 final class FeedScrollViewTests: XCTestCase {
 
+    /// One-time settle window after the whole class finishes, in addition to each real-media
+    /// test's own `drainFeedWork(_:)` call. ~9 tests spin up real `ImageActor`/DispatchQueueExecutor
+    /// instances and decode real files in quick succession; per-test draining handles each
+    /// FeedScrollView's own Tasks, but GCD's QoS-scoped worker pool is process-wide and can still
+    /// be under pressure right at the class boundary. See VelocityUI-1su.6 — this class stacking
+    /// with ImageActorTests (which has its own class-level settle) was needed to get
+    /// ImagePrefetchIntegrationTests.testPrefetchedIndexMountsWithContent to stop missing its 5s
+    /// window in full-suite runs, even though per-test draining alone already made every
+    /// individual FeedScrollViewTests test itself well-behaved in isolation.
+    nonisolated override class func tearDown() {
+        Thread.sleep(forTimeInterval: 1.0)
+        super.tearDown()
+    }
+
     // MARK: - Test fixtures
 
     struct TestItem: Identifiable, Sendable {
@@ -309,6 +323,7 @@ final class FeedScrollViewTests: XCTestCase {
         }
 
         XCTAssertTrue(contentArrived, "contentLayer opacity must reach 1 once the image loads")
+        await drainFeedWork(feed)
     }
 
     // MARK: - 10. Nil-URL image node produces no media handles (no crash, no fetch)
@@ -404,6 +419,7 @@ final class FeedScrollViewTests: XCTestCase {
         XCTAssertTrue(aContentArrived,
             "Cell at index 1 (item A, prepended) must receive real fragments and fade in — "
             + "_pendingFragmentIndices must be drained even when the index is absent from estimatedIndices")
+        await drainFeedWork(feed)
     }
 
     // MARK: - 12. Cross-item recycle suppresses stale image delivery (privacy invariant)
@@ -535,6 +551,7 @@ final class FeedScrollViewTests: XCTestCase {
         XCTAssertFalse(staleDelivered,
             "Privacy guard must reject item A's stale image on item B's cell — "
             + "opacity must stay 0 after gate-controlled delivery to the recycled cell")
+        await drainFeedWork(feed)
     }
 
     // MARK: - 13. Same-item re-mount keeps contentLayer.opacity at 1 (no placeholder flash)
@@ -628,6 +645,7 @@ final class FeedScrollViewTests: XCTestCase {
         }
         XCTAssertTrue(newImageArrived,
             "url2's image must eventually arrive and be set on a sublayer inside contentLayer")
+        await drainFeedWork(feed)
     }
     // MARK: - 14. Media change preserves cell identity (no recycle on .media URL swap)
 
@@ -693,6 +711,7 @@ final class FeedScrollViewTests: XCTestCase {
             findFirstContentLayer(in: feed)?.sublayers?.first(where: { $0.contents != nil }),
             "sublayer.contents must stay non-nil during .media URL swap — stale-until-replaced"
         )
+        await drainFeedWork(feed)
     }
 
     // MARK: - 16. AnyHashable access counter: appearance-only itemsDidChange stays within differ-only bound
@@ -805,6 +824,7 @@ final class FeedScrollViewTests: XCTestCase {
 
         XCTAssertEqual(findFirstContentLayer(in: feed)?.opacity, 1,
             "contentLayer.opacity must stay 1 after .appearance change — no placeholder reset")
+        await drainFeedWork(feed)
     }
 
     // MARK: - 17. Wall-time microbench: itemsDidChange appearance-only speedup vs e26 baseline
@@ -1400,6 +1420,7 @@ final class FeedScrollViewTests: XCTestCase {
         let pl = cellLayer.sublayers?.compactMap { $0 as? CAGradientLayer }.first
         XCTAssertEqual(pl?.opacity ?? 1, 0,
             "placeholderLayer must be hidden (opacity 0) when sync map covers all image fragments (AC6)")
+        await drainFeedWork(feed)
     }
 
     // MARK: - 24. LayoutCache-hit WR-miss inline materialization (VelocityUI-1su.2)
@@ -1493,6 +1514,7 @@ final class FeedScrollViewTests: XCTestCase {
                 "AC(3): cell \(index) must have fragment sublayers from the LayoutCache hit, "
                 + "not an empty applyLayout([]) placeholder-only layer")
         }
+        await drainFeedWork(feed)
     }
 
     /// Regression test for VelocityUI-ket: `layoutSubviews`' first width transition (the
@@ -1605,6 +1627,7 @@ final class FeedScrollViewTests: XCTestCase {
             "A second layoutSubviews with no state change must not alter the mounted cell's frame")
         XCTAssertEqual(feed._workingRangeMissCount(from: 0, to: 1), 0,
             "WorkingRange entry must remain present after a second, no-op layoutSubviews call")
+        await drainFeedWork(feed)
     }
 }
 #endif

@@ -68,6 +68,13 @@ private struct TestCell: RenderView {
 @MainActor
 final class WarmUpTests: XCTestCase {
 
+    /// One-time settle window after the whole class finishes — AsyncFeed.warmUp() spawns
+    /// real concurrent prefetch Tasks against a real ImageActor. See VelocityUI-1su.6.
+    nonisolated override class func tearDown() {
+        Thread.sleep(forTimeInterval: 1.0)
+        super.tearDown()
+    }
+
     private func makeSession() -> URLSession {
         WarmUpCountingProtocol.reset()
         let config = URLSessionConfiguration.ephemeral

@@ -9,6 +9,13 @@ import XCTest
 /// than per-call allocation over 1,000 strings.
 final class Spike1Tests: XCTestCase {
 
+    /// One-time settle window after the whole class finishes — exercises a 20-task
+    /// withTaskGroup measuring 500 NodeTables concurrently. See VelocityUI-1su.6.
+    override class func tearDown() {
+        Thread.sleep(forTimeInterval: 1.0)
+        super.tearDown()
+    }
+
     // MARK: - Helpers
 
     private func makeVStackTable(id: Int, textCount: Int) -> NodeTable {
