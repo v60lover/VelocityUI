@@ -21,4 +21,4 @@ COMPARISON.md
 implement.md
 BenchmarkHost/build/
 BenchmarkHost/results/
-BenchmarkHost/
+BenchmarkHost/BenchmarkHost.xcodeproj/
