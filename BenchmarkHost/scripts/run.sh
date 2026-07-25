@@ -148,6 +148,9 @@ build_app() {
   log "regenerating BenchmarkHost.xcodeproj (xcodegen)…"
   (cd "$HOST_DIR" && xcodegen generate --quiet)
 
+  log "patching Texture…"
+  "$SCRIPTS_DIR/patch-texture.sh" "$DERIVED_DATA"
+
   log "building BenchmarkHost (Release)…"
   local dest
   if [[ $USE_SIM -eq 1 ]]; then

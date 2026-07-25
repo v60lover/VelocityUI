@@ -49,23 +49,6 @@ targets:
       - package: Texture
         product: AsyncDisplayKit
       - package: VelocityUI
-    preBuildScripts:
-      - name: "Patch Texture"
-        basedOnDependencyAnalysis: false
-        outputFiles:
-          - $(DERIVED_FILE_DIR)/texture-patch.stamp
-        script: |
-          # Texture 3.0.3 ASTextLayout.mm has 4 chained comparisons (A < B < C) that
-          # Clang 16 promotes to hard errors via -Wparentheses. Parenthesize them so
-          # the warning fires at warning level, not error level.
-          # BUILD_DIR strips to .../DerivedData/<proj>-<hash>; SourcePackages/checkouts
-          # lives directly under that dir, one level below Build/Products — no /../ needed.
-          TEXTURE_MM="${BUILD_DIR%/Build/Products}/SourcePackages/checkouts/Texture/Source/TextExperiment/Component/ASTextLayout.mm"
-          if [ -f "$TEXTURE_MM" ] && grep -q 'point\.y) < fabs(right' "$TEXTURE_MM"; then
-            sed -i '' 's/= fabs(left - point\.y) < fabs(right - point\.y) < /= (fabs(left - point.y) < fabs(right - point.y)) < /g' "$TEXTURE_MM"
-            sed -i '' 's/= fabs(left - point\.x) < fabs(right - point\.x) < /= (fabs(left - point.x) < fabs(right - point.x)) < /g' "$TEXTURE_MM"
-          fi
-          touch "$DERIVED_FILE_DIR/texture-patch.stamp"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.velocityui.BenchmarkHost

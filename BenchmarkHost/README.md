@@ -19,6 +19,14 @@ Re-run `xcodegen generate` any time a file is added, removed, or moved under
 `Sources/` or `Tests/` — the project picks it up automatically, no manual
 pbxproj editing. `scripts/run.sh` and `scripts/ci.sh` regenerate it for you.
 
+`scripts/run.sh` and `scripts/ci.sh` also patch Texture automatically as
+part of the build, via `scripts/patch-texture.sh` (Texture 3.0.3 has a
+`-Wparentheses` hard error under Clang 16 that must be patched after package
+resolution but before compilation). If you build the generated
+`.xcodeproj` directly in Xcode's GUI instead of going through those
+scripts, run `scripts/patch-texture.sh` once manually after packages
+resolve — otherwise the Texture compile will fail on `ASTextLayout.mm`.
+
 ## Launch Arguments
 
 | Argument | Values | Default |
