@@ -189,30 +189,20 @@ final class ImagePrefetchIntegrationTests: XCTestCase {
             retries += 1
         }
 
-        // Settlement flag — true only if applyContent hook fired for item 3 before the timeout.
-        // The timeout also signals the semaphore so the wait unblocks; the flag
-        // distinguishes an actual delivery from a silent timeout. Filtered by itemID: scrolling
-        // to center index 3 can bring neighboring indices into view in the same mount pass, and
-        // an unfiltered "any delivery" signal can be satisfied by one of those instead of index 3.
-        let deliveredLock = OSAllocatedUnfairLock<Bool>(initialState: false)
-        let contentDelivered = AsyncSemaphore(value: 0)
-        let targetID = items[3].id
-        feed._setOnContentDelivered { [contentDelivered, deliveredLock] boxed in
-            guard boxed.value == AnyHashable(targetID) else { return }
-            deliveredLock.withLock { $0 = true }
-            await contentDelivered.signal()
-        }
-
-        #if DEBUG
-        RenderCell._debugResetApplyContentCount()
-        #endif
-
         // Trigger refineKnownFrames so resolvedFrames[3] reflects the real (measured) height
-        // before we read it below. The hook above MUST already be installed before this call:
-        // once resolvedFrames shrink to their real height, index 3 can already fall inside the
-        // still-zero-offset viewport and get mounted here (not during the scroll below) — if the
-        // hook weren't set yet, that mount's spawnMediaFetches would capture a nil hook and its
-        // delivery would never be observed.
+        // before we read it below.
+        //
+        // NOTE: mounting index 3 can deliver its content via either of two valid paths —
+        // synchronously in this very call (if the prefetch's decode has already finished and
+        // the image is cache-resident by mount time) or asynchronously afterward (if the
+        // decode is still in flight). Both are correct; which one fires is a race with the
+        // background decode, not something the test controls. See VelocityUI-xbk: an earlier
+        // version of this test observed only the async path (an applyContent-delivery hook)
+        // and flaked hard under full-suite load, where the extra elapsed real time before this
+        // point made the synchronous path far more likely to win — the hook then never fired
+        // and the test spun out its whole timeout window despite the image having rendered
+        // correctly. `_debugIsContentRevealed` is path-independent: it reflects
+        // `RenderCell`'s `contentLayer` reveal state, which both delivery paths set.
         feed.layoutSubviews()
         guard let frame3 = feed._debugResolvedFrame(at: 3) else {
             XCTFail("index 3 must have a resolved frame once its WorkingRange entry has committed")
@@ -221,29 +211,26 @@ final class ImagePrefetchIntegrationTests: XCTestCase {
 
         // Scroll so index 3's real (measured) frame is centered in the viewport. If index 3 was
         // already mounted above, updateVisibleCells' `visibleCells[index] == nil` guard skips
-        // re-mounting it — harmless, since its delivery is already being observed.
+        // re-mounting it — harmless, since content delivery is observed by polling cell state
+        // below rather than by an event fired at mount/delivery time.
         feed.contentOffset = CGPoint(x: 0, y: max(0, frame3.midY - feed.bounds.height / 2))
         feed.layoutSubviews()
 
-        // Await content delivery via semaphore (no Task.sleep — explicit structured wait).
-        let timeoutTask = Task {
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
-            await contentDelivered.signal()  // unblocks wait on timeout; deliveredLock stays false
+        // Poll for content reveal — bounded real-time wait, index-3-specific by construction
+        // (reads index 3's own cell state, so no itemID filtering is needed for a multi-cell
+        // mount). Bounded at 200 × 10ms = 2s, matching the polling budget used elsewhere in
+        // this file for actor-hop-dependent state.
+        var revealRetries = 0
+        while revealRetries < 200 {
+            if feed._debugIsContentRevealed(at: 3) { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+            revealRetries += 1
         }
-        try? await contentDelivered.wait()
-        timeoutTask.cancel()
 
         XCTAssertTrue(
-            deliveredLock.withLock { $0 },
-            "applyContent must fire for index 3 within 5s — delivery hook never triggered"
+            feed._debugIsContentRevealed(at: 3),
+            "index 3's cell must reveal real image content within 2s — neither the synchronous mount-time paint nor the async applyContent path delivered it"
         )
-
-        #if DEBUG
-        XCTAssertGreaterThanOrEqual(
-            RenderCell._debugApplyContentCount, 1,
-            "applyContent must have fired at least once for the visible cell at index 3"
-        )
-        #endif
 
         // Assert cell is visible after scroll.
         let cell = feed._cellLayer(at: 3)
@@ -261,7 +248,6 @@ final class ImagePrefetchIntegrationTests: XCTestCase {
             "expected exactly one network request for index 3's URL (the prefetch) — mount-time image() must coalesce, not launch a second fetch"
         )
 
-        feed._setOnContentDelivered(nil)
         await drainFeedWork(feed)
     }
 }

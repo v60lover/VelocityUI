@@ -252,6 +252,15 @@ public final class RenderCell {
     /// Serial-access invariant: reads/writes happen on @MainActor only (RenderCell is @MainActor);
     /// the nonisolated(unsafe) annotation is a formality for @testable cross-module access.
     nonisolated(unsafe) static var _privacyGuardFiredCount: Int = 0
+
+    /// True once every image fragment for the current item has non-nil sublayer contents —
+    /// i.e. `contentLayer` has been revealed. Path-independent: set by both the synchronous
+    /// `applyLayout(_:synchronousContent:)` fast path (image already cache-resident at mount
+    /// time) and the async `applyContent` path. Tests that need to observe "this cell is
+    /// showing real image content" must poll this, not `_debugApplyContentCount` or an
+    /// applyContent-delivery hook — either of those only fires on the async path and misses
+    /// mount-time synchronous delivery entirely (see VelocityUI-xbk).
+    var _debugIsContentRevealed: Bool { allMediaLoaded }
     #endif
 
     #if DEBUG

@@ -152,30 +152,20 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         visibleCells[index]?.layer
     }
 
+    /// True once the cell at `index` has revealed real image content for every image
+    /// fragment — path-independent (covers both the mount-time synchronous fast path and
+    /// the async `applyContent` path). `false` if the index has no mounted cell.
+    /// See `RenderCell._debugIsContentRevealed`'s docstring for why tests must poll this
+    /// instead of an applyContent-only delivery signal.
+    func _debugIsContentRevealed(at index: Int) -> Bool {
+        visibleCells[index]?._debugIsContentRevealed ?? false
+    }
+
     /// Count of indices still awaiting fragment delivery via refineKnownFrames — i.e. cells
     /// mounted with `applyLayout([])` during a WorkingRange miss that LayoutCache could not
     /// resolve inline. Should be 0 whenever LayoutCache is warm for all visible indices at
     /// mount time — the inline materialization path bypasses this bookkeeping entirely.
     var _pendingFragmentIndicesCount: Int { _pendingFragmentIndices.count }
-
-    /// `AnyHashable`'s `Sendable` conformance is explicitly unavailable in the standard library,
-    /// even though every itemID it boxes is `Hashable & Sendable` at construction (see
-    /// NodeTable.itemID's docstring) — so it cannot cross a `@Sendable` closure boundary as-is.
-    /// Test-only carrier box; `@unchecked` is safe because the boxed value is read-only after
-    /// construction and never mutated concurrently.
-    struct _SendableItemID: @unchecked Sendable {
-        let value: AnyHashable
-    }
-
-    /// Called on @MainActor after a successful `applyContent` delivery, with the itemID the
-    /// delivery landed on. Used in tests to await settlement for a specific item without
-    /// Task.sleep — a multi-cell mount (e.g. after a scroll that brings several indices into
-    /// view at once) can deliver content for a neighboring index first, so callers that care
-    /// about one item must filter on the itemID rather than treating any delivery as a signal.
-    /// Async: allows callers to await actor-isolated signals (e.g. AsyncSemaphore.signal()).
-    /// @Sendable: captured by value into a Task { } body before invocation.
-    var _onContentDelivered: (@Sendable (_SendableItemID) async -> Void)?
-    func _setOnContentDelivered(_ h: (@Sendable (_SendableItemID) async -> Void)?) { _onContentDelivered = h }
     #endif
 
     #if DEBUG
@@ -752,9 +742,6 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     ) {
         let imageActor = environment.imageActor
         let scale = max(1, traitCollection.displayScale)
-        #if canImport(XCTest)
-        let onDelivery = _onContentDelivered
-        #endif
         #if DEBUG
         let onDebug = _onContentDeliveredDebug
         let onThumbnailDebug = _onThumbnailReplacedDebug
@@ -783,9 +770,6 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                 // where cancellation and content delivery coincide after isCancelled is checked.
                 guard !Task.isCancelled else { return }
                 let transition = cell?.applyContent(id: fragmentID, image: img, for: itemID)
-                #if canImport(XCTest)
-                await onDelivery?(_SendableItemID(value: itemID))
-                #endif
                 #if DEBUG
                 switch transition {
                 case .fromGrayPlaceholder:     onDebug?()
