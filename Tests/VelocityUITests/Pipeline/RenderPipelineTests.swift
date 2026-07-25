@@ -52,6 +52,36 @@ private final class PipelinePrefetchCountingProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
+// MARK: - Multi-release gate (RenderPipelineTests-local)
+
+/// Test-only gate: `open()` releases every `wait()` call registered so far, and any
+/// `wait()` call after `open()` returns immediately.
+///
+/// A single-release `AsyncSemaphore` is not sufficient as a gate for
+/// `ImageActor._testPrefetchGateHook`: the hook fires before `inFlight` registration
+/// (ImageActor.prefetch()), so concurrent prefetch() calls that share one cache key
+/// (same URL/targetSize/cornerRadius/scale — as a batch of items pointing at one URL
+/// does) can each independently reach the hook before any of them dedupes against the
+/// others. A one-shot semaphore signal only wakes one such caller; the rest suspend on
+/// `wait()` forever, since nothing signals again — an unrecoverable deadlock. This gate
+/// opens for all current and future waiters at once, matching what the test actually
+/// needs: "let every prefetch that reached the hook proceed."
+private actor OneShotGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func open() {
+        isOpen = true
+        waiters.forEach { $0.resume() }
+        waiters.removeAll()
+    }
+}
+
 final class RenderPipelineTests: XCTestCase {
 
     // MARK: - Helpers
@@ -229,16 +259,25 @@ final class RenderPipelineTests: XCTestCase {
         let tables = (0..<5).map { makeURLTable(id: $0) }
         let range = await WorkingRange(capacity: 20)
 
-        let imageActor = ImageActor()
+        // Mocked session (matches the pattern used elsewhere in this file) — this test's
+        // 5 tables share one URL/size/radius/scale, so multiple prefetch() calls can reach
+        // the gate hook before markInvalidated()'s cancel is observed (see OneShotGate doc).
+        // A real URLSession.shared fetch to this URL is an unmocked, unbounded network
+        // dependency on top of that race; mocking removes it as a variable.
+        PipelinePrefetchCountingProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [PipelinePrefetchCountingProtocol.self]
+        let session = URLSession(configuration: config)
+        let imageActor = ImageActor(session: session, dimensionCache: DimensionCache())
 
         // Gate that blocks inside a spawned prefetch Task — confirmed-in-prefetch semaphore lets
         // the test know that at least one prefetch is in-flight before we cancel.
         let confirmedInPrefetch = AsyncSemaphore(value: 0)
-        let gate = AsyncSemaphore(value: 0)
+        let gate = OneShotGate()
 
         await imageActor.set_testPrefetchGateHook {
             await confirmedInPrefetch.signal()
-            try? await gate.wait()   // suspends until gate is opened; ignores CancellationError
+            await gate.wait()   // suspends until gate is opened
         }
 
         let pipeline = RenderPipeline(
@@ -262,8 +301,8 @@ final class RenderPipelineTests: XCTestCase {
         // Cancel the in-flight prefetch.
         await pipeline.markInvalidated()
 
-        // Release the gate — prefetch Task resumes; outer prefetchTask is already cancelled.
-        await gate.signal()
+        // Release the gate — prefetch Task(s) resume; outer prefetchTask is already cancelled.
+        await gate.open()
 
         // markInvalidated() must reset lastLeadingIndex so the same index re-spawns a task.
         await pipeline.onIndexBoundary(0, workingRange: range, tables: tables, availableWidth: 320, scale: 1)
