@@ -492,7 +492,7 @@ final class RenderCellTests: XCTestCase {
         ]
 
         // Capture baseline before the call — the static counter accumulates across tests.
-        #if DEBUG
+        #if canImport(XCTest)
         let countBefore = RenderCell._debugApplyContentCount
         #endif
 
@@ -507,7 +507,7 @@ final class RenderCellTests: XCTestCase {
             "placeholderLayer must be immediately hidden when sync map covers every image fragment")
 
         // Verify applyContent was NOT called — sync path bypasses it, so the counter must not move.
-        #if DEBUG
+        #if canImport(XCTest)
         XCTAssertEqual(RenderCell._debugApplyContentCount, countBefore,
             "Sync paint must bypass applyContent — _debugApplyContentCount must not increment")
         #endif

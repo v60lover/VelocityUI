@@ -20,6 +20,15 @@ public final class RenderEnvironment: Sendable {
     public let videoController: VideoController
     public let videoPreparation: VideoPreparationActor
 
+    /// Fires after each successful async `RenderCell.applyContent` delivery, carrying which
+    /// placeholder path it replaced. Routes benchmark/debug instrumentation through the
+    /// composition root instead of `#if DEBUG` hooks on library types — those compile into
+    /// every consumer DEBUG build (QA, TestFlight), not just BenchmarkHost. `nil` in
+    /// production; BenchmarkHost passes a closure that dispatches to its harness counters.
+    /// Never fires for the synchronous mount-time paint path (cache-hit at mount bypasses
+    /// `applyContent` entirely — see `RenderCell._debugIsContentRevealed`'s docstring).
+    public let contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)?
+
     /// Designated init — all collaborators supplied by the caller.
     ///
     /// Enforces two identity DI contracts at runtime:
@@ -39,7 +48,8 @@ public final class RenderEnvironment: Sendable {
         imageActor: ImageActor,
         gifActor: GIFActor,
         videoController: VideoController,
-        videoPreparation: VideoPreparationActor
+        videoPreparation: VideoPreparationActor,
+        contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil
     ) {
         precondition(
             imageActor.dimensionCache === dimensionCache,
@@ -56,6 +66,7 @@ public final class RenderEnvironment: Sendable {
         self.gifActor = gifActor
         self.videoController = videoController
         self.videoPreparation = videoPreparation
+        self.contentDeliveryObserver = contentDeliveryObserver
     }
 
     /// Convenience init for app use.
@@ -75,7 +86,8 @@ public final class RenderEnvironment: Sendable {
         layoutCache: LayoutCache = .init(),
         session: URLSession = .shared,
         gifActor: GIFActor = .init(),
-        maxAttached: Int = 3
+        maxAttached: Int = 3,
+        contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil
     ) {
         let dc = DimensionCache(session: session)
         let videoPrep = VideoPreparationActor()
@@ -86,7 +98,8 @@ public final class RenderEnvironment: Sendable {
             imageActor: ImageActor(session: session, dimensionCache: dc),
             gifActor: gifActor,
             videoController: VideoController(videoPreparation: videoPrep, maxAttached: maxAttached),
-            videoPreparation: videoPrep
+            videoPreparation: videoPrep,
+            contentDeliveryObserver: contentDeliveryObserver
         )
     }
 }

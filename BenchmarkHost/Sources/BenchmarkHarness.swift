@@ -7,6 +7,15 @@ import UIKit
 /// Central measurement harness. One instance per benchmark run.
 /// Runtime screens call begin/end signpost methods; the orchestrator calls
 /// startCapture() / stopCapture() around each timed scroll profile.
+///
+/// Captured by the `@Sendable` `RenderEnvironment.contentDeliveryObserver` closure in
+/// `VelocityUIRuntimeViewController.init` — verified to compile without `Sendable`
+/// conformance on this type, since the closure only calls the `nonisolated`,
+/// `OSAllocatedUnfairLock`-protected `recordGrayToImageTransition`/
+/// `recordThumbnailToImageTransition` (see their docstrings). Do not add
+/// `@unchecked Sendable` here without re-deriving the need — it would silently disable
+/// the checking that protects the `@MainActor`-isolated members below (displayLink,
+/// frameTimestamps, allocationProbe, capture timestamps).
 @MainActor
 final class BenchmarkHarness: NSObject {
 
@@ -148,7 +157,7 @@ final class BenchmarkHarness: NSObject {
     // MARK: - Gray-to-image transition counter (slowScrollFirstThreeItems scenario)
 
     /// Increment each time a cell's applyContent fires, indicating a deferred gray→image transition.
-    /// Called from VelocityUIRuntimeViewController via the FeedScrollView._onContentDeliveredDebug hook.
+    /// Called from VelocityUIRuntimeViewController via RenderEnvironment.contentDeliveryObserver.
     nonisolated func recordGrayToImageTransition() {
         grayTransitionLock.withLock { $0 += 1 }
     }
@@ -161,7 +170,7 @@ final class BenchmarkHarness: NSObject {
 
     /// Increment each time a cell's applyContent fires replacing a decode-guaranteed
     /// thumbnail/BlurHash placeholder — the max-fling physics fallback engaging.
-    /// Called from VelocityUIRuntimeViewController via FeedScrollView._onThumbnailReplacedDebug.
+    /// Called from VelocityUIRuntimeViewController via RenderEnvironment.contentDeliveryObserver.
     nonisolated func recordThumbnailToImageTransition() {
         thumbnailTransitionLock.withLock { $0 += 1 }
     }

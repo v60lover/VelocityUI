@@ -158,6 +158,16 @@ final class PlaceholderDecodeTests: XCTestCase {
     /// bound (rather than a tighter one closer to the ~2.5ms typical -Onone reading) has margin
     /// for on-device thermal/contention variance observed across runs (2.5-3.5ms), while
     /// staying well under the ~4.7ms floor of the actual regression this guards against.
+    ///
+    /// Simulator flakiness (2026-07-26, VelocityUI-qrk review): this wall-clock assertion can
+    /// intermittently fail on the iOS **Simulator** even with no source changes — reproduced a
+    /// p99 of 10.5ms (vs the 4.5ms bound) in 1 of 4 back-to-back `xcodebuild test` runs on
+    /// iPhone 17 Pro Simulator (26.4.1), while the other 3 simulator runs and 4/4 runs on a
+    /// physical iPhone 13 Pro (same commit) passed comfortably (p99 ~2.9ms on device). Root
+    /// cause: the Simulator shares the host Mac's CPU scheduler with Xcode/other processes, so
+    /// wall-clock thresholds see contention a physical device does not. If this test fails only
+    /// on Simulator and passes on a physical device (or in isolation after the host is idle),
+    /// treat it as environmental noise, not a regression — re-run before investigating further.
     func testBlurHashDecodeP99RegressionGuard() {
         let target = CGSize(width: 300, height: 300)
         let iterations = 500

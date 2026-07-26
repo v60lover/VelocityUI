@@ -257,16 +257,17 @@ public final class RenderCell {
     /// i.e. `contentLayer` has been revealed. Path-independent: set by both the synchronous
     /// `applyLayout(_:synchronousContent:)` fast path (image already cache-resident at mount
     /// time) and the async `applyContent` path. Tests that need to observe "this cell is
-    /// showing real image content" must poll this, not `_debugApplyContentCount` or an
-    /// applyContent-delivery hook — either of those only fires on the async path and misses
-    /// mount-time synchronous delivery entirely (see VelocityUI-xbk).
+    /// showing real image content" must poll this, not `_debugApplyContentCount` or
+    /// `RenderEnvironment.contentDeliveryObserver` — either of those only fires on the async
+    /// path and misses mount-time synchronous delivery entirely.
     var _debugIsContentRevealed: Bool { allMediaLoaded }
-    #endif
 
-    #if DEBUG
-    /// Total count of successful `applyContent` deliveries across all cells.
-    /// Used by BenchmarkHost's slowScrollFirstThreeItems scenario to count gray→image transitions.
-    /// nonisolated(unsafe): writes occur only on @MainActor; reads are debug/test-only.
+    /// Total count of successful `applyContent` deliveries across all cells. Test-only — no
+    /// BenchmarkHost consumer (that instrumentation routes through
+    /// `RenderEnvironment.contentDeliveryObserver` instead). Used by RenderCellTests/
+    /// FeedScrollViewTests to assert the sync mount-time paint path bypasses `applyContent`
+    /// entirely.
+    /// nonisolated(unsafe): writes occur only on @MainActor; reads are test-only.
     nonisolated(unsafe) static var _debugApplyContentCount: Int = 0
     nonisolated static func _debugResetApplyContentCount() { _debugApplyContentCount = 0 }
     #endif
@@ -312,7 +313,7 @@ public final class RenderCell {
 
         fadeOutPlaceholderIfAllReady()
 
-        #if DEBUG
+        #if canImport(XCTest)
         RenderCell._debugApplyContentCount += 1
         #endif
 

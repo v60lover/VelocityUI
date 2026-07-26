@@ -3,6 +3,7 @@
 #if canImport(UIKit)
 import XCTest
 import Darwin
+import os
 @testable import VelocityUI
 
 @MainActor
@@ -68,7 +69,7 @@ final class FeedScrollViewTests: XCTestCase {
 
         // Force initial layout so lastNotifiedLeadingIndex is set.
         feed.layoutSubviews()
-        #if DEBUG
+        #if canImport(XCTest)
         let baseline = feed._taskSpawnCount
         #endif
 
@@ -77,7 +78,7 @@ final class FeedScrollViewTests: XCTestCase {
             feed.layoutSubviews()
         }
 
-        #if DEBUG
+        #if canImport(XCTest)
         XCTAssertEqual(feed._taskSpawnCount, baseline,
             "Zero Task spawns expected during 100 frames without a leading-index boundary crossing")
         #endif
@@ -90,7 +91,7 @@ final class FeedScrollViewTests: XCTestCase {
         feed.items = items(count: 200)
         feed.layoutSubviews()
 
-        #if DEBUG
+        #if canImport(XCTest)
         let afterFirst = feed._taskSpawnCount
         XCTAssertEqual(afterFirst, 1, "One spawn for the initial leading index")
 
@@ -1376,7 +1377,7 @@ final class FeedScrollViewTests: XCTestCase {
         // Phase 2: prepend itemB. WorkingRange is invalidated; itemA moves to index 1.
         // All visible cells are recycled. On next layoutSubviews, updateVisibleCells mounts
         // both indices as WR misses → _pendingFragmentIndices = {0, 1}.
-        #if DEBUG
+        #if canImport(XCTest)
         RenderCell._debugResetApplyContentCount()
         #endif
 
@@ -1407,7 +1408,7 @@ final class FeedScrollViewTests: XCTestCase {
             + "no async hop (applyContent) needed when image is in cache")
 
         // AC(5): applyContent must NOT have been called — sync path bypasses it entirely.
-        #if DEBUG
+        #if canImport(XCTest)
         XCTAssertEqual(RenderCell._debugApplyContentCount, 0,
             "Sync paint must bypass applyContent — _debugApplyContentCount must be 0 (AC5)")
         #endif
@@ -1627,6 +1628,69 @@ final class FeedScrollViewTests: XCTestCase {
             "A second layoutSubviews with no state change must not alter the mounted cell's frame")
         XCTAssertEqual(feed._workingRangeMissCount(from: 0, to: 1), 0,
             "WorkingRange entry must remain present after a second, no-op layoutSubviews call")
+        await drainFeedWork(feed)
+    }
+
+    // MARK: - 25. contentDeliveryObserver wiring (VelocityUI-qrk)
+
+    /// `RenderEnvironment.contentDeliveryObserver` is the composition-root replacement for the
+    /// old `#if DEBUG` `FeedScrollView._onContentDeliveredDebug`/`_onThumbnailReplacedDebug`
+    /// hooks. Verifies `spawnMediaFetches` actually invokes it — once per real `applyContent`
+    /// delivery — carrying the correct `ContentTransitionKind` for both physics-fallback paths:
+    /// a cell with no placeholder data (gray-tint path) and a cell with a valid BlurHash
+    /// (decode-guaranteed thumbnail-placeholder path).
+    func testContentDeliveryObserverFiresWithCorrectTransitionKind() async throws {
+        let grayURL = try writeTempJPEG(width: 60, height: 60)
+        let thumbnailURL = try writeTempJPEG(width: 60, height: 60)
+        defer {
+            try? FileManager.default.removeItem(at: grayURL)
+            try? FileManager.default.removeItem(at: thumbnailURL)
+        }
+
+        let deliveredLock = OSAllocatedUnfairLock<[RenderCell.ContentTransitionKind]>(initialState: [])
+        let dc = DimensionCache()
+        let videoPrep = VideoPreparationActor()
+        let env = RenderEnvironment(
+            textPool: TextMeasurementPool(),
+            layoutCache: LayoutCache(),
+            dimensionCache: dc,
+            imageActor: ImageActor(dimensionCache: dc),
+            gifActor: GIFActor(),
+            videoController: VideoController(videoPreparation: videoPrep),
+            videoPreparation: videoPrep,
+            contentDeliveryObserver: { kind in
+                deliveredLock.withLock { $0.append(kind) }
+            }
+        )
+
+        let feed = FeedScrollView<TestItem>(
+            environment: env,
+            frame: CGRect(x: 0, y: 0, width: 375, height: 812)
+        )
+        feed.cellBuilder = { item in
+            item.id == 0
+                ? AsyncImageNode(url: grayURL, aspectRatio: 1.0)
+                : AsyncImageNode(url: thumbnailURL, aspectRatio: 1.0)
+                    .placeholder(blurHash: "L6PZfSi_.AyE_3t7t7R**0o#DgR4")
+        }
+        feed.items = [TestItem(id: 0), TestItem(id: 1)]
+        feed.layoutSubviews()
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < deadline {
+            await Task.yield()
+            feed.layoutSubviews()
+            if deliveredLock.withLock({ $0.count }) >= 2 { break }
+        }
+
+        let delivered = deliveredLock.withLock { $0 }
+        XCTAssertEqual(delivered.count, 2,
+            "contentDeliveryObserver must fire exactly once per real applyContent delivery")
+        XCTAssertTrue(delivered.contains(.fromGrayPlaceholder),
+            "No-placeholder-data cell must report .fromGrayPlaceholder")
+        XCTAssertTrue(delivered.contains(.fromThumbnailPlaceholder),
+            "BlurHash-placeholder cell must report .fromThumbnailPlaceholder")
+
         await drainFeedWork(feed)
     }
 }

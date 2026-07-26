@@ -244,7 +244,7 @@ final class PhaseOneIntegrationTests: XCTestCase {
         // Initial layout to set lastNotifiedLeadingIndex
         feed.layoutSubviews()
 
-        #if DEBUG
+        #if canImport(XCTest)
         let spawnBaseline = feed._taskSpawnCount
         #endif
 
@@ -260,7 +260,7 @@ final class PhaseOneIntegrationTests: XCTestCase {
             raw.append(mach_absolute_time() &- t0)
         }
 
-        #if DEBUG
+        #if canImport(XCTest)
         XCTAssertEqual(feed._taskSpawnCount, spawnBaseline,
             "Zero Task spawns expected during \(iterations) frames at unchanged contentOffset")
         #endif

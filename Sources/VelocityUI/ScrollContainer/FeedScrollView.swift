@@ -119,13 +119,11 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
     // MARK: - Debug hooks
 
-    #if DEBUG
+    #if canImport(XCTest)
     /// Counts Task spawns from leading-index boundary crossings inside `notifyPipelineIfNeeded`.
     /// Does NOT count the one-shot `onReachEnd` spawn — that fires at most once per page.
     private(set) var _taskSpawnCount: Int = 0
-    #endif
 
-    #if canImport(XCTest)
     var _tableCacheCount: Int { tableCache.count }
 
     /// Returns nil-entry count in WorkingRange for indices in [start, end).
@@ -166,23 +164,6 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// resolve inline. Should be 0 whenever LayoutCache is warm for all visible indices at
     /// mount time — the inline materialization path bypasses this bookkeeping entirely.
     var _pendingFragmentIndicesCount: Int { _pendingFragmentIndices.count }
-    #endif
-
-    #if DEBUG
-    /// Called on @MainActor after each successful `applyContent` delivery whose sublayer
-    /// previously showed the systemGray5 tint (no placeholder data was available).
-    /// Used by BenchmarkHost to count true gray→image transitions.
-    ///
-    /// `@_spi(BenchmarkHost)`: cross-module DEBUG-only instrumentation hook, not a public
-    /// library API. BenchmarkHost must import with `@_spi(BenchmarkHost) import VelocityUI`.
-    @_spi(BenchmarkHost)
-    public var _onContentDeliveredDebug: (() -> Void)?
-
-    /// Called on @MainActor after each successful `applyContent` delivery whose sublayer
-    /// previously showed a decode-guaranteed thumbnail/BlurHash placeholder — the
-    /// max-fling physics fallback engaged. Used by BenchmarkHost's maxFlingNoGray scenario.
-    @_spi(BenchmarkHost)
-    public var _onThumbnailReplacedDebug: (() -> Void)?
     #endif
 
     // MARK: - Init
@@ -643,7 +624,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         let capturedWidth  = bounds.width  // width contract: verbatim, no arithmetic
         let capturedScale  = max(1, traitCollection.displayScale)  // same guard as spawnMediaFetches
 
-        #if DEBUG
+        #if canImport(XCTest)
         _taskSpawnCount += 1
         #endif
 
@@ -742,10 +723,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     ) {
         let imageActor = environment.imageActor
         let scale = max(1, traitCollection.displayScale)
-        #if DEBUG
-        let onDebug = _onContentDeliveredDebug
-        let onThumbnailDebug = _onThumbnailReplacedDebug
-        #endif
+        let contentDeliveryObserver = environment.contentDeliveryObserver
 
         for fragment in fragments {
             guard case .image(let d) = fragment.content, let url = d.url else { continue }
@@ -769,14 +747,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                 // applyContent's itemID privacy guard is a defense-in-depth backup for races
                 // where cancellation and content delivery coincide after isCancelled is checked.
                 guard !Task.isCancelled else { return }
-                let transition = cell?.applyContent(id: fragmentID, image: img, for: itemID)
-                #if DEBUG
-                switch transition {
-                case .fromGrayPlaceholder:     onDebug?()
-                case .fromThumbnailPlaceholder: onThumbnailDebug?()
-                case nil:                       break
+                if let transition = cell?.applyContent(id: fragmentID, image: img, for: itemID) {
+                    contentDeliveryObserver?(transition)
                 }
-                #endif
             }
             cell.addMediaHandle(MediaHandle(task: task))
         }

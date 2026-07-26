@@ -2,7 +2,7 @@
 
 import SwiftUI
 import UIKit
-@_spi(BenchmarkHost) import VelocityUI
+import VelocityUI
 
 @MainActor
 final class VelocityUIRuntimeViewController: UIViewController {
@@ -17,7 +17,16 @@ final class VelocityUIRuntimeViewController: UIViewController {
         self.imageSource = imageSource
         self.harness = harness
         self.orchestrator = orchestrator
-        self.environment = RenderEnvironment()
+        // `harness` (the init parameter, not `self.harness`) is captured here — `self` isn't
+        // fully initialized until after `super.init()` below, so it can't be referenced yet.
+        self.environment = RenderEnvironment(contentDeliveryObserver: { kind in
+            switch kind {
+            case .fromGrayPlaceholder:
+                harness.recordGrayToImageTransition()
+            case .fromThumbnailPlaceholder:
+                harness.recordThumbnailToImageTransition()
+            }
+        })
         super.init(nibName: nil, bundle: nil)
         title = "VelocityUI"
     }
@@ -39,21 +48,6 @@ final class VelocityUIRuntimeViewController: UIViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         guard let scrollView = view.firstScrollView else { return }
-
-        #if DEBUG
-        // Wire gray-transition and thumbnail-transition counters for the slow-scroll and
-        // maxFlingNoGray scenarios. FeedScrollView<BenchmarkItem> is the first scroll view
-        // in the UIHostingController subtree.
-        if let feedView = scrollView as? FeedScrollView<BenchmarkItem> {
-            feedView._onContentDeliveredDebug = { [weak self] in
-                self?.harness.recordGrayToImageTransition()
-            }
-            feedView._onThumbnailReplacedDebug = { [weak self] in
-                self?.harness.recordThumbnailToImageTransition()
-            }
-        }
-        #endif
-
         orchestrator?.scrollViewReady(scrollView)
     }
 }
