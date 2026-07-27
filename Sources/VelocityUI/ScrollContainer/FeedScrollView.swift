@@ -103,6 +103,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// Pre-allocated scratch buffer for the recycle loop — avoids a per-frame Array allocation.
     private var _recycleBuffer: [Int] = []
 
+    /// Pre-allocated scratch buffer for `refineKnownFrames` — avoids a fresh Set.union +
+    /// Array.sorted allocation on every call while indices remain unrefined.
+    private var _refineIndexBuffer: [Int] = []
+
     /// Indices where the cell was mounted with applyLayout([]) during a WorkingRange miss.
     /// refineKnownFrames delivers real fragments and spawns media fetches when entries arrive.
     private var _pendingFragmentIndices: Set<Int> = []
@@ -391,11 +395,16 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     private func refineKnownFrames() {
         guard !estimatedIndices.isEmpty || !_pendingFragmentIndices.isEmpty else { return }
 
-        let sorted = (estimatedIndices.union(_pendingFragmentIndices)).sorted()
+        _refineIndexBuffer.removeAll(keepingCapacity: true)
+        _refineIndexBuffer.append(contentsOf: estimatedIndices)
+        for i in _pendingFragmentIndices where !estimatedIndices.contains(i) {
+            _refineIndexBuffer.append(i)
+        }
+        _refineIndexBuffer.sort()
         var refined: [Int] = []
         var pendingRepositioned: Set<Int> = []
 
-        for index in sorted {
+        for index in _refineIndexBuffer {
             guard index < resolvedFrames.count else {
                 refined.append(index)
                 continue

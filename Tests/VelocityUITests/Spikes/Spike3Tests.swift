@@ -92,6 +92,88 @@ final class Spike3Tests: XCTestCase {
         }
     }
 
+    // MARK: - Test 2b (VelocityUI-zgs Fix B1): fast path skips the scratch blit entirely
+
+    private func makeBGRA8888Image(size: CGSize) -> CGImage? {
+        guard let ctx = CGContext(
+            data: nil,
+            width: Int(size.width), height: Int(size.height),
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return nil }
+        ctx.setFillColor(CGColor(colorSpace: CGColorSpaceCreateDeviceRGB(), components: [0.2, 0.4, 0.6, 1.0])!)
+        ctx.fill(CGRect(origin: .zero, size: size))
+        return ctx.makeImage()
+    }
+
+    func testFastPathReturnsSameInstanceWhenAlreadyNormalisedAndCorrectSize() throws {
+        let size = CGSize(width: 64, height: 48)
+        let already = try XCTUnwrap(makeBGRA8888Image(size: size))
+        XCTAssertTrue(isBGRA8888(already))
+
+        let out = normaliseAndRound(already, targetSize: size, cornerRadius: 0)
+        XCTAssertTrue(
+            out === already,
+            "Already-normalised, correctly-sized, unclipped input must be returned unmodified — no scratch CGContext blit"
+        )
+    }
+
+    func testFastPathNotTakenWhenCornerRadiusNonZero() throws {
+        let size = CGSize(width: 64, height: 48)
+        let already = try XCTUnwrap(makeBGRA8888Image(size: size))
+
+        let out = try XCTUnwrap(normaliseAndRound(already, targetSize: size, cornerRadius: 8))
+        XCTAssertFalse(out === already, "cornerRadius > 0 must still clip, even when the input is already BGRA8888")
+    }
+
+    func testFastPathNotTakenWhenSizeDiffers() throws {
+        let source = try XCTUnwrap(makeBGRA8888Image(size: CGSize(width: 64, height: 48)))
+        let out = try XCTUnwrap(normaliseAndRound(source, targetSize: CGSize(width: 32, height: 24), cornerRadius: 0))
+        XCTAssertFalse(out === source, "A size mismatch must still go through the resize blit")
+        XCTAssertEqual(out.width, 32)
+        XCTAssertEqual(out.height, 24)
+    }
+
+    // MARK: - Test 2c (VelocityUI-zgs Fix B2): pooled scratch buffer matches the unpooled path
+
+    private func rawBGRAPixels(_ image: CGImage) -> [UInt8] {
+        let w = image.width, h = image.height
+        var buffer = [UInt8](repeating: 0, count: w * h * 4)
+        guard let ctx = CGContext(
+            data: &buffer, width: w, height: h,
+            bitsPerComponent: 8, bytesPerRow: w * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return [] }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return buffer
+    }
+
+    func testPooledPathMatchesUnpooledOutputAcrossVaryingSizes() throws {
+        // A single-buffer pool forces reuse (and growth, then reuse-at-smaller-size) across
+        // the loop — exercises both the grow path and the must-zero-stale-bytes path (a
+        // pooled buffer previously held a *larger* image; leftover bytes must not leak into
+        // a subsequent smaller decode's clipped corners).
+        let pool = DecodeScratchBufferPool(capacity: 1)
+        let sizes: [CGSize] = [
+            CGSize(width: 40, height: 40),
+            CGSize(width: 90, height: 60),
+            CGSize(width: 20, height: 20),
+        ]
+        for size in sizes {
+            let raw = makeSyntheticRGBAImage(size: size, hue: 0.3)
+            let unpooled = try XCTUnwrap(normaliseAndRound(raw, targetSize: size, cornerRadius: 12))
+            let pooled = try XCTUnwrap(
+                normaliseAndRound(raw, targetSize: size, cornerRadius: 12, scale: 1, scratchPool: pool)
+            )
+            XCTAssertEqual(
+                rawBGRAPixels(unpooled), rawBGRAPixels(pooled),
+                "Pooled scratch-buffer path must produce pixel-identical output to the unpooled path at size \(size)"
+            )
+        }
+    }
+
     // MARK: - Test 3: Frame timing during programmatic scroll
 
     func testScrollFrameTiming() async throws {

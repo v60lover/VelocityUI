@@ -1,6 +1,7 @@
 // RenderEnvironment.swift
 
 #if canImport(UIKit)
+import CoreGraphics
 import Foundation
 
 /// Composition root for all long-lived VelocityUI collaborators.
@@ -80,6 +81,8 @@ public final class RenderEnvironment: Sendable {
     ///   shared HTTP/2 connection pool contract (DimensionCache.swift:15–17).
     /// - The same `DimensionCache` instance into `imageActor` (DI contract).
     /// - The same `VideoPreparationActor` into both `videoController` and `videoPreparation`.
+    /// - `decodeScaleCeiling` into `imageActor` — see `ImageActor.decodeScaleCeiling`'s
+    ///   docstring for why 2.0 is the default (VelocityUI-zgs).
     @MainActor
     public convenience init(
         textPool: TextMeasurementPool = .init(),
@@ -87,6 +90,7 @@ public final class RenderEnvironment: Sendable {
         session: URLSession = .shared,
         gifActor: GIFActor = .init(),
         maxAttached: Int = 3,
+        decodeScaleCeiling: CGFloat = 2.0,
         contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil
     ) {
         let dc = DimensionCache(session: session)
@@ -95,7 +99,7 @@ public final class RenderEnvironment: Sendable {
             textPool: textPool,
             layoutCache: layoutCache,
             dimensionCache: dc,
-            imageActor: ImageActor(session: session, dimensionCache: dc),
+            imageActor: ImageActor(session: session, dimensionCache: dc, decodeScaleCeiling: decodeScaleCeiling),
             gifActor: gifActor,
             videoController: VideoController(videoPreparation: videoPrep, maxAttached: maxAttached),
             videoPreparation: videoPrep,

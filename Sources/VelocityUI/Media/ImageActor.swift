@@ -99,7 +99,16 @@ public actor ImageActor {
         qos: .userInitiated,
         attributes: .concurrent
     )
-    private let decodeSemaphore = AsyncSemaphore(value: 3)
+    private static let maxConcurrentDecodes = 3
+    private let decodeSemaphore = AsyncSemaphore(value: ImageActor.maxConcurrentDecodes)
+    private let scratchPool = DecodeScratchBufferPool(capacity: ImageActor.maxConcurrentDecodes)
+
+    /// Upper bound on the scale (screen points → pixels) used for both the cache key and the
+    /// decode target size. Real display scale (e.g. 3x on Pro-class devices) is clamped down
+    /// to this ceiling before it reaches `ImageCacheKey`, `_decode`, or `normaliseAndRound` —
+    /// shrinking bitmap area by (realScale/ceiling)^2 and letting the 64 MB NSCache hold
+    /// proportionally more images. Pass 3.0 (or higher) to disable the cap. See VelocityUI-zgs.
+    nonisolated let decodeScaleCeiling: CGFloat
 
     // nonisolated(unsafe): NSCache guarantees thread-safe concurrent reads and writes.
     // The reference itself never rebinds (let), and all mutating paths run on the actor
@@ -112,14 +121,17 @@ public actor ImageActor {
     nonisolated let dimensionCache: DimensionCache
 
     /// - Parameters:
-    ///   - session:        URLSession for image fetches. Defaults to `.shared`; tests can
-    ///                     inject a custom session.
-    ///   - dimensionCache: Cache for raw source dimensions. Must be the same instance
-    ///                     used by classify() — separate instances break the hit contract.
-    ///                     Callers should obtain this from RenderEnvironment, not construct it here.
+    ///   - session:            URLSession for image fetches. Defaults to `.shared`; tests can
+    ///                         inject a custom session.
+    ///   - dimensionCache:     Cache for raw source dimensions. Must be the same instance
+    ///                         used by classify() — separate instances break the hit contract.
+    ///                         Callers should obtain this from RenderEnvironment, not construct it here.
+    ///   - decodeScaleCeiling: Upper bound on decode scale. Defaults to 2.0 — see the property's
+    ///                         docstring. Pass 3.0+ to decode at full display scale.
     public init(
         session: URLSession = .shared,
-        dimensionCache: DimensionCache
+        dimensionCache: DimensionCache,
+        decodeScaleCeiling: CGFloat = 2.0
     ) {
         self._executor = DispatchQueueExecutor(label: "velocityui.image.actor")
         // 64 MB cap. At 4 bytes/pixel: a 400×800-pt image at scale 3 costs ~11.5 MB
@@ -127,6 +139,7 @@ public actor ImageActor {
         cache.totalCostLimit = 64 * 1024 * 1024
         self.session = session
         self.dimensionCache = dimensionCache
+        self.decodeScaleCeiling = decodeScaleCeiling
         #if canImport(XCTest)
         // Tag decodeQueue so the async closure can verify it is on the right queue.
         decodeQueue.setSpecific(key: _testDecodeQueueKey, value: true)
@@ -270,7 +283,8 @@ public actor ImageActor {
         if let hook = _testDecodeGateHook { await hook() }
         #endif
 
-        let key = ImageCacheKey(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: scale)
+        let decodeScale = min(scale, decodeScaleCeiling)
+        let key = ImageCacheKey(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: decodeScale)
 
         // 1. Cache hit — O(1), no allocation on the hot path.
         if let hit = cache.object(forKey: key) { return hit.image }
@@ -287,7 +301,7 @@ public actor ImageActor {
 
         // 4. Launch a task that owns the network fetch + decode for this key.
         let task = Task<DecodeResult, Never> {
-            await self._networkFetchAndDecode(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: scale)
+            await self._networkFetchAndDecode(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: decodeScale)
         }
         inFlight[key] = task
         let result = await task.value
@@ -333,7 +347,8 @@ public actor ImageActor {
         cornerRadius: CGFloat,
         scale: CGFloat
     ) async {
-        let key = ImageCacheKey(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: scale)
+        let decodeScale = min(scale, decodeScaleCeiling)
+        let key = ImageCacheKey(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: decodeScale)
 
         if cache.object(forKey: key) != nil { return }
 
@@ -352,7 +367,7 @@ public actor ImageActor {
         let capturedData = data
         let capturedTargetSize = targetSize
         let capturedCornerRadius = cornerRadius
-        let capturedScale = scale
+        let capturedScale = decodeScale
         let task = Task<DecodeResult, Never> {
             await self._decode(
                 data: capturedData,
@@ -412,7 +427,8 @@ public actor ImageActor {
         scale: CGFloat,
         isCurrent: (@Sendable () -> Bool)? = nil
     ) async {
-        let key = ImageCacheKey(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: scale)
+        let decodeScale = min(scale, decodeScaleCeiling)
+        let key = ImageCacheKey(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: decodeScale)
 
         if cache.object(forKey: key) != nil { return }
 
@@ -436,7 +452,7 @@ public actor ImageActor {
         #endif
 
         let task = Task<DecodeResult, Never>(priority: .utility) {
-            await self._networkFetchAndDecode(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: scale)
+            await self._networkFetchAndDecode(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: decodeScale)
         }
         inFlight[key] = task
         let result = await task.value
@@ -485,7 +501,7 @@ public actor ImageActor {
                 url: spec.url,
                 targetSize: spec.targetSize,
                 cornerRadius: spec.cornerRadius,
-                scale: spec.scale
+                scale: min(spec.scale, decodeScaleCeiling)
             )
             inFlight[key]?.cancel()
         }
@@ -537,6 +553,9 @@ public actor ImageActor {
         #endif
 
         let sem = decodeSemaphore
+        // Capture before the continuation (actor-isolated context) so the @Sendable
+        // closure doesn't retain self.
+        let capturedScratchPool = scratchPool
         #if canImport(XCTest)
         // Capture before the continuation (actor-isolated context) so the @Sendable
         // closure can call DispatchQueue.getSpecific without retaining self.
@@ -601,7 +620,8 @@ public actor ImageActor {
                     thumb,
                     targetSize: capturedSize,
                     cornerRadius: capturedRadius,
-                    scale: capturedScale
+                    scale: capturedScale,
+                    scratchPool: capturedScratchPool
                 )
                 #if DEBUG
                 let decodeMs = (CFAbsoluteTimeGetCurrent() - decodeStart) * 1_000
@@ -664,7 +684,7 @@ public actor ImageActor {
         cornerRadius: CGFloat,
         scale: CGFloat
     ) -> CGImage? {
-        let key = ImageCacheKey(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: scale)
+        let key = ImageCacheKey(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: min(scale, decodeScaleCeiling))
         return cache.object(forKey: key)?.image
     }
 

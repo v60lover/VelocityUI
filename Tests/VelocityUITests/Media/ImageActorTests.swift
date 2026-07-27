@@ -280,6 +280,60 @@ final class ImageActorTests: XCTestCase {
         )
     }
 
+    // MARK: - Test 5b (VelocityUI-zgs Fix A): decodeScaleCeiling clamps the cache key
+
+    func testDecodeScaleCeilingCollapsesCacheKeyAboveTheCeiling() async throws {
+        // Default ceiling is 2.0. Requests at scale 2 and scale 3 must collapse to the same
+        // cache entry — the second call is a cache hit, not a fresh decode at 3x.
+        let url = try writeTempJPEG(width: 200, height: 200)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let actor = ImageActor()
+        let size = CGSize(width: 60, height: 60)
+
+        let atCeiling = await actor.image(for: url, targetSize: size, cornerRadius: 0, scale: 2)
+        let aboveCeiling = await actor.image(for: url, targetSize: size, cornerRadius: 0, scale: 3)
+
+        XCTAssertNotNil(atCeiling)
+        XCTAssertNotNil(aboveCeiling)
+        XCTAssertTrue(
+            atCeiling === aboveCeiling,
+            "scale: 3 must clamp to the 2.0 ceiling and hit the same cache entry as scale: 2"
+        )
+        XCTAssertEqual(atCeiling?.width, 120, "Decoded at the clamped scale (60pt * 2), not full scale (60pt * 3 = 180)")
+    }
+
+    func testDecodeScaleCeilingCustomValueIsHonoured() async throws {
+        let url = try writeTempJPEG(width: 200, height: 200)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let actor = ImageActor(dimensionCache: DimensionCache(), decodeScaleCeiling: 1.0)
+        let size = CGSize(width: 60, height: 60)
+
+        let atOne = await actor.image(for: url, targetSize: size, cornerRadius: 0, scale: 1)
+        let atThree = await actor.image(for: url, targetSize: size, cornerRadius: 0, scale: 3)
+
+        XCTAssertNotNil(atOne)
+        XCTAssertTrue(atOne === atThree, "A custom 1.0 ceiling must clamp scale: 3 down to 1")
+        XCTAssertEqual(atOne?.width, 60)
+    }
+
+    func testCachedImageRespectsDecodeScaleCeiling() async throws {
+        let url = try writeTempJPEG(width: 200, height: 200)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let actor = ImageActor()
+        let size = CGSize(width: 60, height: 60)
+
+        _ = await actor.image(for: url, targetSize: size, cornerRadius: 0, scale: 2)
+
+        // A synchronous probe at the raw (unclamped) scale must still hit — cachedImage()
+        // has to clamp identically to image(), or the probe used at mount time would
+        // spuriously miss a warm cache and fall back to the async path every time.
+        let probed = actor.cachedImage(for: url, targetSize: size, cornerRadius: 0, scale: 3)
+        XCTAssertNotNil(probed, "cachedImage() must clamp scale the same way image() does")
+    }
+
     // MARK: - Test 6: DimensionCache stores raw source dimensions, not the render-target size
 
     func testDimensionCacheStoresRawSourceDimensions() async throws {
