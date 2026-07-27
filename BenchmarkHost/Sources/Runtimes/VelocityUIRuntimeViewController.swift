@@ -11,6 +11,7 @@ final class VelocityUIRuntimeViewController: UIViewController {
     private let harness: BenchmarkHarness
     private let orchestrator: BenchmarkOrchestrator?
     private let environment: RenderEnvironment
+    private var liveMetrics: LiveMetricsController?
 
     init(items: [BenchmarkItem], imageSource: any ImageSource, harness: BenchmarkHarness, orchestrator: BenchmarkOrchestrator? = nil) {
         self.benchmarkItems = items
@@ -49,6 +50,11 @@ final class VelocityUIRuntimeViewController: UIViewController {
         super.viewDidAppear(animated)
         guard let scrollView = view.firstScrollView else { return }
         orchestrator?.scrollViewReady(scrollView)
+        if orchestrator == nil, liveMetrics == nil {
+            let c = LiveMetricsController(scrollView: scrollView, harness: harness, imageMode: LaunchArguments().imageMode, runtimeLabel: "VelocityUI")
+            c.start()
+            liveMetrics = c
+        }
     }
 }
 

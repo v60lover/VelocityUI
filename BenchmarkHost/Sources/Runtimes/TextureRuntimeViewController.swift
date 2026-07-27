@@ -23,6 +23,7 @@ final class TextureRuntimeViewController: ASDKViewController<ASCollectionNode> {
     private let harness: BenchmarkHarness
     private let orchestrator: BenchmarkOrchestrator?
     private let isIdiomatic: Bool
+    private var liveMetrics: LiveMetricsController?
 
     init(items: [BenchmarkItem], imageSource: any ImageSource, harness: BenchmarkHarness, orchestrator: BenchmarkOrchestrator? = nil) {
         self.benchmarkItems = items
@@ -58,6 +59,11 @@ final class TextureRuntimeViewController: ASDKViewController<ASCollectionNode> {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         orchestrator?.scrollViewReady(node.view)
+        if orchestrator == nil, liveMetrics == nil {
+            let c = LiveMetricsController(scrollView: node.view, harness: harness, imageMode: LaunchArguments().imageMode, runtimeLabel: "Texture")
+            c.start()
+            liveMetrics = c
+        }
     }
 }
 

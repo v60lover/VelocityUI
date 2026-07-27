@@ -10,6 +10,7 @@ final class SwiftUILazyVStackRuntimeViewController: UIViewController {
     private let imageSource: any ImageSource
     private let harness: BenchmarkHarness
     private let orchestrator: BenchmarkOrchestrator?
+    private var liveMetrics: LiveMetricsController?
 
     init(items: [BenchmarkItem], imageSource: any ImageSource, harness: BenchmarkHarness, orchestrator: BenchmarkOrchestrator? = nil) {
         self.benchmarkItems = items
@@ -42,6 +43,11 @@ final class SwiftUILazyVStackRuntimeViewController: UIViewController {
         super.viewDidAppear(animated)
         if let sv = view.firstScrollView {
             orchestrator?.scrollViewReady(sv)
+            if orchestrator == nil, liveMetrics == nil {
+                let c = LiveMetricsController(scrollView: sv, harness: harness, imageMode: LaunchArguments().imageMode, runtimeLabel: "SwiftUI LazyVStack")
+                c.start()
+                liveMetrics = c
+            }
         }
     }
 }

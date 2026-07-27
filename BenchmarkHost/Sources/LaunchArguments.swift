@@ -39,6 +39,11 @@ struct LaunchArguments {
     var measurementDuration: TimeInterval
     /// Items to prefetch ahead of visible cells. UICollectionView prefetch only; default matches VelocityUI's working range for fairness.
     var prefetchWindow: Int
+    /// When true (`--live`) and a `--runtime` is set, the app opens that runtime
+    /// directly in interactive live-HUD mode — no BenchmarkOrchestrator, no measured
+    /// pass, no self-terminate. Lets you jump straight into one runtime's LiveMetricsHUD
+    /// for hand-scroll profiling. Ignored in the headless matrix (which never passes it).
+    var liveHUD: Bool
 
     init() {
         let args = ProcessInfo.processInfo.arguments
@@ -49,6 +54,7 @@ struct LaunchArguments {
         itemCount = Self.value(for: "--items", in: args).flatMap(Int.init) ?? 100
         measurementDuration = Self.value(for: "--duration", in: args).flatMap(TimeInterval.init) ?? 30
         prefetchWindow = Self.value(for: "--prefetch-window", in: args).flatMap(Int.init) ?? 10
+        liveHUD = args.contains("--live")
     }
 
     /// Explicit-value init for unit tests — does not read from ProcessInfo.
@@ -59,7 +65,8 @@ struct LaunchArguments {
         imageMode: ImageMode = .idiomatic,
         itemCount: Int = 100,
         measurementDuration: TimeInterval = 30,
-        prefetchWindow: Int = 10
+        prefetchWindow: Int = 10,
+        liveHUD: Bool = false
     ) {
         self.scenario = scenario
         self.velocityProfile = velocityProfile
@@ -68,6 +75,7 @@ struct LaunchArguments {
         self.itemCount = itemCount
         self.measurementDuration = measurementDuration
         self.prefetchWindow = prefetchWindow
+        self.liveHUD = liveHUD
     }
 
     private static func value(for flag: String, in args: [String]) -> String? {

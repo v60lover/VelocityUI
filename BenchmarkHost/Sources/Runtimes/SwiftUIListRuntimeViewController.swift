@@ -15,6 +15,7 @@ final class SwiftUIListRuntimeViewController: UIViewController {
     private let imageSource: any ImageSource
     private let harness: BenchmarkHarness
     private let orchestrator: BenchmarkOrchestrator?
+    private var liveMetrics: LiveMetricsController?
 
     init(items: [BenchmarkItem], imageSource: any ImageSource, harness: BenchmarkHarness, orchestrator: BenchmarkOrchestrator? = nil) {
         self.benchmarkItems = items
@@ -47,6 +48,11 @@ final class SwiftUIListRuntimeViewController: UIViewController {
         super.viewDidAppear(animated)
         if let sv = view.firstScrollView {
             orchestrator?.scrollViewReady(sv)
+            if orchestrator == nil, liveMetrics == nil {
+                let c = LiveMetricsController(scrollView: sv, harness: harness, imageMode: LaunchArguments().imageMode, runtimeLabel: "SwiftUI List")
+                c.start()
+                liveMetrics = c
+            }
         }
     }
 }

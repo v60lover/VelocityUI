@@ -18,6 +18,7 @@ final class UICollectionViewRuntimeViewController: UIViewController {
     private let orchestrator: BenchmarkOrchestrator?
     private let prefetchWindow: Int
     private var dataSource: UICollectionViewDiffableDataSource<Int, BenchmarkItem.ID>!
+    private var liveMetrics: LiveMetricsController?
     // Prefetches into .benchmark pipeline's memory cache; no-op for same-pipeline mode.
     private lazy var prefetcher = ImagePrefetcher(pipeline: .benchmark)
     var collectionView: UICollectionView!
@@ -47,6 +48,11 @@ final class UICollectionViewRuntimeViewController: UIViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         orchestrator?.scrollViewReady(collectionView)
+        if orchestrator == nil, liveMetrics == nil {
+            let c = LiveMetricsController(scrollView: collectionView, harness: harness, imageMode: LaunchArguments().imageMode, runtimeLabel: "UICollectionView")
+            c.start()
+            liveMetrics = c
+        }
     }
 
     // MARK: - Setup

@@ -179,6 +179,22 @@ final class BenchmarkHarness: NSObject {
         thumbnailTransitionLock.withLock { let v = $0; $0 = 0; return v }
     }
 
+    // MARK: - Non-draining peeks (LiveMetricsHUD)
+
+    /// Reads the current gray→image transition count without resetting it.
+    /// Used by LiveMetricsCollector in the manual/picker flow (no startCapture is
+    /// called there, so the counter accumulates from launch — that is the intended
+    /// live-running total). Does not perturb the drain-on-stopCapture measured path.
+    nonisolated func peekGrayTransitionCount() -> Int {
+        grayTransitionLock.withLock { $0 }
+    }
+
+    /// Reads the current thumbnail→image transition count without resetting it.
+    /// See `peekGrayTransitionCount()` for the manual-flow contract.
+    nonisolated func peekThumbnailTransitionCount() -> Int {
+        thumbnailTransitionLock.withLock { $0 }
+    }
+
     // MARK: - CADisplayLink
 
     @objc private func displayLinkTick(_ link: CADisplayLink) {

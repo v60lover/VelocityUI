@@ -96,6 +96,12 @@ schemes:
         BenchmarkHost: all
     run:
       config: Release
+      # Apple's Metal Performance HUD (GPU frametime + present rate) alongside the
+      # custom LiveMetricsHUD. Scheme env vars apply only to manual Xcode launches;
+      # the headless matrix launches via simctl/devicectl and never sees this, so
+      # measured passes stay clean.
+      environmentVariables:
+        MTL_HUD_ENABLED: "1"
     test:
       config: Debug
     profile:

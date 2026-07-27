@@ -22,7 +22,7 @@ SCRIPTS_DIR="$HOST_DIR/scripts"
 # Defaults — full matrix.
 DEVICE=""
 SIM_DEVICE=""
-RUNS=10
+RUNS=5
 RUNTIMES="swiftui-lazyvstack,swiftui-list,uicollectionview,texture,velocityui"
 MODES="idiomatic,same-pipeline"
 PROFILES="slow,medium,max"
@@ -46,7 +46,7 @@ Target selection (one required):
 
 Matrix overrides:
   --quick                 N=3, medium profile only, warm only, idiomatic only
-  --runs N                Runs per combo (default 10)
+  --runs N                Runs per combo (default 5)
   --runtimes CSV          Comma-separated runtime keys (default: all 5)
   --modes CSV             idiomatic,same-pipeline (default: both)
   --profiles CSV          slow,medium,max (default: all)

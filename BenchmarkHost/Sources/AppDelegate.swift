@@ -25,7 +25,12 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         }
 
         let rootVC: UIViewController
-        if let runtime = args.runtime {
+        if let runtime = args.runtime, args.liveHUD {
+            // Interactive live-HUD mode: open this runtime directly with no orchestrator,
+            // so its LiveMetricsHUD attaches for hand-scroll profiling (no measured pass).
+            harness.runtimeLabel = runtime.rawValue
+            rootVC = makeRuntimeVC(runtime: runtime, items: dataset, imageSource: imageSource)
+        } else if let runtime = args.runtime {
             harness.runtimeLabel = runtime.rawValue
             let orchestrator = BenchmarkOrchestrator(args: args, harness: harness)
             orchestrator.onComplete = { report in
