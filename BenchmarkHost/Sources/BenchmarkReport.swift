@@ -58,7 +58,12 @@ struct BenchmarkReport: Sendable, Codable {
 
     struct MemoryStats: Sendable, Codable {
         let peakPhysFootprintBytes: Int
+        /// Mean size of a positive footprint step — a burst-SIZE metric, not a
+        /// per-frame rate. See AllocationProbe.summarize docstring.
         let avgAllocDeltaPerFrameBytes: Double
+        /// (samples.last − samples.first) / (samples.count − 1). The true per-frame
+        /// allocation rate; may be negative after eviction. See VelocityUI-ah8.4.
+        let netAllocDeltaPerFrameBytes: Double
     }
 
     /// One entry per MXMetricPayload received during the capture window.

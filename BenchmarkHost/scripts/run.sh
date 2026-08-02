@@ -26,7 +26,7 @@ RUNS=5
 RUNTIMES="swiftui-lazyvstack,swiftui-list,uicollectionview,texture,velocityui"
 MODES="idiomatic,same-pipeline"
 PROFILES="slow,medium,max"
-SCENARIOS="cold,warm"
+SCENARIOS="cold,warm,replay"
 ITEMS=1000
 DURATION=30
 OUTPUT=""
@@ -50,7 +50,8 @@ Matrix overrides:
   --runtimes CSV          Comma-separated runtime keys (default: all 5)
   --modes CSV             idiomatic,same-pipeline (default: both)
   --profiles CSV          slow,medium,max (default: all)
-  --scenarios CSV         cold,warm (default: both)
+  --scenarios CSV         cold,warm,replay (default: all three; replay is the
+                          Phase 1 contract scenario Q5 gates on — see VelocityUI-ah8.4)
   --items N               Dataset size (default 1000)
   --duration N            Measurement seconds per run (default 30)
 

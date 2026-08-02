@@ -194,7 +194,7 @@ private final class MockBenchmarkHarness: BenchmarkHarnessProtocol {
             frameStats: .init(totalFrames: 0, hitchCount: 0, hitchesPerThousand: 0,
                               p50FrameTimeMs: 0, p99FrameTimeMs: 0, maxFrameTimeMs: 0,
                               sustainedFrameRateHz: 0),
-            memoryStats: .init(peakPhysFootprintBytes: 0, avgAllocDeltaPerFrameBytes: 0),
+            memoryStats: .init(peakPhysFootprintBytes: 0, avgAllocDeltaPerFrameBytes: 0, netAllocDeltaPerFrameBytes: 0),
             taskSpawnCount: 0,
             metricKitSnapshots: []
         )
@@ -276,9 +276,213 @@ final class BenchmarkOrchestratorTests: XCTestCase {
         driver.stop()
     }
 
+    // MARK: - replay scenario (VelocityUI-ah8.4): startCapture must not fire synchronously
+
+    // Warm-up must complete (and quiesce-wait pass) before the measured
+    // harness.startCapture — verifying only the synchronous precondition here;
+    // full Timer-driven sequencing is exercised by the bead's simulator
+    // integration pass, not a fast unit test (see design notes).
+    func testReplayScenarioDoesNotStartCaptureImmediately() {
+        let harness = MockBenchmarkHarness()
+        let orchestrator = BenchmarkOrchestrator(
+            args: LaunchArguments(scenario: .replay),
+            harness: harness
+        )
+        let sv = makeScrollView(contentHeight: 20_000)
+        orchestrator.scrollViewReady(sv)
+        XCTAssertEqual(harness.startCaptureCount, 0,
+            "replay: startCapture must not fire synchronously — warm-up + quiesce wait precede it")
+        orchestrator.stopCapture()
+    }
+
+    // MARK: - replay scenario warm-up backstop + abort (VelocityUI-ah8.4 review F2)
+
+    // Regression guard for review finding F2: the warm-up backstop timer was
+    // originally sized to args.measurementDuration, which deterministically
+    // fired mid-warm-up for slow×replay at defaults (~30.8s of warm-up vs a
+    // 30s measurementDuration), calling finishCapture() -> harness.stopCapture()
+    // with NO prior startCapture and silently writing a garbage report to disk
+    // as if it were a legitimate result. A short measurementDuration here would
+    // have fired the OLD buggy backstop almost immediately; the fixed backstop
+    // must ignore it entirely.
+    func testReplayWarmupBackstopIsIndependentOfMeasurementDuration() {
+        let harness = MockBenchmarkHarness()
+        let orchestrator = BenchmarkOrchestrator(
+            args: LaunchArguments(scenario: .replay, measurementDuration: 0.05),
+            harness: harness
+        )
+        var abortMessage: String?
+        orchestrator.onAbort = { abortMessage = $0 }
+        let sv = makeScrollView(contentHeight: 20_000)
+        orchestrator.scrollViewReady(sv)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.3))
+        XCTAssertNil(abortMessage,
+            "warm-up backstop must not be keyed to measurementDuration — it fired within 0.3s of a 0.05s duration")
+        XCTAssertEqual(harness.startCaptureCount, 0,
+            "no capture should have started — warm-up + quiesce wait still pending")
+        orchestrator.stopCapture()
+    }
+
+    // Regression guard for review finding F2's contentSize==0 edge: the driver's
+    // own maxY>0 guard leaves it permanently inert when contentSize.height is 0
+    // at ready time (not yet laid out), so onEnd never fires and the OLD code
+    // would silently wait out the entire backstop before emitting garbage. The
+    // fix must detect this synchronously and abort immediately.
+    func testReplayAbortsImmediatelyWhenContentSizeIsZero() {
+        let harness = MockBenchmarkHarness()
+        let orchestrator = BenchmarkOrchestrator(args: LaunchArguments(scenario: .replay), harness: harness)
+        var abortMessage: String?
+        orchestrator.onAbort = { abortMessage = $0 }
+        let sv = makeScrollView(contentHeight: 0)  // not yet laid out
+        orchestrator.scrollViewReady(sv)
+        XCTAssertNotNil(abortMessage,
+            "zero contentSize must abort immediately, not hang until the 60s backstop")
+        XCTAssertEqual(harness.startCaptureCount, 0)
+    }
+
+    // onAbort (not onComplete) must fire for the abort path — asserting this
+    // distinguishes the fix from a version that merely calls finishCapture()
+    // with better messaging (which would still hand back a garbage report).
+    func testReplayAbortDoesNotInvokeOnComplete() {
+        let harness = MockBenchmarkHarness()
+        let orchestrator = BenchmarkOrchestrator(args: LaunchArguments(scenario: .replay), harness: harness)
+        var completedReport: BenchmarkReport?
+        var abortMessage: String?
+        orchestrator.onComplete = { completedReport = $0 }
+        orchestrator.onAbort = { abortMessage = $0 }
+        let sv = makeScrollView(contentHeight: 0)
+        orchestrator.scrollViewReady(sv)
+        XCTAssertNotNil(abortMessage)
+        XCTAssertNil(completedReport, "abort must not synthesize a BenchmarkReport via onComplete")
+    }
+
+    // MARK: - replay scenario fixed warm-up profile (VelocityUI-ah8.4 review F3)
+
+    // Regression guard for review finding F3: the warm-up pass must always
+    // drive at replayWarmupProfile (mediumFling), never args.velocityProfile.
+    // At maxFling the warm-up would outrun decode completion, and the
+    // pipeline's deep-cancel would leave cache holes that force decodes during
+    // the MEASURED pass — chronic no-decode violations for instrument reasons.
+    // Asserted by distance traveled: mediumFling and maxFling diverge sharply
+    // within their shared accel phase (v0=1500 vs v0=4500), so if the matrix's
+    // .max profile leaked into the warm-up, the driven offset at t=1.0s would
+    // land far above what mediumFling alone produces.
+    func testReplayWarmupAlwaysUsesFixedProfileRegardlessOfMatrixProfile() {
+        let harness = MockBenchmarkHarness()
+        let orchestrator = BenchmarkOrchestrator(
+            args: LaunchArguments(scenario: .replay, velocityProfile: .max, itemCount: 1_000),
+            harness: harness
+        )
+        // contentHeight/itemCount=1000 * replayItemCount=30 → bound=6_000pt —
+        // comfortably beyond what either profile covers by t=1.0s, so the
+        // sampled offset reflects in-flight velocity, not a completed pass.
+        let sv = makeScrollView(contentHeight: 200_000)
+        orchestrator.scrollViewReady(sv)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 1.0))
+
+        // mediumFling@t=1.0 ≈ 1312.5pt (v0=1500, accelDuration=4: 1500·1 − 1500·1²/8).
+        // maxFling@t=1.0   ≈ 3375pt   (v0=4500, accelDuration=2: 4500·1 − 4500·1²/4).
+        XCTAssertGreaterThan(sv.contentOffset.y, 0, "warm-up must have started moving")
+        XCTAssertLessThan(sv.contentOffset.y, 2_500,
+            "warm-up offset at t=1.0s is consistent with maxFling leaking into the warm-up pass — "
+            + "expected mediumFling's ~1312pt, not maxFling's ~3375pt")
+        orchestrator.stopCapture()
+    }
+
+    // MARK: - maxOffset bounding (VelocityUI-ah8.4)
+
+    func testMaxOffsetBoundsDriverBelowFullContentHeight() {
+        // contentHeight=20_000, bounds.height=200 → full maxY=19_800. Bound to 1_000.
+        let sv = makeScrollView(contentHeight: 20_000)
+        let driver = ScrollDriver()
+        var didEnd = false
+        driver.start(scrollView: sv, profile: .maxFling, looping: false, maxOffset: 1_000) {
+            didEnd = true
+        }
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 1.0))
+        XCTAssertTrue(didEnd, "driver must call onEnd on reaching the bounded maxOffset")
+        XCTAssertEqual(sv.contentOffset.y, 1_000, accuracy: 1.0,
+            "driver must stop at maxOffset, not the full content height")
+        driver.stop()
+    }
+
+    func testMaxOffsetLargerThanContentClampsToContentHeight() {
+        // Full maxY = 800. A maxOffset larger than that must not push past content bounds.
+        let sv = makeScrollView(contentHeight: 1_000)
+        let driver = ScrollDriver()
+        var didEnd = false
+        driver.start(scrollView: sv, profile: .maxFling, looping: false, maxOffset: 50_000) {
+            didEnd = true
+        }
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 2.0))
+        XCTAssertTrue(didEnd)
+        XCTAssertEqual(sv.contentOffset.y, 800, accuracy: 1.0)
+        driver.stop()
+    }
+
     private func makeScrollView(contentHeight: CGFloat) -> UIScrollView {
         let sv = UIScrollView(frame: CGRect(x: 0, y: 0, width: 100, height: 200))
         sv.contentSize = CGSize(width: 100, height: contentHeight)
         return sv
+    }
+}
+
+// MARK: - replayRangeMaxOffset (VelocityUI-ah8.4)
+
+final class ReplayRangeMaxOffsetTests: XCTestCase {
+    func testComputesProportionalOffset() {
+        // 1000 items over 100_000pt content → 100pt/item avg. 30 items → 3_000pt.
+        let offset = replayRangeMaxOffset(contentHeight: 100_000, itemCount: 1_000, replayItemCount: 30)
+        XCTAssertEqual(offset, 3_000, accuracy: 0.01)
+    }
+
+    func testZeroItemCountReturnsZero() {
+        XCTAssertEqual(replayRangeMaxOffset(contentHeight: 1_000, itemCount: 0, replayItemCount: 30), 0)
+    }
+
+    func testZeroContentHeightReturnsZero() {
+        XCTAssertEqual(replayRangeMaxOffset(contentHeight: 0, itemCount: 100, replayItemCount: 30), 0)
+    }
+
+    func testReplayItemCountLargerThanDatasetStillScalesLinearly() {
+        // 10 items over 1_000pt content → 100pt/item. Asking for 30 (> itemCount)
+        // is the caller's choice — the function just scales, callers/driver clamp
+        // to actual content height separately (ScrollDriver.maxOffset already does).
+        let offset = replayRangeMaxOffset(contentHeight: 1_000, itemCount: 10, replayItemCount: 30)
+        XCTAssertEqual(offset, 3_000, accuracy: 0.01)
+    }
+}
+
+// MARK: - FootprintQuiesceTracker (VelocityUI-ah8.4)
+
+final class FootprintQuiesceTrackerTests: XCTestCase {
+    func testStableAfterRequiredNonGrowingSamples() {
+        var tracker = FootprintQuiesceTracker(requiredStableSamples: 3)
+        XCTAssertFalse(tracker.record(100))
+        XCTAssertFalse(tracker.record(100))
+        XCTAssertTrue(tracker.record(100), "third non-growing sample must report stable")
+    }
+
+    func testGrowthResetsStreak() {
+        var tracker = FootprintQuiesceTracker(requiredStableSamples: 3)
+        XCTAssertFalse(tracker.record(100))
+        XCTAssertFalse(tracker.record(100))
+        XCTAssertFalse(tracker.record(150), "growth must reset the streak")
+        // Reset lands the streak at 0 (not 1) — 3 more non-growing calls are
+        // needed to reach requiredStableSamples again, same as a fresh tracker.
+        XCTAssertFalse(tracker.record(150))
+        XCTAssertFalse(tracker.record(150))
+        XCTAssertTrue(tracker.record(150), "streak must rebuild after the reset")
+    }
+
+    func testShrinkingSamplesCountAsStable() {
+        var tracker = FootprintQuiesceTracker(requiredStableSamples: 2)
+        XCTAssertFalse(tracker.record(1_000))
+        XCTAssertTrue(tracker.record(900), "a shrinking sample (eviction) must count toward stability")
+    }
+
+    func testFirstSampleNeverStableForMultiSampleRequirement() {
+        var tracker = FootprintQuiesceTracker(requiredStableSamples: 2)
+        XCTAssertFalse(tracker.record(42), "a single sample can't satisfy a 2-sample requirement")
     }
 }

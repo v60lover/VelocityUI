@@ -111,7 +111,12 @@ final class LiveMetricsCollector {
     func snapshot() -> Snapshot {
         let pairs = frames.map { (ts: $0.ts, target: $0.target) }
         let fs = benchmarkComputeFrameStats(timestamps: pairs, hitchSlack: hitchSlack)
-        let (_, avgAlloc) = AllocationProbe.summarize(samples: frames.map(\.footprint))
+        // Net-delta over the rolling window, not the positive-step burst mean — the
+        // burst mean hangs high after the finger lifts (retains old bursts for the
+        // whole window) and cliff-drops in a step-count-denominator artifact.
+        // Net-delta falls to ~0 within one window of decode quiesce. Clamped ≥ 0
+        // for display only — the raw metric in the JSON report may be negative.
+        let (_, _, netAlloc) = AllocationProbe.summarize(samples: frames.map(\.footprint))
         let current = frames.last?.footprint ?? baselineRSS
 
         return Snapshot(
@@ -123,7 +128,7 @@ final class LiveMetricsCollector {
             currentRSSBytes: current,
             peakRSSBytes: peakRSS,
             rssDeltaBytes: current - baselineRSS,
-            allocBytesPerFrame: avgAlloc,
+            allocBytesPerFrame: max(0, netAlloc),
             scrollVelocity: smoothedVelocity,
             grayTransitions: harness?.peekGrayTransitionCount() ?? 0,
             thumbnailTransitions: harness?.peekThumbnailTransitionCount() ?? 0,

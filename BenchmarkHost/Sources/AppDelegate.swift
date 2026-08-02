@@ -44,6 +44,10 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                 }
                 exit(0)
             }
+            orchestrator.onAbort = { message in
+                FileHandle.standardError.write(Data("BenchmarkOrchestrator abort: \(message)\n".utf8))
+                exit(1)
+            }
             rootVC = makeRuntimeVC(runtime: runtime, items: dataset, imageSource: imageSource, orchestrator: orchestrator)
         } else {
             rootVC = RuntimePickerViewController(items: dataset, imageSource: imageSource, harness: harness)

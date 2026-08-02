@@ -19,6 +19,13 @@ public struct BenchmarkReport: Codable, Sendable {
     /// nil when no warmup-discard window was applied (cold scenario or zero-second window);
     /// a positive value documents the discard applied so off-line analysis can recompute totals.
     public let warmupDiscardedSeconds: Double?
+    /// Number of cells mounted with at least one `.image` fragment where `applyContent`
+    /// had not fired by scenario end (gray→image transition observed). nil when not
+    /// measured by this scenario.
+    public let grayToImageTransitionCount: Int?
+    /// Number of `applyContent` deliveries that replaced a decode-guaranteed
+    /// thumbnail/BlurHash placeholder. nil when not measured by this scenario.
+    public let thumbnailToImageTransitionCount: Int?
 
     public init(
         runtime: String,
@@ -27,7 +34,9 @@ public struct BenchmarkReport: Codable, Sendable {
         memoryStats: MemoryStats,
         taskSpawnCount: Int,
         metricKitSnapshots: [MetricKitSnapshot],
-        warmupDiscardedSeconds: Double? = nil
+        warmupDiscardedSeconds: Double? = nil,
+        grayToImageTransitionCount: Int? = nil,
+        thumbnailToImageTransitionCount: Int? = nil
     ) {
         self.runtime = runtime
         self.captureDurationSeconds = captureDurationSeconds
@@ -36,6 +45,8 @@ public struct BenchmarkReport: Codable, Sendable {
         self.taskSpawnCount = taskSpawnCount
         self.metricKitSnapshots = metricKitSnapshots
         self.warmupDiscardedSeconds = warmupDiscardedSeconds
+        self.grayToImageTransitionCount = grayToImageTransitionCount
+        self.thumbnailToImageTransitionCount = thumbnailToImageTransitionCount
     }
 
     public struct FrameStats: Codable, Sendable {
@@ -51,6 +62,11 @@ public struct BenchmarkReport: Codable, Sendable {
     public struct MemoryStats: Codable, Sendable {
         public let peakPhysFootprintBytes: Int
         public let avgAllocDeltaPerFrameBytes: Double
+        /// nil for reports written before VelocityUI-ah8.4 added this field —
+        /// the app always emits a value for its own live reports (AllocationProbe.summarize
+        /// computes it unconditionally); Optional here exists solely so the reporter can
+        /// still parse pre-existing results directories rather than skip every file in them.
+        public let netAllocDeltaPerFrameBytes: Double?
     }
 
     public struct MetricKitSnapshot: Codable, Sendable {

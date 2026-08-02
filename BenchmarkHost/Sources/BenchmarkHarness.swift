@@ -78,7 +78,7 @@ final class BenchmarkHarness: NSObject {
         displayLink = nil
         let duration = CFAbsoluteTimeGetCurrent() - captureStartTime
 
-        let (peakFootprint, avgAllocDelta) = allocationProbe.stop()
+        let (peakFootprint, avgAllocDelta, netAllocDelta) = allocationProbe.stop()
         MXMetricManager.shared.remove(self)
 
         let taskSpawnCount = spawnCounter.withLock { $0 }
@@ -101,7 +101,8 @@ final class BenchmarkHarness: NSObject {
             ),
             memoryStats: BenchmarkReport.MemoryStats(
                 peakPhysFootprintBytes: peakFootprint,
-                avgAllocDeltaPerFrameBytes: avgAllocDelta
+                avgAllocDeltaPerFrameBytes: avgAllocDelta,
+                netAllocDeltaPerFrameBytes: netAllocDelta
             ),
             taskSpawnCount: taskSpawnCount,
             metricKitSnapshots: mkSnapshots,

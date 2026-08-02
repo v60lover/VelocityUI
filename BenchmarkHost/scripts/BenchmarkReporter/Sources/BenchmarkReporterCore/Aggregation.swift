@@ -26,10 +26,18 @@ public struct AggregatedRow: Sendable {
     public let frameTimeMs_p99: Double
     public let frameTimeMs_max: Double
 
-    /// Allocations / frame — p50, p99 across runs. Phase 1 contract says
-    /// VelocityUI must be 0; other runtimes report as-is.
-    public let allocBytesPerFrame_p50: Double
-    public let allocBytesPerFrame_p99: Double
+    /// Mean footprint burst size (positive-step mean) — p50, p99 across runs.
+    /// NOT the Phase 1 contract metric; see netAllocBytesPerFrame_p50/p99.
+    public let footprintBurstBytes_p50: Double
+    public let footprintBurstBytes_p99: Double
+
+    /// True per-frame allocation rate ((last-first)/(count-1)) — p50, p99 across
+    /// runs. This is the metric the `replay` scenario's Q5 gate checks against
+    /// the 16 KB/frame budget. See VelocityUI-ah8.4. nil when NONE of the runs
+    /// in this bucket carry the field (pre-ah8.4 result JSONs) — never fabricated
+    /// as 0, since a fabricated 0 would render as a passing net value.
+    public let netAllocBytesPerFrame_p50: Double?
+    public let netAllocBytesPerFrame_p99: Double?
 
     /// Peak resident memory — max across runs (peak-of-peaks is the honest
     /// number for an upper bound).
@@ -42,6 +50,14 @@ public struct AggregatedRow: Sendable {
     /// Per-run Task-spawn counter — max across runs. Phase 1 contract says
     /// VelocityUI must be 0.
     public let taskSpawnCount_max: Int
+
+    /// Gray→image / thumbnail→image transition counters — max across runs.
+    /// Used by the `replay` scenario's no-decode invariant check (nonzero here
+    /// during a replay capture means a decode fired despite the cache-fitting
+    /// bound — the invariant `replay` is meant to exercise). nil-valued source
+    /// reports (scenario didn't measure these) contribute 0.
+    public let grayToImageTransitionCount_max: Int
+    public let thumbnailToImageTransitionCount_max: Int
 
     /// Coefficient of variation on the headline metric (hitches/1k frames).
     /// > 0.15 ⇒ `⚠ unstable` flag in the Markdown report. Never hidden, never
@@ -59,12 +75,16 @@ public struct AggregatedRow: Sendable {
         frameTimeMs_p50: Double,
         frameTimeMs_p99: Double,
         frameTimeMs_max: Double,
-        allocBytesPerFrame_p50: Double,
-        allocBytesPerFrame_p99: Double,
+        footprintBurstBytes_p50: Double,
+        footprintBurstBytes_p99: Double,
+        netAllocBytesPerFrame_p50: Double?,
+        netAllocBytesPerFrame_p99: Double?,
         peakRSSBytes_max: Int,
         fps_p50: Double,
         fps_p99: Double,
         taskSpawnCount_max: Int,
+        grayToImageTransitionCount_max: Int,
+        thumbnailToImageTransitionCount_max: Int,
         hitchesPer1k_cov: Double
     ) {
         self.runtime = runtime
@@ -77,12 +97,16 @@ public struct AggregatedRow: Sendable {
         self.frameTimeMs_p50 = frameTimeMs_p50
         self.frameTimeMs_p99 = frameTimeMs_p99
         self.frameTimeMs_max = frameTimeMs_max
-        self.allocBytesPerFrame_p50 = allocBytesPerFrame_p50
-        self.allocBytesPerFrame_p99 = allocBytesPerFrame_p99
+        self.footprintBurstBytes_p50 = footprintBurstBytes_p50
+        self.footprintBurstBytes_p99 = footprintBurstBytes_p99
+        self.netAllocBytesPerFrame_p50 = netAllocBytesPerFrame_p50
+        self.netAllocBytesPerFrame_p99 = netAllocBytesPerFrame_p99
         self.peakRSSBytes_max = peakRSSBytes_max
         self.fps_p50 = fps_p50
         self.fps_p99 = fps_p99
         self.taskSpawnCount_max = taskSpawnCount_max
+        self.grayToImageTransitionCount_max = grayToImageTransitionCount_max
+        self.thumbnailToImageTransitionCount_max = thumbnailToImageTransitionCount_max
         self.hitchesPer1k_cov = hitchesPer1k_cov
     }
 }
@@ -107,9 +131,16 @@ public enum Aggregator {
                 let p99FT = runs.map(\.report.frameStats.p99FrameTimeMs)
                 let maxFT = runs.map(\.report.frameStats.maxFrameTimeMs)
                 let allocs = runs.map(\.report.memoryStats.avgAllocDeltaPerFrameBytes)
+                // compactMap, not map — pre-ah8.4 result JSONs decode this field as
+                // nil (see Report.swift). Runs missing it are excluded from the
+                // percentile, not coerced to 0 (a fabricated 0 would read as a
+                // passing net-alloc value in the Q5 gate).
+                let netAllocs = runs.compactMap(\.report.memoryStats.netAllocDeltaPerFrameBytes)
                 let peakRSS = runs.map(\.report.memoryStats.peakPhysFootprintBytes)
                 let fps = runs.map(\.report.frameStats.sustainedFrameRateHz)
                 let taskSpawns = runs.map(\.report.taskSpawnCount)
+                let grayTransitions = runs.map { $0.report.grayToImageTransitionCount ?? 0 }
+                let thumbnailTransitions = runs.map { $0.report.thumbnailToImageTransitionCount ?? 0 }
                 return AggregatedRow(
                     runtime: key.runtime,
                     mode: key.mode,
@@ -121,12 +152,16 @@ public enum Aggregator {
                     frameTimeMs_p50: Stats.percentile(p50FT, 50),
                     frameTimeMs_p99: Stats.percentile(p99FT, 99),
                     frameTimeMs_max: maxFT.max() ?? 0,
-                    allocBytesPerFrame_p50: Stats.percentile(allocs, 50),
-                    allocBytesPerFrame_p99: Stats.percentile(allocs, 99),
+                    footprintBurstBytes_p50: Stats.percentile(allocs, 50),
+                    footprintBurstBytes_p99: Stats.percentile(allocs, 99),
+                    netAllocBytesPerFrame_p50: netAllocs.isEmpty ? nil : Stats.percentile(netAllocs, 50),
+                    netAllocBytesPerFrame_p99: netAllocs.isEmpty ? nil : Stats.percentile(netAllocs, 99),
                     peakRSSBytes_max: peakRSS.max() ?? 0,
                     fps_p50: Stats.percentile(fps, 50),
                     fps_p99: Stats.percentile(fps, 99),
                     taskSpawnCount_max: taskSpawns.max() ?? 0,
+                    grayToImageTransitionCount_max: grayTransitions.max() ?? 0,
+                    thumbnailToImageTransitionCount_max: thumbnailTransitions.max() ?? 0,
                     hitchesPer1k_cov: Stats.coefficientOfVariation(hitches)
                 )
             }

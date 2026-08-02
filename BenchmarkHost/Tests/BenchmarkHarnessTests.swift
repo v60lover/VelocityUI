@@ -60,16 +60,54 @@ final class BenchmarkHarnessTests: XCTestCase {
     }
 
     func testSummarizeEmpty() {
-        let (peak, avg) = AllocationProbe.summarize(samples: [])
+        let (peak, avg, net) = AllocationProbe.summarize(samples: [])
         XCTAssertEqual(peak, 0)
         XCTAssertEqual(avg, 0.0)
+        XCTAssertEqual(net, 0.0)
     }
 
     func testSummarizePositiveDeltasOnly() {
         // Samples: 100, 150, 120, 200 — positive deltas are 50 and 80.
-        let (peak, avg) = AllocationProbe.summarize(samples: [100, 150, 120, 200])
+        let (peak, avg, net) = AllocationProbe.summarize(samples: [100, 150, 120, 200])
         XCTAssertEqual(peak, 200)
         XCTAssertEqual(avg, (50.0 + 80.0) / 2.0, accuracy: 0.01)
+        XCTAssertEqual(net, (200.0 - 100.0) / 3.0, accuracy: 0.01)
+    }
+
+    // MARK: - Net-delta metric (VelocityUI-ah8.4 Fix 1)
+
+    func testSummarizeNetDeltaFlatSeriesIsZero() {
+        let (_, avg, net) = AllocationProbe.summarize(samples: [1_000, 1_000, 1_000, 1_000])
+        XCTAssertEqual(avg, 0.0)
+        XCTAssertEqual(net, 0.0)
+    }
+
+    func testSummarizeNetDeltaMonotonicGrowthMatchesRate() {
+        // 100, 200, 300, 400 — avg burst = 100 (three +100 steps); net = (400-100)/3 = 100.
+        let (_, avg, net) = AllocationProbe.summarize(samples: [100, 200, 300, 400])
+        XCTAssertEqual(avg, 100.0, accuracy: 0.01)
+        XCTAssertEqual(net, 100.0, accuracy: 0.01)
+    }
+
+    func testSummarizeNetDeltaChurnNetsToZeroWhileBurstMeanIsMBScale() {
+        // The exact signature that motivated this bead: alloc-then-free churn of
+        // ~2 MB per cycle reads as an MB-scale burst mean but nets to ~0 — a
+        // rate metric must see a clean scroll path here, not a regression.
+        let twoMB = 2 * 1_024 * 1_024
+        let samples = [0, twoMB, 0, twoMB, 0, twoMB, 0]
+        let (_, avg, net) = AllocationProbe.summarize(samples: samples)
+        XCTAssertGreaterThan(avg, 1_000_000, "burst mean must be MB-scale")
+        XCTAssertEqual(net, 0.0, accuracy: 0.01, "net must be ~0 despite MB-scale churn")
+    }
+
+    func testSummarizeNetDeltaNegativeAfterEviction() {
+        let (_, _, net) = AllocationProbe.summarize(samples: [1_000, 500])
+        XCTAssertEqual(net, -500.0, accuracy: 0.01)
+    }
+
+    func testSummarizeNetDeltaSingleSampleIsZero() {
+        let (_, _, net) = AllocationProbe.summarize(samples: [42])
+        XCTAssertEqual(net, 0.0)
     }
 
     // MARK: - Percentile helper
@@ -100,7 +138,8 @@ final class BenchmarkHarnessTests: XCTestCase {
             ),
             memoryStats: BenchmarkReport.MemoryStats(
                 peakPhysFootprintBytes: 64_000_000,
-                avgAllocDeltaPerFrameBytes: 128.5
+                avgAllocDeltaPerFrameBytes: 128.5,
+                netAllocDeltaPerFrameBytes: 12.5
             ),
             taskSpawnCount: 7,
             metricKitSnapshots: [
@@ -130,6 +169,7 @@ final class BenchmarkHarnessTests: XCTestCase {
         // MemoryStats
         XCTAssertEqual(decoded.memoryStats.peakPhysFootprintBytes, 64_000_000)
         XCTAssertEqual(decoded.memoryStats.avgAllocDeltaPerFrameBytes, 128.5, accuracy: 0.001)
+        XCTAssertEqual(decoded.memoryStats.netAllocDeltaPerFrameBytes, 12.5, accuracy: 0.001)
 
         // MetricKitSnapshot round-trip
         XCTAssertEqual(decoded.metricKitSnapshots.count, 1)

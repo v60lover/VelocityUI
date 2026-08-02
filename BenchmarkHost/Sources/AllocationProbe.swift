@@ -34,7 +34,12 @@ final class AllocationProbe: @unchecked Sendable {
             $0?.source.cancel()
             $0 = nil
         }
-        samplesLock.withLock { $0.removeAll() }
+        samplesLock.withLock {
+            $0.removeAll()
+            // F7-style hygiene: pre-size so the probe's own append-reallocs never
+            // show up as a footprint step in the measurement it is taking.
+            $0.reserveCapacity(7_200)
+        }
         let source = DispatchSource.makeTimerSource(flags: [], queue: .global(qos: .utility))
         source.schedule(deadline: .now(), repeating: 1.0 / 60.0, leeway: .milliseconds(1))
         source.setEventHandler { [weak self] in
@@ -46,7 +51,7 @@ final class AllocationProbe: @unchecked Sendable {
         source.resume()
     }
 
-    func stop() -> (peakPhysFootprintBytes: Int, avgAllocDeltaPerFrameBytes: Double) {
+    func stop() -> (peakPhysFootprintBytes: Int, avgAllocDeltaPerFrameBytes: Double, netAllocDeltaPerFrameBytes: Double) {
         timerRefLock.withLock {
             $0?.source.cancel()
             $0 = nil
@@ -55,16 +60,28 @@ final class AllocationProbe: @unchecked Sendable {
         return AllocationProbe.summarize(samples: samples)
     }
 
+    /// - `avgAllocDeltaPerFrameBytes` is the mean size of a positive footprint step —
+    ///   a burst-SIZE metric. It is invariant to how often allocation happens, and a
+    ///   single guaranteed-unavoidable decode (e.g. the final cached image) sets its
+    ///   floor regardless of how clean the surrounding scroll path is. Kept for
+    ///   cross-run comparability; NOT the Phase 1 contract metric (see VelocityUI-ah8.4).
+    /// - `netAllocDeltaPerFrameBytes` = (samples.last − samples.first) / (samples.count − 1)
+    ///   is the true per-frame rate: churn (alloc-then-free) nets to ~0 even when the
+    ///   burst mean is MB-scale, and it goes negative after eviction. This is the
+    ///   metric the `replay` scenario's Q5 gate uses.
     // Internal for unit tests — pure function over sample array.
-    static func summarize(samples: [Int]) -> (peakPhysFootprintBytes: Int, avgAllocDeltaPerFrameBytes: Double) {
-        guard !samples.isEmpty else { return (0, 0.0) }
+    static func summarize(samples: [Int]) -> (peakPhysFootprintBytes: Int, avgAllocDeltaPerFrameBytes: Double, netAllocDeltaPerFrameBytes: Double) {
+        guard !samples.isEmpty else { return (0, 0.0, 0.0) }
         let peak = samples.max()!
         let posDeltas = zip(samples, samples.dropFirst()).compactMap { a, b -> Int? in
             let d = b - a
             return d > 0 ? d : nil
         }
         let avg = posDeltas.isEmpty ? 0.0 : Double(posDeltas.reduce(0, +)) / Double(posDeltas.count)
-        return (peak, avg)
+        let net = samples.count > 1
+            ? Double(samples[samples.count - 1] - samples[0]) / Double(samples.count - 1)
+            : 0.0
+        return (peak, avg, net)
     }
 
     // Internal for unit tests — readable by the probe test that allocates a known buffer.

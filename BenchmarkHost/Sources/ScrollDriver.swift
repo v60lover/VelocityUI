@@ -33,6 +33,7 @@ final class ScrollDriver {
     private var displayLink: CADisplayLink?
     private var passStartTimestamp: CFTimeInterval = .nan
     private var baseOffsetY: CGFloat = 0
+    private var boundedMaxOffset: CGFloat?
 
     // MARK: - Public API
 
@@ -40,17 +41,24 @@ final class ScrollDriver {
     /// - Parameters:
     ///   - looping: When true the driver jumps back to the top on reaching the
     ///     bottom and continues; when false it stops and calls onEnd.
-    ///   - onEnd: Called once when !looping and the bottom is reached.
+    ///   - maxOffset: When non-nil, bounds the driven range to
+    ///     `min(maxOffset, contentSize.height - bounds.height)` instead of the
+    ///     full content height — lets a caller confine scrolling to a sub-range
+    ///     (e.g. the `replay` scenario's cache-fitting window) without a
+    ///     dataset or library change.
+    ///   - onEnd: Called once when !looping and the bound is reached.
     func start(
         scrollView: UIScrollView,
         profile: Profile,
         looping: Bool = true,
+        maxOffset: CGFloat? = nil,
         onEnd: (() -> Void)? = nil
     ) {
         stop()
         self.scrollView = scrollView
         self.profile = profile
         self.isLooping = looping
+        self.boundedMaxOffset = maxOffset
         self.onEnd = onEnd
         passStartTimestamp = .nan
         baseOffsetY = scrollView.contentOffset.y
@@ -63,6 +71,7 @@ final class ScrollDriver {
         displayLink?.invalidate()
         displayLink = nil
         onEnd = nil
+        boundedMaxOffset = nil
     }
 
     deinit {
@@ -79,7 +88,8 @@ final class ScrollDriver {
             passStartTimestamp = link.timestamp
         }
 
-        let maxY = max(0, sv.contentSize.height - sv.bounds.height)
+        let contentMaxY = max(0, sv.contentSize.height - sv.bounds.height)
+        let maxY = boundedMaxOffset.map { min($0, contentMaxY) } ?? contentMaxY
         guard maxY > 0 else { return }
 
         let elapsed = link.timestamp - passStartTimestamp

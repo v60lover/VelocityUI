@@ -28,6 +28,11 @@ struct LaunchArguments {
         /// something image-shaped); thumbnailToImageTransitionCount documents how often the
         /// physics fallback engaged. See VelocityUI-1su.3.
         case maxFlingNoGray = "max-fling-no-gray"
+        /// The Phase 1 contract scenario (VelocityUI-ah8.4): warm-up pass over a
+        /// range bounded to fit inside the image cache, return to top, wait for
+        /// footprint quiesce, then measure the SAME range a second time — a
+        /// cache-hit replay where no decode is expected. This is what Q5 gates on.
+        case replay
     }
 
     var runtime: Runtime?
