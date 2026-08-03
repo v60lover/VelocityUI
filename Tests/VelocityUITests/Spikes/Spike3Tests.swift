@@ -135,45 +135,6 @@ final class Spike3Tests: XCTestCase {
         XCTAssertEqual(out.height, 24)
     }
 
-    // MARK: - Test 2c (VelocityUI-zgs Fix B2): pooled scratch buffer matches the unpooled path
-
-    private func rawBGRAPixels(_ image: CGImage) -> [UInt8] {
-        let w = image.width, h = image.height
-        var buffer = [UInt8](repeating: 0, count: w * h * 4)
-        guard let ctx = CGContext(
-            data: &buffer, width: w, height: h,
-            bitsPerComponent: 8, bytesPerRow: w * 4,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
-        ) else { return [] }
-        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
-        return buffer
-    }
-
-    func testPooledPathMatchesUnpooledOutputAcrossVaryingSizes() throws {
-        // A single-buffer pool forces reuse (and growth, then reuse-at-smaller-size) across
-        // the loop — exercises both the grow path and the must-zero-stale-bytes path (a
-        // pooled buffer previously held a *larger* image; leftover bytes must not leak into
-        // a subsequent smaller decode's clipped corners).
-        let pool = DecodeScratchBufferPool(capacity: 1)
-        let sizes: [CGSize] = [
-            CGSize(width: 40, height: 40),
-            CGSize(width: 90, height: 60),
-            CGSize(width: 20, height: 20),
-        ]
-        for size in sizes {
-            let raw = makeSyntheticRGBAImage(size: size, hue: 0.3)
-            let unpooled = try XCTUnwrap(normaliseAndRound(raw, targetSize: size, cornerRadius: 12))
-            let pooled = try XCTUnwrap(
-                normaliseAndRound(raw, targetSize: size, cornerRadius: 12, scale: 1, scratchPool: pool)
-            )
-            XCTAssertEqual(
-                rawBGRAPixels(unpooled), rawBGRAPixels(pooled),
-                "Pooled scratch-buffer path must produce pixel-identical output to the unpooled path at size \(size)"
-            )
-        }
-    }
-
     // MARK: - Test 3: Frame timing during programmatic scroll
 
     func testScrollFrameTiming() async throws {

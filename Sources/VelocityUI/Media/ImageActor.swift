@@ -101,7 +101,6 @@ public actor ImageActor {
     )
     private static let maxConcurrentDecodes = 3
     private let decodeSemaphore = AsyncSemaphore(value: ImageActor.maxConcurrentDecodes)
-    private let scratchPool = DecodeScratchBufferPool(capacity: ImageActor.maxConcurrentDecodes)
 
     /// Upper bound on the scale (screen points → pixels) used for both the cache key and the
     /// decode target size. Real display scale (e.g. 3x on Pro-class devices) is clamped down
@@ -553,9 +552,6 @@ public actor ImageActor {
         #endif
 
         let sem = decodeSemaphore
-        // Capture before the continuation (actor-isolated context) so the @Sendable
-        // closure doesn't retain self.
-        let capturedScratchPool = scratchPool
         #if canImport(XCTest)
         // Capture before the continuation (actor-isolated context) so the @Sendable
         // closure can call DispatchQueue.getSpecific without retaining self.
@@ -620,8 +616,7 @@ public actor ImageActor {
                     thumb,
                     targetSize: capturedSize,
                     cornerRadius: capturedRadius,
-                    scale: capturedScale,
-                    scratchPool: capturedScratchPool
+                    scale: capturedScale
                 )
                 #if DEBUG
                 let decodeMs = (CFAbsoluteTimeGetCurrent() - decodeStart) * 1_000

@@ -200,7 +200,7 @@ private nonisolated func makeCGImage(rgba8 pixels: [UInt8], width: Int, height: 
         bitsPerComponent: 8,
         bitsPerPixel: 32,
         bytesPerRow: width * 4,
-        space: CGColorSpaceCreateDeviceRGB(),
+        space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
         bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
         provider: provider,
         decode: nil,
