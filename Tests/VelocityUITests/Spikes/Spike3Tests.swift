@@ -250,6 +250,13 @@ final class Spike3Tests: XCTestCase {
 
     // MARK: - Test 4: Cross-item recycle clears stale content
 
+    /// Updated for VelocityUI-ksh's secondary fix: cross-item recycle used to remove every
+    /// sublayer (`sub.removeFromSuperlayer()` + `sublayers.removeAll()`), forcing the next
+    /// `applyLayout` to `CALayer()`-allocate a fresh sublayer per fragment (the "20/37 CALayer"
+    /// allocation smell from the bead's Instruments call tree). The fix clears
+    /// `contents`/`backgroundColor` on the EXISTING sublayer instead of removing it, so
+    /// `applyLayout`'s `if let existing = sublayers[fragment.id]` path can reuse it — same
+    /// privacy hard-cut (no stale pixel ever shown), zero CALayer allocation on cross-item mount.
     func testCrossItemRecycleClearsContent() {
         let size = CGSize(width: 200, height: 150)
         let raw = makeSyntheticRGBAImage(size: size, hue: 0.3)
@@ -272,12 +279,20 @@ final class Spike3Tests: XCTestCase {
         }
         XCTAssertNotNil(contentLayer.sublayers?.first?.contents,
             "Content should be set before recycle")
+        let sublayerIdentityBeforeRecycle = contentLayer.sublayers?.first.map(ObjectIdentifier.init)
 
-        // Cross-item recycle: sublayers removed, state reset
+        // Cross-item recycle: contents/background hard-cut, sublayer RETAINED (not removed)
         cell.prepareForReuse(for: AnyHashable("item-b"))
 
-        XCTAssertEqual(contentLayer.sublayers?.count ?? 0, 0,
-            "Sublayers must be removed after cross-item prepareForReuse")
+        XCTAssertEqual(contentLayer.sublayers?.count, 1,
+            "Sublayer must be RETAINED (not removed) after cross-item prepareForReuse — cleared "
+            + "in place so the next applyLayout mount needs zero fresh CALayer()")
+        XCTAssertEqual(contentLayer.sublayers?.first.map(ObjectIdentifier.init), sublayerIdentityBeforeRecycle,
+            "The retained sublayer must be the SAME CALayer instance, not a reallocation")
+        XCTAssertNil(contentLayer.sublayers?.first?.contents,
+            "Cross-item recycle must clear contents — no stale pixel from the old item")
+        XCTAssertNil(contentLayer.sublayers?.first?.backgroundColor,
+            "Cross-item recycle must clear backgroundColor")
         XCTAssertEqual(cell.currentItemID, AnyHashable("item-b"),
             "currentItemID must update to new item after cross-item recycle")
 

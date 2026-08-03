@@ -80,6 +80,26 @@ public func measureNode(
     }
 }
 
+/// Synchronous, allocation-free intrinsic height for a NEW/unmeasured row, computed straight
+/// from the NodeTable — no decode, no cache probe, no actor hop. Exists so Layer 3's
+/// `FeedScrollView.rebuildFrames` can seed `resolvedFrames` with the real image height instead
+/// of the flat `estimatedItemHeight` placeholder before the async pipeline (`measureNode`) ever
+/// runs, which otherwise leaves every unmeasured image row wrong until its first WorkingRange
+/// commit — see VelocityUI-ksh.
+///
+/// Mirrors the `.image` case of `measureNode` above EXACTLY (`width / aspectRatio`, falling back
+/// to `width` when `aspectRatio` is nil) so the two never disagree: once the pipeline measures
+/// the same table at the same width, `refineKnownFrames` sees a zero delta for these rows.
+///
+/// Only handles the single-image row shape Phase 1 image-only feeds produce (`table.nodes` has
+/// exactly one node and it's `.image`). Returns `nil` for text/mixed/container rows — those
+/// still need `measureNode`'s async, TextKit-backed measurement and keep using
+/// `estimatedItemHeight` as their pre-measure placeholder.
+func intrinsicHeight(for table: NodeTable, width: CGFloat) -> CGFloat? {
+    guard table.nodes.count == 1, case .image(let d) = table.nodes[0] else { return nil }
+    return d.aspectRatio.map { width / $0 } ?? width
+}
+
 // MARK: - Private helpers
 
 private enum StackAxis { case vertical, horizontal }

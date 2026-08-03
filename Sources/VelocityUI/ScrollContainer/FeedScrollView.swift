@@ -128,6 +128,14 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// Does NOT count the one-shot `onReachEnd` spawn — that fires at most once per page.
     private(set) var _taskSpawnCount: Int = 0
 
+    /// Branch counters for `AsyncFeed.itemsDiffer`'s buffer-identity fast path (case b, O(1))
+    /// vs the `Equatable` deep-comparison fallback (case c, O(n)). Incremented by `itemsDiffer`
+    /// itself (a different file in the same module — not `private(set)`, so it can assign here).
+    /// Used to verify the fast path is taken for structurally-identical, CoW-preserved items
+    /// arrays across repeated `updateUIView` calls, and never falls through to deep equality.
+    var _itemsDiffer_bufferHitCount: Int = 0
+    var _itemsDiffer_deepEqualCount: Int = 0
+
     var _tableCacheCount: Int { tableCache.count }
 
     /// Returns nil-entry count in WorkingRange for indices in [start, end).
@@ -168,6 +176,15 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// resolve inline. Should be 0 whenever LayoutCache is warm for all visible indices at
     /// mount time — the inline materialization path bypasses this bookkeeping entirely.
     var _pendingFragmentIndicesCount: Int { _pendingFragmentIndices.count }
+
+    /// Counts `dequeue(kind:)` calls that fell through to `RenderCell(kind:)` (a pool miss —
+    /// the sole `RenderCell` alloc site). Used by the VelocityUI-ksh regression test to verify
+    /// the cell pool CONVERGES after warm-up (miss count stops growing once the working-range
+    /// window has been filled once) instead of missing on ~90% of dequeues every frame.
+    private(set) var _dequeueAllocCount: Int = 0
+
+    /// Counts `dequeue(kind:)` calls served from `cellPools` (a pool hit — no allocation).
+    var _dequeueHitCount: Int = 0
     #endif
 
     // MARK: - Init
@@ -360,9 +377,17 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     // MARK: - Frame management
 
     /// Rebuilds `resolvedFrames` in the current `tables` order.
-    /// Heights are read from `oldFrames[s.prevIdx]` for each survivor (prevIdx, nextIdx) pair;
-    /// indices absent from `survivors` fall back to `estimatedItemHeight`.
-    /// Populates `estimatedIndices` for any index using the estimate.
+    /// Heights are read from `oldFrames[s.prevIdx]` for each survivor (prevIdx, nextIdx) pair.
+    /// Indices absent from `survivors` fall back to the synchronous `intrinsicHeight(for:width:)`
+    /// estimate (real `width / aspectRatio` for single-image rows — no decode, no cache probe),
+    /// and only to the flat `estimatedItemHeight` placeholder when intrinsic height can't be
+    /// computed (text/mixed/container rows that genuinely need async measurement). Without this,
+    /// every unmeasured image row seeds `resolvedFrames` with the flat estimate until the async
+    /// pipeline commits — under sustained fast scroll (no warm-up pass) that regime never ends,
+    /// so `visRange` churns every frame and the cell pool never converges. See VelocityUI-ksh.
+    /// Populates `estimatedIndices` for any index not sourced from a known survivor height —
+    /// both intrinsic- and placeholder-seeded rows still need `refineKnownFrames` to reconcile
+    /// against the real WorkingRange-committed layout once the pipeline measures them.
     private func rebuildFrames(oldFrames: [CGRect], survivors: [(prevIdx: Int, nextIdx: Int)]) {
         let w = lastLayoutWidth > 0 ? lastLayoutWidth : bounds.width
         let spacing = layoutSpacing
@@ -378,6 +403,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             let h: CGFloat
             if let known = knownHeight[i] {
                 h = known
+            } else if let intrinsic = intrinsicHeight(for: tables[i], width: w) {
+                h = intrinsic
+                estimatedIndices.insert(i)
             } else {
                 h = estimatedItemHeight
                 estimatedIndices.insert(i)
@@ -686,10 +714,16 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// in steady state the pool's backing store is unshared (refcount = 1).
     private func dequeue(kind: CellKind) -> RenderCell {
         guard var pool = cellPools.removeValue(forKey: kind), !pool.isEmpty else {
+            #if canImport(XCTest)
+            _dequeueAllocCount += 1
+            #endif
             return RenderCell(kind: kind)
         }
         let cell = pool.removeLast()
         if !pool.isEmpty { cellPools[kind] = pool }
+        #if canImport(XCTest)
+        _dequeueHitCount += 1
+        #endif
         return cell
     }
 

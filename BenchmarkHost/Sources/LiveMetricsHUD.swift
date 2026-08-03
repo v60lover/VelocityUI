@@ -17,6 +17,9 @@ final class LiveMetricsController {
     private let hudView: LiveMetricsHUDView
     private let window: PassthroughWindow
     private var refreshTimer: Timer?
+    /// Non-nil only when launched with `--touch-speed` > 1 — see LaunchArguments.touchSpeedMultiplier.
+    private let touchSpeedMultiplier: TouchSpeedMultiplier?
+    private weak var scrollView: UIScrollView?
 
     /// - Parameters:
     ///   - scrollView: the runtime's scroll view (velocity + sampling source).
@@ -31,6 +34,7 @@ final class LiveMetricsController {
         runtimeLabel: String
     ) {
         self.collector = LiveMetricsCollector(scrollView: scrollView, harness: harness)
+        self.scrollView = scrollView
 
         let targetFPS = scrollView.window?.windowScene?.screen.maximumFramesPerSecond ?? 60
         self.hudView = LiveMetricsHUDView(
@@ -44,6 +48,9 @@ final class LiveMetricsController {
         } else {
             self.window = PassthroughWindow(frame: UIScreen.main.bounds)
         }
+
+        let multiplier = LaunchArguments().touchSpeedMultiplier
+        self.touchSpeedMultiplier = multiplier > 1 ? TouchSpeedMultiplier(multiplier: CGFloat(multiplier)) : nil
     }
 
     func start() {
@@ -56,6 +63,10 @@ final class LiveMetricsController {
         window.isHidden = false
 
         collector.start()
+
+        if let touchSpeedMultiplier, let scrollView {
+            touchSpeedMultiplier.attach(to: scrollView)
+        }
 
         // 4 Hz — legible without contributing meaningful main-thread load. The
         // snapshot math runs over the rolling window, off the per-frame path.
@@ -72,6 +83,7 @@ final class LiveMetricsController {
     func stop() {
         refreshTimer?.invalidate()
         refreshTimer = nil
+        touchSpeedMultiplier?.detach()
         collector.stop()
         window.isHidden = true
         window.rootViewController = nil

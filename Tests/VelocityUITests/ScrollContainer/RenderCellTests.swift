@@ -247,6 +247,13 @@ final class RenderCellTests: XCTestCase {
 
     // MARK: - Test 7: prepareForReuse cross-item resets layer state (UX + privacy guarantee)
 
+    /// Updated for VelocityUI-ksh's secondary fix: cross-item recycle used to remove every
+    /// sublayer (`sub.removeFromSuperlayer()` + `sublayers.removeAll()`), forcing `applyLayout`
+    /// to `CALayer()`-allocate a fresh sublayer for every fragment on the very next mount — the
+    /// "20/37 CALayer" allocation smell from the bead's Instruments call tree. The fix instead
+    /// clears `contents`/`backgroundColor` on the EXISTING sublayer instances and keeps them in
+    /// the `sublayers` map, so `applyLayout`'s `if let existing = sublayers[fragment.id]` path
+    /// reuses them — zero CALayer allocation on cross-item mount, same privacy hard-cut.
     func testPrepareForReuseCrossItemResetsState() {
         let cell = makeCell()
 
@@ -266,12 +273,74 @@ final class RenderCellTests: XCTestCase {
         XCTAssertEqual(cl.opacity, 1)
         XCTAssertEqual(pl.opacity, 0)
 
+        let sublayerIdentitiesBefore = (cl.sublayers ?? []).map { ObjectIdentifier($0) }
+        XCTAssertEqual(sublayerIdentitiesBefore.count, 2, "Precondition: 2 sublayers before reuse")
+
         cell.prepareForReuse(for: AnyHashable("item-b"))  // different → cross-item
 
         XCTAssertEqual(cl.opacity, 0, "contentLayer must reset to 0 on cross-item reuse")
         XCTAssertEqual(pl.opacity, 1, "Placeholder must reset to 1 on cross-item reuse")
-        XCTAssertEqual(cl.sublayers?.count ?? 0, 0, "Sublayers must be removed on cross-item reuse")
+        XCTAssertEqual((cl.sublayers ?? []).map { ObjectIdentifier($0) }, sublayerIdentitiesBefore,
+            "Sublayers must be RETAINED (same CALayer instances) on cross-item reuse — cleared "
+            + "in place, not reallocated, so the next applyLayout mount needs zero fresh CALayer()")
+        for sub in cl.sublayers ?? [] {
+            XCTAssertNil(sub.contents, "Cross-item reuse must clear contents — no stale pixel from the old item")
+            XCTAssertNil(sub.backgroundColor, "Cross-item reuse must clear backgroundColor")
+        }
         XCTAssertEqual(cell.currentItemID, AnyHashable("item-b"), "currentItemID must update to new item")
+    }
+
+    // MARK: - Test 7b: Cross-item recycle with a DIFFERENT fragment id set does not orphan sublayers
+
+    /// Regression for a latent bug in VelocityUI-ksh's secondary fix (retain-and-clear cross-item
+    /// recycle): `applyLayout`'s prune only ran the id-diff when `sublayers.count > fragments.count`
+    /// (RenderCell.swift). `fragment.id` is POSITIONAL (== nodeIndex — see Fragment.swift), so a
+    /// cross-item recycle into a cell shape with an EQUAL-OR-LARGER, but DIFFERENT, id set never
+    /// triggered that count-based guard — e.g. recycling an image-only cell (ids {0}) into a
+    /// VStack{image,text} cell (ids {1,2}): count 1→2, so `1 > 2` is false, id 0's sublayer is
+    /// never removed (orphaned — leak + growing layer tree) while ids 1 and 2 allocate fresh
+    /// layers on top of it.
+    ///
+    /// The fix: `prepareForReuse`'s cross-item branch sets `needsSublayerReconcile`, forcing the
+    /// NEXT `applyLayout` to run the full id-diff prune unconditionally (not gated on count),
+    /// then clear the flag. This test asserts NO orphaned sublayer remains after exactly that
+    /// scenario — `contentLayer.sublayers` count and the old id (0) are gone, only ids {1, 2}
+    /// (the new item's exact fragment set) remain.
+    func testCrossItemRecycleWithDisjointFragmentIDsDoesNotOrphanSublayers() {
+        let cell = makeCell()
+
+        // Phase 1: mount an image-only shape (fragment id set {0}).
+        cell.prepareForReuse(for: AnyHashable("item-a"))
+        cell.applyLayout([imageFragment(id: 0, frame: CGRect(x: 0, y: 0, width: 320, height: 200))])
+
+        guard let cl = contentLayer(of: cell) else { XCTFail("contentLayer missing"); return }
+        XCTAssertEqual(cl.sublayers?.count, 1, "Precondition: 1 sublayer (id 0) after first mount")
+        let orphanCandidate = cl.sublayers?.first
+
+        // Phase 2: cross-item recycle into a DIFFERENT shape whose fragment id set is disjoint
+        // from {0} and whose count (2) is EQUAL-OR-LARGER than the retained count (1) — the
+        // exact shape the count-only fast path (`sublayers.count > fragments.count`) misses.
+        cell.prepareForReuse(for: AnyHashable("item-b"))
+        cell.applyLayout([
+            imageFragment(id: 1, frame: CGRect(x: 0, y: 0, width: 320, height: 100)),
+            geometryFragment(id: 2, frame: CGRect(x: 0, y: 100, width: 320, height: 100)),
+        ])
+
+        let subsAfter = cl.sublayers ?? []
+        XCTAssertEqual(subsAfter.count, 2,
+            "contentLayer must have exactly 2 sublayers (the new item's fragment count) — "
+            + "no orphaned leftover from the old id set")
+        XCTAssertFalse(subsAfter.contains { orphanCandidate === $0 },
+            "The old id-0 sublayer must be gone — retaining-and-clearing cross-item recycle must "
+            + "not orphan a sublayer whose id is absent from the new item's fragment set")
+
+        // The RenderCell's own bookkeeping (`sublayers` dict) must also be reconciled to the
+        // new item's exact id set — checked indirectly via applyContent routing: id 0 must no
+        // longer resolve to a sublayer (no-op, not a crash), while ids 1 and 2 do.
+        XCTAssertNil(cell.applyContent(id: 0, image: makeCGImage(), for: AnyHashable("item-b")),
+            "Stale id 0 must have no sublayer to route to after reconcile — applyContent no-ops")
+        XCTAssertNotNil(cell.applyContent(id: 1, image: makeCGImage(), for: AnyHashable("item-b")),
+            "id 1 (new item's image fragment) must resolve to a live sublayer")
     }
 
     // MARK: - Test 8: Cross-item reuse never flashes previous item's image

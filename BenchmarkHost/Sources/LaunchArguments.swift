@@ -49,6 +49,13 @@ struct LaunchArguments {
     /// pass, no self-terminate. Lets you jump straight into one runtime's LiveMetricsHUD
     /// for hand-scroll profiling. Ignored in the headless matrix (which never passes it).
     var liveHUD: Bool
+    /// Extra scroll speed multiplier applied on top of real finger movement
+    /// (`--touch-speed <N>`, e.g. 3 for 3x). 1 (the default) means no amplification.
+    /// Only the direct-drag portion is affected — momentum after the finger lifts
+    /// still decelerates at native release velocity. See TouchSpeedMultiplier /
+    /// VelocityUI-hbe item 5. Works in both `--live` and the plain manual/picker
+    /// flow, since both attach a LiveMetricsController.
+    var touchSpeedMultiplier: Double
 
     init() {
         let args = ProcessInfo.processInfo.arguments
@@ -60,6 +67,7 @@ struct LaunchArguments {
         measurementDuration = Self.value(for: "--duration", in: args).flatMap(TimeInterval.init) ?? 30
         prefetchWindow = Self.value(for: "--prefetch-window", in: args).flatMap(Int.init) ?? 10
         liveHUD = args.contains("--live")
+        touchSpeedMultiplier = Self.value(for: "--touch-speed", in: args).flatMap(Double.init) ?? 1.0
     }
 
     /// Explicit-value init for unit tests — does not read from ProcessInfo.
@@ -71,7 +79,8 @@ struct LaunchArguments {
         itemCount: Int = 100,
         measurementDuration: TimeInterval = 30,
         prefetchWindow: Int = 10,
-        liveHUD: Bool = false
+        liveHUD: Bool = false,
+        touchSpeedMultiplier: Double = 1.0
     ) {
         self.scenario = scenario
         self.velocityProfile = velocityProfile
@@ -81,6 +90,7 @@ struct LaunchArguments {
         self.measurementDuration = measurementDuration
         self.prefetchWindow = prefetchWindow
         self.liveHUD = liveHUD
+        self.touchSpeedMultiplier = touchSpeedMultiplier
     }
 
     private static func value(for flag: String, in args: [String]) -> String? {

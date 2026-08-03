@@ -140,7 +140,13 @@ public struct AsyncFeed<
                "AsyncFeed: reachEndThreshold > prefetchBehind — page-load trigger fires inside the evictable window.")
         #endif
 
-        let coordinator = context.coordinator
+        return buildUIView(coordinator: context.coordinator)
+    }
+
+    /// Shared body of `makeUIView(context:)`, factored out so it can be exercised without a
+    /// SwiftUI `Context` (which has no public initializer and cannot be constructed outside
+    /// SwiftUI's own runtime — see `_testMakeUIView(coordinator:)`).
+    private func buildUIView(coordinator: Coordinator) -> FeedScrollView<Item> {
         coordinator.cellBuilder = cellBuilder
         coordinator.onTap = onTap
         coordinator.onReachEnd = onReachEnd
@@ -177,7 +183,7 @@ public struct AsyncFeed<
                "AsyncFeed.prefetchWindow(behind:) is init-time only — mutating it requires a .id() rebuild.")
         #endif
 
-        guard itemsDiffer(uiView.items, items) else { return }
+        guard itemsDiffer(uiView.items, items, on: uiView) else { return }
 
         CATransaction.begin()
         if !shouldAnimate(context: context) {
@@ -305,16 +311,43 @@ public struct AsyncFeed<
     // extend here rather than adding CATransaction calls at other sites.
     private func shouldAnimate(context: Context) -> Bool { false }
 
-    private func itemsDiffer(_ a: [Item], _ b: [Item]) -> Bool {
+    private func itemsDiffer(_ a: [Item], _ b: [Item], on uiView: FeedScrollView<Item>) -> Bool {
         // (a) Count mismatch — O(1), catches "page appended" case.
         if a.count != b.count { return true }
         // (b) Buffer identity — O(1), catches CoW-preserved arrays.
         let sameBuffer = a.withUnsafeBufferPointer { ap in
             b.withUnsafeBufferPointer { bp in ap.baseAddress == bp.baseAddress }
         }
-        if sameBuffer { return false }
+        if sameBuffer {
+            #if canImport(XCTest)
+            uiView._itemsDiffer_bufferHitCount += 1
+            #endif
+            return false
+        }
         // (c) Deep equality — Item: Equatable required.
+        #if canImport(XCTest)
+        uiView._itemsDiffer_deepEqualCount += 1
+        #endif
         return a != b
     }
+
+    // MARK: - Test hooks
+
+    #if canImport(XCTest)
+    /// Test-only: exercises the same coordinator-wiring path as `makeUIView(context:)` without
+    /// requiring a SwiftUI `Context` (no public initializer; cannot be constructed in a unit
+    /// test host). Callers pass the same `Coordinator` instance across repeated calls to
+    /// simulate SwiftUI re-invoking `makeUIView` for one view identity — SwiftUI always supplies
+    /// the same coordinator via `context.coordinator` for the lifetime of that identity.
+    func _testMakeUIView(coordinator: Coordinator) -> FeedScrollView<Item> {
+        buildUIView(coordinator: coordinator)
+    }
+
+    /// Test-only: exercises `itemsDiffer` exactly as `updateUIView` does — comparing `uiView.items`
+    /// against this struct's `items` — without requiring a SwiftUI `Context`.
+    func _testItemsDiffer(uiView: FeedScrollView<Item>) -> Bool {
+        itemsDiffer(uiView.items, items, on: uiView)
+    }
+    #endif
 }
 #endif

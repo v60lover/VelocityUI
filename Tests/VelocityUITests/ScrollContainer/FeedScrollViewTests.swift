@@ -113,14 +113,18 @@ final class FeedScrollViewTests: XCTestCase {
 
     func testVisibleSetMatchesExpectedIndices() {
         let viewportHeight: CGFloat = 812
-        let feed = makeFeed(width: 375, height: viewportHeight)
+        let width: CGFloat = 375
+        let feed = makeFeed(width: width, height: viewportHeight)
 
-        // All items have the same estimated height so resolvedFrames are predictable.
+        // All items share aspectRatio 1.0, so every row's SYNCHRONOUS intrinsic height
+        // (width / aspectRatio — VelocityUI-ksh) is `width` itself, computed before any async
+        // pipeline commit. resolvedFrames are predictable from this, not from the flat
+        // estimatedItemHeight placeholder.
         feed.items = items(count: 50, aspectRatio: 1.0)
         feed.layoutSubviews()
 
-        // Use the feed's own public constants to avoid coupling.
-        let itemPlusSpacing = feed.estimatedItemHeight + feed.layoutSpacing
+        let intrinsicItemHeight = width  // width / aspectRatio(1.0)
+        let itemPlusSpacing = intrinsicItemHeight + feed.layoutSpacing
 
         XCTAssertGreaterThan(feed.layer.sublayers?.count ?? 0, 0,
             "Feed layer should have cell sublayers after first layout")
@@ -129,8 +133,8 @@ final class FeedScrollViewTests: XCTestCase {
         feed.contentOffset = CGPoint(x: 0, y: itemPlusSpacing + 1)
         feed.layoutSubviews()
 
-        // contentSize should reflect estimated heights.
-        let expectedContentHeight = CGFloat(50) * feed.estimatedItemHeight + CGFloat(49) * feed.layoutSpacing
+        // contentSize should reflect the synchronous intrinsic heights, not the flat estimate.
+        let expectedContentHeight = CGFloat(50) * intrinsicItemHeight + CGFloat(49) * feed.layoutSpacing
         XCTAssertEqual(feed.contentSize.height, expectedContentHeight, accuracy: 0.5)
     }
 
@@ -193,23 +197,43 @@ final class FeedScrollViewTests: XCTestCase {
         await fulfillment(of: [expSecond], timeout: 1.0)
     }
 
-    // MARK: - 6. Width change invalidates working range and resets estimated frames
+    // MARK: - 6. Width change invalidates working range and rebuilds frames from intrinsic height
 
-    func testWidthChangeResetsFramesToEstimated() async {
-        let feed = makeFeed(width: 375, height: 812)
-        feed.items = items(count: 10)
+    /// Pre-VelocityUI-ksh, every unmeasured row reset to the flat `estimatedItemHeight`
+    /// placeholder after a width change, so `contentSize.height` was width-INDEPENDENT (same
+    /// item count × same flat estimate, regardless of the new width). Post-fix, image rows
+    /// reset to their SYNCHRONOUS intrinsic height (`width / aspectRatio`), which correctly
+    /// DOES depend on the new width — that's the whole point of measuring real image geometry
+    /// instead of a placeholder. This test now asserts the new, width-dependent invariant.
+    func testWidthChangeResetsFramesToIntrinsicHeight() async {
+        let aspectRatio: CGFloat = 1.5
+        let itemCount = 10
+        let widthBefore: CGFloat = 375
+        let widthAfter: CGFloat = 667
+
+        let feed = makeFeed(width: widthBefore, height: 812)
+        feed.items = items(count: itemCount, aspectRatio: aspectRatio)
         feed.layoutSubviews()
 
-        let heightBefore = feed.contentSize.height
+        let expectedHeightBefore = CGFloat(itemCount) * (widthBefore / aspectRatio)
+            + CGFloat(itemCount - 1) * feed.layoutSpacing
+        XCTAssertEqual(feed.contentSize.height, expectedHeightBefore, accuracy: 1,
+            "First layout must size every row from its synchronous intrinsic height, "
+            + "not the flat estimatedItemHeight placeholder")
 
         // Simulate rotation: change bounds width.
-        feed.frame = CGRect(x: 0, y: 0, width: 667, height: 375)
+        feed.frame = CGRect(x: 0, y: 0, width: widthAfter, height: 375)
         feed.layoutSubviews()
 
-        // After width change, all frames re-estimated at estimatedItemHeight.
-        // contentSize.height should stay the same (same item count, same estimated height).
-        XCTAssertEqual(feed.contentSize.height, heightBefore, accuracy: 1,
-            "Estimated height sum must be the same after width change — only width changes")
+        // After width change, all frames are rebuilt at the NEW width's intrinsic height —
+        // contentSize.height must scale with width/aspectRatio, not stay constant.
+        let expectedHeightAfter = CGFloat(itemCount) * (widthAfter / aspectRatio)
+            + CGFloat(itemCount - 1) * feed.layoutSpacing
+        XCTAssertEqual(feed.contentSize.height, expectedHeightAfter, accuracy: 1,
+            "Intrinsic height sum must scale with the new width after a width change")
+        XCTAssertNotEqual(feed.contentSize.height, expectedHeightBefore, accuracy: 1,
+            "Width-dependent intrinsic height must actually change when width changes — "
+            + "a flat-estimate regression would leave this unchanged")
 
         // Layout cache invalidation is fire-and-forget async; no observable side-effect to assert.
     }
@@ -1493,10 +1517,12 @@ final class FeedScrollViewTests: XCTestCase {
             "AC(2)(3): zero cells should be left pending fragment delivery when LayoutCache "
             + "was warm for all visible indices at mount time — got \(feed._pendingFragmentIndicesCount)")
 
-        // Only indices actually mounted as visible cells are relevant — with the default
-        // estimatedItemHeight (300pt) + spacing (8pt), an 812pt viewport shows ~3 of the 5
-        // warmed items on the first pass; the rest mount lazily as the test scrolls (not
-        // exercised here). The invariant under test is about VISIBLE cells, not every item.
+        // Only indices actually mounted as visible cells are relevant — with aspectRatio 1.0 at
+        // width 375, each row's synchronous intrinsic height (VelocityUI-ksh) is 375pt + 8pt
+        // spacing, so an 812pt viewport shows ~3 of the 5 warmed items on the first pass (same
+        // count as the old flat 300pt estimate happened to produce); the rest mount lazily as
+        // the test scrolls (not exercised here). The invariant under test is about VISIBLE
+        // cells, not every item.
         let visibleIndices = (0..<testItems.count).filter { feed._cellLayer(at: $0) != nil }
         XCTAssertFalse(visibleIndices.isEmpty, "Precondition: at least one cell must be visible after layoutSubviews")
 
@@ -1524,7 +1550,8 @@ final class FeedScrollViewTests: XCTestCase {
     /// `Task { await cache.invalidateAll() }` — wiping LayoutCache entries `AsyncFeed.warmUp`
     /// populated for items beyond the very first visible screen, even though nothing about
     /// those entries was stale (same width, first-ever mount). Warms 30 items, mounts a
-    /// viewport that only fits the first at the default 300pt `estimatedItemHeight`, and
+    /// viewport that only fits the first at each row's synchronous intrinsic height
+    /// (VelocityUI-ksh — `width / aspectRatio`, always well over the 200pt viewport here), and
     /// asserts the off-screen item's warmed entry survives well past the first
     /// `layoutSubviews` call. The yield-drain loop gives any (buggy) async invalidation
     /// Task every chance to run — same idiom as this file's other async-completion polls
@@ -1555,8 +1582,9 @@ final class FeedScrollViewTests: XCTestCase {
         XCTAssertNotNil(env.layoutCache.cachedEntry(for: offscreenKey),
             "Precondition: warmUp populated the off-screen item's LayoutCache entry")
 
-        // Small viewport: only index 0 fits at the default 300pt estimatedItemHeight, so
-        // index 20 is off-screen and never inline-materialized by updateVisibleCells here.
+        // Small viewport: only index 0 fits at its synchronous intrinsic height (~288-375pt,
+        // width / aspectRatio ∈ [1.0, 1.3) here), so index 20 is off-screen and never
+        // inline-materialized by updateVisibleCells here.
         let feed = FeedScrollView<TestItem>(environment: env, frame: CGRect(x: 0, y: 0, width: width, height: 200))
         feed.cellBuilder = { item in builder(item) }
         feed.items = testItems
@@ -1690,6 +1718,125 @@ final class FeedScrollViewTests: XCTestCase {
             "No-placeholder-data cell must report .fromGrayPlaceholder")
         XCTAssertTrue(delivered.contains(.fromThumbnailPlaceholder),
             "BlurHash-placeholder cell must report .fromThumbnailPlaceholder")
+
+        await drainFeedWork(feed)
+    }
+
+    // MARK: - 26. Synchronous intrinsic height before any async pipeline commit (VelocityUI-ksh)
+
+    /// Root-cause regression for VelocityUI-ksh: `rebuildFrames` used to seed EVERY unmeasured
+    /// image row with the flat `estimatedItemHeight` placeholder (300pt) regardless of the
+    /// item's real aspect ratio, until the async pipeline (`measureNode`) committed a real
+    /// layout to WorkingRange. Under sustained fast scroll with no warm-up pass, that
+    /// wrong-estimate window never closes — `resolvedFrames` stays wrong, `visRange` churns
+    /// every frame, and the cell pool never converges (the bead's Instruments evidence: ~90%
+    /// `RenderCell.init` on every dequeue, post-ramp).
+    ///
+    /// Asserts that immediately after `feed.items = ...` and a single synchronous
+    /// `layoutSubviews()` — with NO `await` anywhere in this test, so the async pipeline Task
+    /// spawned by `notifyPipelineIfNeeded` cannot possibly have run yet — a tall row
+    /// (aspectRatio 0.5 → width/aspectRatio = 750pt at width 375) and a short row (aspectRatio
+    /// 2.0 → 187.5pt) already have their DISTINCT, CORRECT intrinsic heights, not the flat
+    /// 300pt estimate both would collapse to under the old behavior.
+    func testSynchronousIntrinsicHeightBeforePipelineCommit() {
+        let width: CGFloat = 375
+        let feed = makeFeed(width: width, height: 812)
+
+        let tallItem  = TestItem(id: 0, aspectRatio: 0.5)   // width / 0.5 = 750pt
+        let shortItem = TestItem(id: 1, aspectRatio: 2.0)   // width / 2.0 = 187.5pt
+        feed.items = [tallItem, shortItem]
+
+        // Single synchronous layoutSubviews — no yield, no async gap. resolvedFrames here can
+        // ONLY have come from rebuildFrames' synchronous per-row estimate.
+        feed.layoutSubviews()
+
+        guard let tallFrame = feed._debugResolvedFrame(at: 0),
+              let shortFrame = feed._debugResolvedFrame(at: 1) else {
+            XCTFail("Both rows must have a resolved frame after the first layoutSubviews")
+            return
+        }
+
+        XCTAssertEqual(tallFrame.height, width / 0.5, accuracy: 0.5,
+            "Tall row (aspectRatio 0.5) must get its synchronous intrinsic height (750pt), "
+            + "not the flat estimatedItemHeight placeholder (300pt)")
+        XCTAssertEqual(shortFrame.height, width / 2.0, accuracy: 0.5,
+            "Short row (aspectRatio 2.0) must get its synchronous intrinsic height (187.5pt), "
+            + "not the flat estimatedItemHeight placeholder (300pt)")
+        XCTAssertNotEqual(tallFrame.height, shortFrame.height, accuracy: 0.5,
+            "Rows with different aspect ratios must resolve to DISTINCT heights synchronously — "
+            + "a flat-estimate regression would collapse both to the same 300pt")
+
+        // contentSize must reflect the sum of the real intrinsic heights, not 2 × the flat estimate.
+        let expectedContentHeight = (width / 0.5) + (width / 2.0) + feed.layoutSpacing
+        XCTAssertEqual(feed.contentSize.height, expectedContentHeight, accuracy: 0.5,
+            "contentSize must be sized from the real intrinsic heights before any pipeline commit")
+    }
+
+    // MARK: - 27. Cell pool converges after warm-up, reconciling heterogeneous real heights
+
+    /// Regression for VelocityUI-ksh's core symptom. Pre-populates LayoutCache with REAL
+    /// heights spanning the bead's repro range (188pt-750pt at width 375) via `warmLayoutCache`
+    /// — the same mechanism `AsyncFeed.warmUp` uses — so `updateVisibleCells`' WR-miss/
+    /// LayoutCache-hit branch inline-materializes and calls `VerticalLayoutProvider.refineFrames`
+    /// SYNCHRONOUSLY the moment each row first mounts (no `Task`/pipeline timing involved at
+    /// all — this reconciliation is on the deterministic, single-threaded mount path).
+    ///
+    /// Pre-fix: every row starts at the flat `estimatedItemHeight` (300pt) placeholder, so the
+    /// FIRST mount of each heterogeneous row (188-750pt real height) triggers a large
+    /// refine-delta, shifting every not-yet-visited row's position by up to ~450pt. Because
+    /// `updateVisibleCells` computes `visRange`/`keepRange` ONCE at function entry (before the
+    /// mount loop's inline refinements land), the corrected geometry only takes effect on the
+    /// NEXT `layoutSubviews` call — which can pull a different, wider set of indices into view
+    /// than the steady-state window, forcing `RenderCell.init` beyond the pool's already-warm
+    /// size. Post-fix: `rebuildFrames`' synchronous intrinsic-height estimate already matches
+    /// the LayoutCache-warmed real height (same `width / aspectRatio` formula), so the inline
+    /// refine computes a zero delta and nothing shifts — the pool never needs more cells than
+    /// the working-range window.
+    func testCellPoolConvergesAfterWarmupWithHeterogeneousRealHeights() async {
+        let width: CGFloat = 375
+        let env = makeEnvironment()
+
+        // Cycles through aspect ratios spanning the bead's real repro range so consecutive
+        // rows have genuinely different intrinsic/real heights — not the uniform case, which
+        // would stay self-consistent even under the old flat-estimate behavior.
+        let ratios: [CGFloat] = [2.0, 0.5, 1.0, 1.5, 0.75]
+        let itemCount = 300
+        let testItems = (0..<itemCount).map { TestItem(id: $0, aspectRatio: ratios[$0 % ratios.count]) }
+        let builder: (TestItem) -> any RenderNode = { item in
+            AsyncImageNode(url: nil, aspectRatio: item.aspectRatio)
+        }
+        await warmLayoutCache(items: testItems, width: width, cellBuilder: builder, environment: env)
+
+        let feed = FeedScrollView<TestItem>(environment: env, frame: CGRect(x: 0, y: 0, width: width, height: 812))
+        feed.cellBuilder = { item in builder(item) }
+        feed.items = testItems
+
+        // Scroll down in small discrete steps, calling layoutSubviews() after each — fully
+        // synchronous, no yields, no Task timing. The LayoutCache-hit inline materialization
+        // reconciles each newly-visible row's real height the instant it mounts.
+        let stepSize: CGFloat = 80
+        let totalSteps = 150
+        let warmupSteps = 40  // generous margin over the working-range window (~17 cells:
+                               // prefetchBehindCount 3 + ~4 visible + prefetchAheadCount 10)
+
+        var allocCountAtWarmup: Int?
+        for step in 1...totalSteps {
+            feed.contentOffset = CGPoint(x: 0, y: CGFloat(step) * stepSize)
+            feed.layoutSubviews()
+            if step == warmupSteps {
+                allocCountAtWarmup = feed._dequeueAllocCount
+            }
+        }
+
+        guard let warmupCount = allocCountAtWarmup else {
+            XCTFail("warmupSteps must be <= totalSteps"); return
+        }
+
+        XCTAssertEqual(feed._dequeueAllocCount, warmupCount,
+            "RenderCell.init count must stop growing once the working-range window has been "
+            + "filled (\(warmupCount) allocations at step \(warmupSteps)) — got "
+            + "\(feed._dequeueAllocCount) after \(totalSteps) total steps. A growing count means "
+            + "the pool is churning instead of converging (VelocityUI-ksh).")
 
         await drainFeedWork(feed)
     }

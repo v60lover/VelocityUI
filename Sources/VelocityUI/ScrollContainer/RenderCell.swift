@@ -56,6 +56,16 @@ public final class RenderCell {
     /// Sticky true once all media has loaded for the current item; cleared on cross-item recycle.
     private var allMediaLoaded = false
     private(set) var currentItemID: AnyHashable?
+    /// Set by `prepareForReuse`'s cross-item branch; consumed by the next `applyLayout` call.
+    /// `fragment.id` is positional (== nodeIndex — see Fragment.swift), so a cross-item recycle
+    /// where the new item's fragment id SET differs from the retained one (not just its count)
+    /// cannot be caught by `applyLayout`'s cheap `sublayers.count > fragments.count` fast path —
+    /// e.g. recycling an image-only cell (ids {0}) into a VStack{image,text} cell (ids {1,2}):
+    /// count 1→2 so the fast-path guard is false, but id 0 is never in the incoming set and
+    /// would otherwise orphan its sublayer forever (leak + growing layer tree). When this flag
+    /// is true, `applyLayout` runs the full id-diff prune unconditionally instead of the fast
+    /// path, then clears the flag. See VelocityUI-ksh.
+    private var needsSublayerReconcile = false
 
     public init(kind: CellKind = .standard) {
         self.kind = kind
@@ -96,8 +106,23 @@ public final class RenderCell {
     /// Compares newItemID against currentItemID to pick the correct recycle mode, then rebinds.
     ///
     /// Same item  → cancel pending fetches only; contents stay (stale-until-replaced).
-    /// Cross item → cancel fetches + remove sublayers + reset opacities. Stale content from
-    ///              another item is a UX and privacy bug — always hard-cut on cross-item recycle.
+    /// Cross item → cancel fetches + hard-cut contents/background + reset opacities. Stale
+    ///              content from another item is a UX and privacy bug — always hard-cut on
+    ///              cross-item recycle.
+    ///
+    /// Cross-item recycle keeps the existing sublayer CALayer instances (and the `sublayers`
+    /// map) instead of removing them — only `contents`/`backgroundColor` are cleared, inside
+    /// the same disabled-actions transaction that resets the placeholder/content opacities, so
+    /// the hard privacy cut still lands atomically. `applyLayout`'s `if let existing =
+    /// sublayers[fragment.id]` path then reuses these cleared layers for the next item's
+    /// fragments instead of forcing a fresh `CALayer()` alloc on every cross-item mount — the
+    /// "20/37 CALayer" allocation smell from VelocityUI-ksh. Safe against stale PIXELS because
+    /// every fragment whose `sub.contents == nil` unconditionally re-derives its content in
+    /// `applyLayout` (sync paint, decode placeholder, or gray tint). It is NOT by itself safe
+    /// against stale/orphaned LAYERS when the new item's fragment id set differs from the
+    /// retained one (not just its count) — `needsSublayerReconcile` is set here so the next
+    /// `applyLayout` call runs the full id-diff prune unconditionally and reconciles the
+    /// `sublayers` map to the new item's exact id set.
     public func prepareForReuse(for newItemID: AnyHashable) {
         let isSameItem = (currentItemID == newItemID)
 
@@ -107,14 +132,17 @@ public final class RenderCell {
         if !isSameItem {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            for sub in sublayers.values { sub.removeFromSuperlayer() }
-            sublayers.removeAll(keepingCapacity: true)
+            for sub in sublayers.values {
+                sub.contents = nil
+                sub.backgroundColor = nil
+            }
             mediaFragmentIDs.removeAll(keepingCapacity: true)
             placeholderPaintedFragmentIDs.removeAll(keepingCapacity: true)
             placeholderLayer.opacity = 1
             contentLayer.opacity = 0
             CATransaction.commit()
             allMediaLoaded = false
+            needsSublayerReconcile = true
         }
 
         currentItemID = newItemID
@@ -152,9 +180,20 @@ public final class RenderCell {
             contentLayer.frame = cellBounds
         }
 
-        // Prune sublayers no longer in the fragment set. Fast path: skip if count matches
-        // (stable Phase-1 layouts never shrink per item). Full check done when count diverges.
-        if sublayers.count > fragments.count {
+        // Prune sublayers no longer in the fragment set.
+        //
+        // `needsSublayerReconcile` (set by prepareForReuse's cross-item branch): the retained
+        // sublayers came from a DIFFERENT item's fragment set, which `fragment.id` (positional —
+        // == nodeIndex, see Fragment.swift) may not overlap with at all, even when the count is
+        // equal or larger — e.g. an image-only cell (ids {0}) recycled into a
+        // VStack{image,text} cell (ids {1,2}): count 1→2, so the cheap count-based check below
+        // would never fire, orphaning id 0's sublayer (leak + growing layer tree) forever. Force
+        // the id-diff to run UNCONDITIONALLY in that case, then clear the flag — the one `Set`
+        // allocation lands only on cross-item mounts, which already allocate elsewhere.
+        //
+        // Same-item relayout (flag false): fast path, skip the id-diff entirely unless the
+        // count strictly shrinks (stable Phase-1 layouts never shrink per item otherwise).
+        if needsSublayerReconcile || sublayers.count > fragments.count {
             let incomingIDs = Set(fragments.map { $0.id })
             for id in sublayers.keys.filter({ !incomingIDs.contains($0) }) {
                 sublayers[id]?.removeFromSuperlayer()
@@ -162,6 +201,7 @@ public final class RenderCell {
                 mediaFragmentIDs.remove(id)
                 placeholderPaintedFragmentIDs.remove(id)
             }
+            needsSublayerReconcile = false
         }
 
         for fragment in fragments {
