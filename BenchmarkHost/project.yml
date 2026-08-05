@@ -30,8 +30,7 @@ packages:
     url: https://github.com/kean/Nuke.git
     from: 12.0.0
   Texture:
-    url: https://github.com/FluidGroup/Texture.git
-    exactVersion: 3.0.3
+    path: Vendor/Texture
   VelocityUI:
     path: ..
 

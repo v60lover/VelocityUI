@@ -22,4 +22,5 @@ implement.md
 BenchmarkHost/build/
 BenchmarkHost/results/
 BenchmarkHost/BenchmarkHost.xcodeproj/
+BenchmarkHost/Vendor/Texture/
 notes.txt

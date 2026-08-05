@@ -63,13 +63,13 @@ final class BenchmarkReporterCoreTests: XCTestCase {
         XCTAssertEqual(warmRow.hitchesPer1k_p50, 5)
     }
 
-    func test_aggregate_keepsIdiomaticAndSamePipelineSeparate() {
+    func test_aggregate_keepsIdiomaticAndRawSeparate() {
         let id1 = makeRecord(runtime: "velocityui", mode: "idiomatic", hitches: 5)
-        let sp1 = makeRecord(runtime: "velocityui", mode: "same-pipeline", hitches: 50)
+        let sp1 = makeRecord(runtime: "velocityui", mode: "raw", hitches: 50)
         let rows = Aggregator.aggregate([id1, sp1])
         XCTAssertEqual(rows.count, 2)
         XCTAssertEqual(rows.first { $0.mode == "idiomatic" }?.hitchesPer1k_p50, 5)
-        XCTAssertEqual(rows.first { $0.mode == "same-pipeline" }?.hitchesPer1k_p50, 50)
+        XCTAssertEqual(rows.first { $0.mode == "raw" }?.hitchesPer1k_p50, 50)
     }
 
     // MARK: - Honesty canary (bead success criterion)
@@ -364,9 +364,9 @@ final class BenchmarkReporterCoreTests: XCTestCase {
 
     func test_markdown_emitsAllFiveSections() {
         let r1 = makeRecord(runtime: "velocityui", mode: "idiomatic", scenario: "warm")
-        let r2 = makeRecord(runtime: "uicollectionview", mode: "same-pipeline", scenario: "cold")
+        let r2 = makeRecord(runtime: "uicollectionview", mode: "raw", scenario: "cold")
         let md = MarkdownWriter.render(Aggregator.aggregate([r1, r2]), stamp: "test")
-        XCTAssertTrue(md.contains("Q1 — Engine cost"))
+        XCTAssertTrue(md.contains("Q1 — Library advantage out of the box"))
         XCTAssertTrue(md.contains("Q2 — Real-world feel"))
         XCTAssertTrue(md.contains("Q3 — Cold launch"))
         XCTAssertTrue(md.contains("Q4 — Steady state"))

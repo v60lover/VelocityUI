@@ -24,7 +24,7 @@ DEVICE=""
 SIM_DEVICE=""
 RUNS=5
 RUNTIMES="swiftui-lazyvstack,swiftui-list,uicollectionview,texture,velocityui"
-MODES="idiomatic,same-pipeline"
+MODES="idiomatic,raw"
 PROFILES="slow,medium,max"
 SCENARIOS="cold,warm,replay"
 ITEMS=1000
@@ -48,7 +48,7 @@ Matrix overrides:
   --quick                 N=3, medium profile only, warm only, idiomatic only
   --runs N                Runs per combo (default 5)
   --runtimes CSV          Comma-separated runtime keys (default: all 5)
-  --modes CSV             idiomatic,same-pipeline (default: both)
+  --modes CSV             idiomatic,raw (default: both)
   --profiles CSV          slow,medium,max (default: all)
   --scenarios CSV         cold,warm,replay (default: all three; replay is the
                           Phase 1 contract scenario Q5 gates on — see VelocityUI-ah8.4)
@@ -148,9 +148,6 @@ build_app() {
 
   log "regenerating BenchmarkHost.xcodeproj (xcodegen)…"
   (cd "$HOST_DIR" && xcodegen generate --quiet)
-
-  log "patching Texture…"
-  "$SCRIPTS_DIR/patch-texture.sh" "$DERIVED_DATA"
 
   log "building BenchmarkHost (Release)…"
   local dest

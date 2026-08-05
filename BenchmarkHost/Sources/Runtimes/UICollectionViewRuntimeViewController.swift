@@ -19,7 +19,7 @@ final class UICollectionViewRuntimeViewController: UIViewController {
     private let prefetchWindow: Int
     private var dataSource: UICollectionViewDiffableDataSource<Int, BenchmarkItem.ID>!
     private var liveMetrics: LiveMetricsController?
-    // Prefetches into .benchmark pipeline's memory cache; no-op for same-pipeline mode.
+    // Prefetches into .benchmark pipeline's memory cache; no-op for raw mode.
     private lazy var prefetcher = ImagePrefetcher(pipeline: .benchmark)
     var collectionView: UICollectionView!
 

@@ -1,12 +1,12 @@
-// SamePipelineImageSource.swift
+// RawImageSource.swift
 
 import Foundation
 
 // Lazy-fetches image bytes from the item's URL and caches them in memory.
-// All runtimes share this single actor so they bypass their idiomatic loaders
+// All non-VelocityUI runtimes share this single actor so they bypass their idiomatic loaders
 // (Nuke pipeline, PINRemoteImage, LazyImage) and decode from the same raw data —
-// isolating render-path differences from image-pipeline differences.
-actor SamePipelineImageSource: ImageSource {
+// simulating a naive hand-rolled implementation with no resizing, caching, or coalescing.
+actor RawImageSource: ImageSource {
     private var cache: [Int: Data] = [:]
 
     func imageData(for item: BenchmarkItem) async -> Data? {

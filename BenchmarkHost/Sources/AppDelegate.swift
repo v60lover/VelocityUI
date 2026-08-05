@@ -20,8 +20,8 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         switch args.imageMode {
         case .idiomatic:
             imageSource = IdiomaticImageSource()
-        case .samePipeline:
-            imageSource = SamePipelineImageSource()
+        case .raw:
+            imageSource = RawImageSource()
         }
 
         let rootVC: UIViewController

@@ -2,7 +2,7 @@
 //
 // The Markdown report is the human-facing face. Grouped by question — not by
 // runtime, not by date — so the reader cannot accidentally average across
-// asymmetries that matter (cold vs warm, idiomatic vs same-pipeline, engine
+// asymmetries that matter (cold vs warm, idiomatic vs raw, engine
 // cost vs pipeline cost).
 //
 // Honesty rules baked into the emitter:
@@ -24,9 +24,9 @@ public enum MarkdownWriter {
         out += summary(rows)
         out += "\n---\n\n"
         out += questionSection(
-            "Q1 — Engine cost (same-pipeline)",
-            why: "Same image-source pipeline across runtimes. What's left is the engine's overhead.",
-            rows: rows.filter { $0.mode == "same-pipeline" }
+            "Q1 — Library advantage out of the box (raw)",
+            why: "Other runtimes get a naive raw image load (no resize/cache/coalescing); VelocityUI keeps its own decode pipeline. This is NOT engine-only cost — see VelocityUI-y83 for a true pipeline-held-constant comparison.",
+            rows: rows.filter { $0.mode == "raw" }
         )
         out += questionSection(
             "Q2 — Real-world feel (idiomatic)",

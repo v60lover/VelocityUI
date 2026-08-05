@@ -19,20 +19,22 @@ Re-run `xcodegen generate` any time a file is added, removed, or moved under
 `Sources/` or `Tests/` — the project picks it up automatically, no manual
 pbxproj editing. `scripts/run.sh` and `scripts/ci.sh` regenerate it for you.
 
-`scripts/run.sh` and `scripts/ci.sh` also patch Texture automatically as
-part of the build, via `scripts/patch-texture.sh` (Texture 3.0.3 has a
-`-Wparentheses` hard error under Clang 16 that must be patched after package
-resolution but before compilation). If you build the generated
-`.xcodeproj` directly in Xcode's GUI instead of going through those
-scripts, run `scripts/patch-texture.sh` once manually after packages
-resolve — otherwise the Texture compile will fail on `ASTextLayout.mm`.
+Texture is vendored locally at `Vendor/Texture` (gitignored — not checked
+in) with a one-line fix to `ASTextLayout.mm` (Texture 3.0.3 mangles an
+upstream ternary into a `-Wparentheses` hard error under Clang 16). Because
+the fix lives in the vendored source itself, every build path — `run.sh`,
+`ci.sh`, plain `xcodebuild`, or ⌘R in Xcode — works with no manual patch
+step. `Vendor/Texture` is a temporary local workaround until the fix is
+published to a hosted fork; see `VelocityUI-8dz`. If `Vendor/Texture` is
+missing (fresh checkout on another machine), see that issue for how to
+regenerate it.
 
 ## Launch Arguments
 
 | Argument | Values | Default |
 |----------|--------|---------|
 | `--runtime` | `velocityui`, `swiftui-lazyvstack`, `swiftui-list`, `uicollectionview`, `texture` | (picker shown) |
-| `--image-mode` | `idiomatic`, `same-pipeline` | `idiomatic` |
+| `--image-mode` | `idiomatic`, `raw` | `idiomatic` |
 | `--velocity-profile` | `slow`, `medium`, `max` | `medium` |
 | `--scenario` | `cold`, `warm`, `slow-scroll-first-three-items` | `warm` |
 | `--items` | integer | `100` |

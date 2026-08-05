@@ -13,7 +13,7 @@ struct LaunchArguments {
 
     enum ImageMode: String {
         case idiomatic
-        case samePipeline = "same-pipeline"
+        case raw
     }
 
     enum VelocityProfile: String {

@@ -5,9 +5,9 @@
 //   2 screenfuls lead (≈ 10 items at ~96pt cell height) to approximate
 //   VelocityUI's working range. Exact calibration requires a device run.
 // - Idiomatic mode: ASNetworkImageNode.url drives PINRemoteImage internally
-//   (Texture's native image pipeline). Same-pipeline mode: imageNode.image = UIImage(data:)
+//   (Texture's native image pipeline). Raw mode: imageNode.image = UIImage(data:)
 //   bypasses PINRemoteImage entirely — verify via zero "pinremoteimage-fetch"
-//   spans in Instruments during same-pipeline runs.
+//   spans in Instruments during raw-mode runs.
 // - imageModificationBlock bakes corner rounding at decode time (UIGraphicsImageRenderer),
 //   matching VelocityUI's CGContext clip approach — zero extra compositor pass.
 // - Texture's last meaningful release was ~2020. iOS 17 may affect safe area inset
@@ -100,6 +100,13 @@ private final class TextureBenchmarkCellNode: ASCellNode, @unchecked Sendable {
         self.isIdiomatic = isIdiomatic
         self.harness = harness
         super.init()
+
+        // Required: layoutSpecThatFits below determines subnode presence purely by
+        // its return value, so without this flag imageNode is computed into
+        // calculatedLayout but never actually attached as a subnode (no addSubnode:
+        // call anywhere) — cells report the correct content size and scroll, but
+        // nothing ever renders.
+        automaticallyManagesSubnodes = true
 
         imageNode.delegate = self
 

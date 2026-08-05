@@ -81,7 +81,7 @@ public struct BenchmarkReport: Codable, Sendable {
 /// carries `runtime` as a label.
 public struct RunRecord: Sendable {
     public let runtime: String        // CLI key, e.g. "velocityui"
-    public let mode: String           // "idiomatic" | "same-pipeline"
+    public let mode: String           // "idiomatic" | "raw"
     public let profile: String        // "slow" | "medium" | "max"
     public let scenario: String       // "cold" | "warm"
     public let runIndex: Int
