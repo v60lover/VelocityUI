@@ -4,6 +4,9 @@
 // - Texture pre-measures cells off-main via ASRangeController; configured to
 //   2 screenfuls lead (≈ 10 items at ~96pt cell height) to approximate
 //   VelocityUI's working range. Exact calibration requires a device run.
+//   Image fetch is driven from didEnterPreloadState (not didEnterVisibleState),
+//   so it actually benefits from that lead — the visible-state hook only
+//   fires once a cell is already on screen, defeating the prefetch buffer.
 // - Idiomatic mode: ASNetworkImageNode.url drives PINRemoteImage internally
 //   (Texture's native image pipeline). Raw mode: imageNode.image = UIImage(data:)
 //   bypasses PINRemoteImage entirely — verify via zero "pinremoteimage-fetch"
@@ -126,8 +129,8 @@ private final class TextureBenchmarkCellNode: ASCellNode, @unchecked Sendable {
         imageNode.backgroundColor = UIColor(hue: item.placeholderHue, saturation: 0.5, brightness: 0.8, alpha: 1)
     }
 
-    override func didEnterVisibleState() {
-        super.didEnterVisibleState()
+    override func didEnterPreloadState() {
+        super.didEnterPreloadState()
         MainActor.assumeIsolated {
             guard mountState == nil else { return }
             loadTask?.cancel()
@@ -136,6 +139,9 @@ private final class TextureBenchmarkCellNode: ASCellNode, @unchecked Sendable {
             mountState = harness?.beginCellMount()
 
             if isIdiomatic {
+                // ASNetworkImageNode fetches on its own once its interfaceState hits
+                // .preload — assigning the URL here (rather than at visible state)
+                // is what actually gives it the leadingBufferScreenfuls head start.
                 imageNode.url = item.imageURL
             } else {
                 let source = self.imageSource
@@ -160,8 +166,8 @@ private final class TextureBenchmarkCellNode: ASCellNode, @unchecked Sendable {
         }
     }
 
-    override func didExitVisibleState() {
-        super.didExitVisibleState()
+    override func didExitPreloadState() {
+        super.didExitPreloadState()
         MainActor.assumeIsolated {
             loadTask?.cancel()
             loadTask = nil
