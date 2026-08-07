@@ -40,7 +40,7 @@ targets:
         CURRENT_PROJECT_VERSION: 1
         MARKETING_VERSION: "1.0"
         GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CADisableMinimumFrameDuration: YES
+        INFOPLIST_KEY_CADisableMinimumFrameDurationOnPhone: YES
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: NO
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         SWIFT_EMIT_LOC_STRINGS: YES

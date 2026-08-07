@@ -709,18 +709,18 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
     /// Returns a cell from the pool, or allocates a new one.
     ///
-    /// Uses `removeValue(forKey:)` to take sole ownership of the array before
-    /// calling `removeLast()`. CoW triggers only on the first dequeue from a new pool;
-    /// in steady state the pool's backing store is unshared (refcount = 1).
+    /// `cellPools[kind]?.popLast()` mutates the array in place through the dictionary's
+    /// `_modify` accessor — the key is never removed, so a hit never touches the
+    /// dictionary's hash table (no rehash/resize). See VelocityUI-9lq: the previous
+    /// `removeValue(forKey:)`-then-conditionally-reinsert shape churned the dictionary
+    /// backing store (`_NativeDictionary.setValue -> _copyOrMoveAndResize`) every recycle.
     private func dequeue(kind: CellKind) -> RenderCell {
-        guard var pool = cellPools.removeValue(forKey: kind), !pool.isEmpty else {
+        guard let cell = cellPools[kind]?.popLast() else {
             #if canImport(XCTest)
             _dequeueAllocCount += 1
             #endif
             return RenderCell(kind: kind)
         }
-        let cell = pool.removeLast()
-        if !pool.isEmpty { cellPools[kind] = pool }
         #if canImport(XCTest)
         _dequeueHitCount += 1
         #endif
@@ -729,13 +729,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
     /// Returns a cell to its kind's pool.
     ///
-    /// `removeValue(forKey:)` takes sole ownership so `append` is in-place
-    /// when the array has spare capacity (common case after steady-state warm-up).
+    /// `subscript(_:default:)` mutates the array in place through the dictionary's
+    /// `_modify` accessor, without ever removing/reinserting the key. See
+    /// `dequeue(kind:)`'s docstring — same VelocityUI-9lq fix, symmetric shape.
     private func returnToPool(_ cell: RenderCell) {
         cell.cancelPendingMedia()
-        var pool = cellPools.removeValue(forKey: cell.kind) ?? []
-        pool.append(cell)
-        cellPools[cell.kind] = pool
+        cellPools[cell.kind, default: []].append(cell)
     }
 
     // MARK: - Media pipeline

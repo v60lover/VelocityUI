@@ -1840,5 +1840,73 @@ final class FeedScrollViewTests: XCTestCase {
 
         await drainFeedWork(feed)
     }
+
+    // MARK: - 28. Cell pool round-trips instance identity through dequeue/returnToPool (VelocityUI-9lq)
+
+    /// Regression for VelocityUI-9lq's `dequeue`/`returnToPool` rewrite: both moved from
+    /// `removeValue(forKey:)`-then-conditionally-reinsert to `_modify`-based in-place mutation
+    /// (`cellPools[kind]?.popLast()` / `cellPools[kind, default: []].append`) to stop the
+    /// dictionary from being fully emptied and reinserted into on every single recycle
+    /// (Instruments showed this as `_NativeDictionary.setValue -> _copyOrMoveAndResize`
+    /// persistent allocations under `returnToPool`). A typo or wrong-accessor regression in
+    /// that rewrite would either silently stop finding pooled cells (pool hit rate collapses,
+    /// `RenderCell.init` fires every dequeue) or hand back a wrong/duplicate instance — this
+    /// test asserts neither happens by tracking every distinct `CALayer` identity mounted
+    /// across sustained recycling: it must plateau near the working-range window size, not
+    /// grow toward `itemCount`.
+    ///
+    /// Out of scope: the underlying "zero heap bytes" claim is only observable via Instruments
+    /// (see VelocityUI-9lq's BenchmarkHost repro) — XCTest has no hook onto Dictionary's
+    /// internal rehash path, so this test verifies the black-box contract (identity +
+    /// convergence) that would break if the `_modify` rewrite were wrong, not the byte count
+    /// itself. Same honesty boundary VelocityUI-ksh's regression test already drew.
+    func testCellPoolRoundTripsInstanceIdentityAfterDictAccessRefactor() async {
+        let width: CGFloat = 375
+        let env = makeEnvironment()
+        let itemCount = 200
+        let testItems = (0..<itemCount).map { TestItem(id: $0, aspectRatio: 1.0) }
+        let builder: (TestItem) -> any RenderNode = { item in
+            AsyncImageNode(url: nil, aspectRatio: item.aspectRatio)
+        }
+        await warmLayoutCache(items: testItems, width: width, cellBuilder: builder, environment: env)
+
+        let feed = FeedScrollView<TestItem>(environment: env, frame: CGRect(x: 0, y: 0, width: width, height: 812))
+        feed.cellBuilder = { item in builder(item) }
+        feed.items = testItems
+
+        var seenLayers = Set<ObjectIdentifier>()
+        let stepSize: CGFloat = 200
+        let totalSteps = 80
+        let warmupSteps = 20
+
+        var hitCountAtWarmup: Int?
+        for step in 1...totalSteps {
+            feed.contentOffset = CGPoint(x: 0, y: CGFloat(step) * stepSize)
+            feed.layoutSubviews()
+            for index in 0..<itemCount {
+                if let layer = feed._cellLayer(at: index) {
+                    seenLayers.insert(ObjectIdentifier(layer))
+                }
+            }
+            if step == warmupSteps {
+                hitCountAtWarmup = feed._dequeueHitCount
+            }
+        }
+
+        guard let warmupHits = hitCountAtWarmup else {
+            XCTFail("warmupSteps must be <= totalSteps"); return
+        }
+
+        XCTAssertGreaterThan(feed._dequeueHitCount, warmupHits,
+            "Pool hits must keep accumulating past warm-up — a broken _modify-based lookup "
+            + "would silently stop finding pooled cells and fall through to RenderCell.init "
+            + "on every dequeue instead.")
+        XCTAssertLessThan(seenLayers.count, itemCount / 4,
+            "Distinct CALayer identities observed across \(totalSteps) recycle steps must stay "
+            + "far below itemCount (\(itemCount)) — layer identities must repeat as cells are "
+            + "recycled through the pool via dequeue/returnToPool, not minted fresh per mount.")
+
+        await drainFeedWork(feed)
+    }
 }
 #endif

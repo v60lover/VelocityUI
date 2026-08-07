@@ -521,8 +521,8 @@ The dependency-ordered work, tracked in beads (`bd ready` for current state):
                        ┌─ flatten(): tree → NodeTable        (b52)
    DSL boundary ───────┤
                        └─ Render fragments in ResolvedLayout (8gz)
-                                  │
-   Pipeline ────────── RenderPipeline v2 + LayoutCache       (aew, c71)
+                                      │
+       Pipeline ────────── RenderPipeline v2 + LayoutCache       (aew, c71)
                                   │
    Container ───────── FeedScrollView + RenderCell v2        (23u, 0kr)
                        Vertical layout provider              (hl2)
