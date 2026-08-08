@@ -168,6 +168,13 @@ final class FlattenTests: XCTestCase {
         XCTAssertEqual(d.blurHash, "L6PZfSi_.AyE_3t7t7R**0o#DgR4")
     }
 
+    @MainActor func testFlatten_asyncImageNode_mapsCustomPlaceholderPayload() {
+        let node = AsyncImageNode(url: nil, aspectRatio: 1.0).placeholder(custom: "dominant-color:#ff0000")
+        let table = flatten(VStackNode { node }, itemID: "i")
+        guard case .image(let d) = table.nodes[1] else { XCTFail(); return }
+        XCTAssertEqual(d.customPlaceholderPayload, AnyPlaceholderPayload("dominant-color:#ff0000"))
+    }
+
     @MainActor func testFlatten_textNode_mapsAllFields() {
         let node = TextNode("abc", font: VFontDescriptor(size: 20, weight: 700),
                             color: .white, lineLimit: 3, lineBreakMode: .byTruncatingTail)

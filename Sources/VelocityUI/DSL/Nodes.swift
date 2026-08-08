@@ -238,6 +238,11 @@ public struct AsyncImageNode: RenderNode {
     /// fallback first paint when `thumbnailData` is nil. Appearance-only — never
     /// affects layout geometry.
     public let blurHash: String?
+    /// Consumer-supplied placeholder payload for a custom `PlaceholderRenderer`, used as
+    /// the last fallback tier when `thumbnailData` and `blurHash` are both nil or fail to
+    /// decode. Appearance-only — never affects layout geometry. See
+    /// `AsyncImageNode.placeholder(custom:)` and `PlaceholderRenderer`.
+    public let customPlaceholderPayload: AnyPlaceholderPayload?
 
     public init(url: URL?, aspectRatio: CGFloat? = nil, contentMode: VContentMode = .fit) {
         self.url = url
@@ -246,6 +251,7 @@ public struct AsyncImageNode: RenderNode {
         self.cornerRadius = 0
         self.thumbnailData = nil
         self.blurHash = nil
+        self.customPlaceholderPayload = nil
     }
 
     private init(
@@ -254,7 +260,8 @@ public struct AsyncImageNode: RenderNode {
         contentMode: VContentMode,
         cornerRadius: CGFloat,
         thumbnailData: Data?,
-        blurHash: String?
+        blurHash: String?,
+        customPlaceholderPayload: AnyPlaceholderPayload?
     ) {
         self.url = url
         self.aspectRatio = aspectRatio
@@ -262,6 +269,7 @@ public struct AsyncImageNode: RenderNode {
         self.cornerRadius = cornerRadius
         self.thumbnailData = thumbnailData
         self.blurHash = blurHash
+        self.customPlaceholderPayload = customPlaceholderPayload
     }
 
     /// layoutHash covers url, aspectRatio, and contentMode.
@@ -276,7 +284,7 @@ public struct AsyncImageNode: RenderNode {
         return h.finalize()
     }
 
-    /// appearanceHash covers cornerRadius, thumbnailData, and blurHash.
+    /// appearanceHash covers cornerRadius, thumbnailData, blurHash, and customPlaceholderPayload.
     /// Note: changing cornerRadius triggers a re-decode of the image (rounding happens
     /// at decode time via CGContext clip), so the cost is higher than a typical appearance update.
     public var appearanceHash: Int {
@@ -284,20 +292,21 @@ public struct AsyncImageNode: RenderNode {
         h.combine(cornerRadius)
         h.combine(thumbnailData)
         h.combine(blurHash)
+        h.combine(customPlaceholderPayload)
         return h.finalize()
     }
 
     public func cornerRadius(_ radius: CGFloat) -> AsyncImageNode {
         AsyncImageNode(
             url: url, aspectRatio: aspectRatio, contentMode: contentMode, cornerRadius: radius,
-            thumbnailData: thumbnailData, blurHash: blurHash
+            thumbnailData: thumbnailData, blurHash: blurHash, customPlaceholderPayload: customPlaceholderPayload
         )
     }
 
     public func aspectRatio(_ ratio: CGFloat) -> AsyncImageNode {
         AsyncImageNode(
             url: url, aspectRatio: ratio, contentMode: contentMode, cornerRadius: cornerRadius,
-            thumbnailData: thumbnailData, blurHash: blurHash
+            thumbnailData: thumbnailData, blurHash: blurHash, customPlaceholderPayload: customPlaceholderPayload
         )
     }
 
@@ -306,7 +315,7 @@ public struct AsyncImageNode: RenderNode {
     public func placeholder(thumbnail: Data?) -> AsyncImageNode {
         AsyncImageNode(
             url: url, aspectRatio: aspectRatio, contentMode: contentMode, cornerRadius: cornerRadius,
-            thumbnailData: thumbnail, blurHash: blurHash
+            thumbnailData: thumbnail, blurHash: blurHash, customPlaceholderPayload: customPlaceholderPayload
         )
     }
 
@@ -314,7 +323,44 @@ public struct AsyncImageNode: RenderNode {
     public func placeholder(blurHash: String?) -> AsyncImageNode {
         AsyncImageNode(
             url: url, aspectRatio: aspectRatio, contentMode: contentMode, cornerRadius: cornerRadius,
-            thumbnailData: thumbnailData, blurHash: blurHash
+            thumbnailData: thumbnailData, blurHash: blurHash, customPlaceholderPayload: customPlaceholderPayload
+        )
+    }
+
+    /// Sets a consumer-defined placeholder payload, tried when `thumbnailData` and
+    /// `blurHash` are both nil or fail to decode. Interpreted only by a custom
+    /// `PlaceholderRenderer` injected via `RenderEnvironment` — the built-in
+    /// `DefaultPlaceholderRenderer` ignores it (falls through to the gray tint).
+    ///
+    /// `payload` must be `Hashable & Sendable` so it folds into `appearanceHash` (changing
+    /// it triggers a repaint) and can safely cross into the render pipeline.
+    ///
+    /// ## Read before using — your renderer's `render(...)` runs on the scroll path
+    /// The `PlaceholderRenderer` you inject to interpret this payload runs SYNCHRONOUSLY on
+    /// the MainActor, inline in the cell-bind scroll path — never off-main, never awaited.
+    /// Keep whatever this payload describes CHEAP to render: match the built-ins' p99 < 500us
+    /// budget, and produce output no larger than the built-in placeholder bound (32px) since
+    /// it's hardware-scaled up to the fragment's real size regardless. A solid color or tiny
+    /// pre-shrunk thumbnail is the intended shape; a full-resolution decode inside your
+    /// renderer is an anti-pattern that will drop scroll frames. See `PlaceholderRenderer`'s
+    /// docstring for the full contract.
+    public func placeholder<T: Hashable & Sendable>(custom payload: T?) -> AsyncImageNode {
+        AsyncImageNode(
+            url: url, aspectRatio: aspectRatio, contentMode: contentMode, cornerRadius: cornerRadius,
+            thumbnailData: thumbnailData, blurHash: blurHash,
+            customPlaceholderPayload: payload.map(AnyPlaceholderPayload.init)
+        )
+    }
+
+    /// Clears (or sets from an already-boxed value) the custom placeholder payload. The
+    /// generic `placeholder<T>(custom:)` overload can't infer `T` from a bare `nil` literal
+    /// (`.placeholder(custom: nil)` won't compile); this overload exists so clearing it
+    /// doesn't require a spelled-out `Optional<T>.none`.
+    public func placeholder(custom payload: AnyPlaceholderPayload?) -> AsyncImageNode {
+        AsyncImageNode(
+            url: url, aspectRatio: aspectRatio, contentMode: contentMode, cornerRadius: cornerRadius,
+            thumbnailData: thumbnailData, blurHash: blurHash,
+            customPlaceholderPayload: payload
         )
     }
 }

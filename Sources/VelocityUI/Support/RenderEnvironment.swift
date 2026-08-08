@@ -21,6 +21,13 @@ public final class RenderEnvironment: Sendable {
     public let videoController: VideoController
     public let videoPreparation: VideoPreparationActor
 
+    /// Produces a fragment's first-paint image before its real image has decoded. Defaults
+    /// to `DefaultPlaceholderRenderer` (thumbnail/BlurHash, VelocityUI's original behavior) —
+    /// inject a different `PlaceholderRenderer` to plug in a custom first-paint strategy. See
+    /// `PlaceholderRenderer`'s docstring for the synchronous MainActor contract every
+    /// implementation must honor.
+    public let placeholderRenderer: any PlaceholderRenderer
+
     /// Fires after each successful async `RenderCell.applyContent` delivery, carrying which
     /// placeholder path it replaced. Routes benchmark/debug instrumentation through the
     /// composition root instead of `#if DEBUG` hooks on library types — those compile into
@@ -50,6 +57,7 @@ public final class RenderEnvironment: Sendable {
         gifActor: GIFActor,
         videoController: VideoController,
         videoPreparation: VideoPreparationActor,
+        placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer(),
         contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil
     ) {
         precondition(
@@ -67,6 +75,7 @@ public final class RenderEnvironment: Sendable {
         self.gifActor = gifActor
         self.videoController = videoController
         self.videoPreparation = videoPreparation
+        self.placeholderRenderer = placeholderRenderer
         self.contentDeliveryObserver = contentDeliveryObserver
     }
 
@@ -91,6 +100,7 @@ public final class RenderEnvironment: Sendable {
         gifActor: GIFActor = .init(),
         maxAttached: Int = 3,
         decodeScaleCeiling: CGFloat = 2.0,
+        placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer(),
         contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil
     ) {
         let dc = DimensionCache(session: session)
@@ -103,6 +113,7 @@ public final class RenderEnvironment: Sendable {
             gifActor: gifActor,
             videoController: VideoController(videoPreparation: videoPrep, maxAttached: maxAttached),
             videoPreparation: videoPrep,
+            placeholderRenderer: placeholderRenderer,
             contentDeliveryObserver: contentDeliveryObserver
         )
     }

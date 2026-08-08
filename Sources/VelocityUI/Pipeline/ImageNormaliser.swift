@@ -8,7 +8,10 @@ import Foundation
 /// format) and optionally clips to a rounded rect — all in a single CGContext blit.
 ///
 /// Called off-main on the decode queue. `scale` must be passed from the @MainActor
-/// call site; UIScreen.main is not safe to access off main.
+/// call site; UIScreen.main is not safe to access off main. A custom `PlaceholderRenderer`
+/// may also call this synchronously on MainActor (`scale: 1` — placeholders decode at a
+/// fixed small pixel size, not screen scale) to satisfy its BGRA8888/rounding contract
+/// instead of re-implementing the blit.
 ///
 /// - cornerRadius = 0: format normalisation only (no clip path).
 /// - Returns nil only if CGContext allocation fails (OOM).

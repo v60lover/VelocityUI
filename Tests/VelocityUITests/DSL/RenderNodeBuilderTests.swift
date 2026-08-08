@@ -236,6 +236,24 @@ struct NodeHashTests {
         #expect(a.appearanceHash != b.appearanceHash)
     }
 
+    @Test("AsyncImageNode: custom placeholder payload change perturbs appearanceHash only")
+    func imageCustomPlaceholderPerturbsAppearanceOnly() {
+        let url = URL(string: "https://example.com/img.jpg")!
+        let a = AsyncImageNode(url: url).placeholder(custom: "dominant-red")
+        let b = AsyncImageNode(url: url).placeholder(custom: "dominant-blue")
+        #expect(a.layoutHash == b.layoutHash)
+        #expect(a.appearanceHash != b.appearanceHash)
+    }
+
+    @Test("AsyncImageNode: placeholder(custom: nil) clears the custom payload")
+    func imageCustomPlaceholderNilClears() {
+        let url = URL(string: "https://example.com/img.jpg")!
+        let withPayload = AsyncImageNode(url: url).placeholder(custom: "dominant-red")
+        let cleared = withPayload.placeholder(custom: nil)  // resolves to the non-generic overload
+        #expect(cleared.customPlaceholderPayload == nil)
+        #expect(withPayload.appearanceHash != cleared.appearanceHash)
+    }
+
     // MARK: VStackNode hash rules
 
     @Test("VStackNode: alignment change perturbs layoutHash")

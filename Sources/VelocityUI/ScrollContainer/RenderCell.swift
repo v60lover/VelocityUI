@@ -46,6 +46,12 @@ public final class RenderCell {
     /// Set at init; stored as let so future per-kind pools can dispatch on this value.
     public let kind: CellKind
 
+    /// Produces each image fragment's first-paint placeholder. Defaults to
+    /// `DefaultPlaceholderRenderer` (this cell's original thumbnail/BlurHash behavior).
+    /// Callers that own a `RenderEnvironment` should pass `environment.placeholderRenderer`
+    /// so cell and environment agree on first-paint strategy.
+    private let placeholderRenderer: any PlaceholderRenderer
+
     private var sublayers: [Int: CALayer] = [:]
     private var mediaFragmentIDs: Set<Int> = []
     /// Fragment ids whose sublayer currently shows a decode-guaranteed thumbnail/BlurHash
@@ -67,8 +73,9 @@ public final class RenderCell {
     /// path, then clears the flag. See VelocityUI-ksh.
     private var needsSublayerReconcile = false
 
-    public init(kind: CellKind = .standard) {
+    public init(kind: CellKind = .standard, placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer()) {
         self.kind = kind
+        self.placeholderRenderer = placeholderRenderer
         let gradient = CAGradientLayer()
         gradient.colors = [UIColor.systemGray5.cgColor, UIColor.systemGray6.cgColor]
         gradient.startPoint = CGPoint(x: 0, y: 0)
@@ -380,22 +387,29 @@ public final class RenderCell {
 
     // MARK: - Private
 
-    /// Decodes a fragment's thumbnail/BlurHash into a first-paint placeholder image.
-    /// Thumbnail takes precedence over BlurHash when both are set. Runs synchronously on
-    /// MainActor — callers must only invoke this when `sub.contents == nil` (the gate in
-    /// applyLayout already enforces a decode-once-per-fragment-lifetime budget).
-    /// Neither decode path needs a screen-scale parameter — both are bounded to a small
-    /// fixed pixel size independent of `targetSize`/scale; see `placeholderMaxPixelSize`.
+    /// Renders a fragment's first-paint placeholder via `placeholderRenderer`, trying
+    /// thumbnail, then BlurHash, then a consumer's custom payload, in that order — thumbnail
+    /// takes precedence over BlurHash over custom when more than one is set. Runs
+    /// synchronously on MainActor — callers must only invoke this when `sub.contents == nil`
+    /// (the gate in applyLayout already enforces a decode-once-per-fragment-lifetime budget).
+    /// See `PlaceholderRenderer`'s docstring for the frame-budget contract every renderer
+    /// (including the default) must honor.
     private func decodePlaceholder(_ descriptor: ImageDescriptor, targetSize: CGSize) -> CGImage? {
         if let data = descriptor.thumbnailData,
-           let image = decodeThumbnailPlaceholder(
-               data, targetSize: targetSize, cornerRadius: descriptor.cornerRadius
+           let image = placeholderRenderer.render(
+               .thumbnail(data), targetSize: targetSize, cornerRadius: descriptor.cornerRadius
            ) {
             return image
         }
         if let hash = descriptor.blurHash,
-           let image = decodeBlurHashPlaceholder(
-               hash, targetSize: targetSize, cornerRadius: descriptor.cornerRadius
+           let image = placeholderRenderer.render(
+               .blurHash(hash), targetSize: targetSize, cornerRadius: descriptor.cornerRadius
+           ) {
+            return image
+        }
+        if let payload = descriptor.customPlaceholderPayload,
+           let image = placeholderRenderer.render(
+               .custom(payload), targetSize: targetSize, cornerRadius: descriptor.cornerRadius
            ) {
             return image
         }

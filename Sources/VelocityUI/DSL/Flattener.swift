@@ -48,7 +48,8 @@ public func flatten<ID: Hashable & Sendable>(_ root: any RenderNode, itemID: ID)
                 url: n.url, aspectRatio: n.aspectRatio,
                 contentMode: n.contentMode.rawValue, cornerRadius: n.cornerRadius,
                 layoutHash: n.layoutHash, appearanceHash: n.appearanceHash,
-                thumbnailData: n.thumbnailData, blurHash: n.blurHash)))
+                thumbnailData: n.thumbnailData, blurHash: n.blurHash,
+                customPlaceholderPayload: n.customPlaceholderPayload)))
         default:
             // GIF / Video / Hosting DSL nodes are Phase 3–4; add a case here when they land.
             // Unknown user-defined RenderNode types are not supported in Phase 1 — use RenderView.

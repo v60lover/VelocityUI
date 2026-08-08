@@ -98,6 +98,11 @@ public struct ImageDescriptor: Sendable {
     /// Compact BlurHash string, decoded when `thumbnailData` is nil.
     /// See AsyncImageNode.placeholder(blurHash:).
     public let blurHash: String?
+    /// Consumer-supplied placeholder payload, tried when both `thumbnailData` and
+    /// `blurHash` are nil or fail to decode. Only a custom `PlaceholderRenderer` injected
+    /// via `RenderEnvironment` interprets this — the built-in `DefaultPlaceholderRenderer`
+    /// returns nil for it. See AsyncImageNode.placeholder(custom:).
+    public let customPlaceholderPayload: AnyPlaceholderPayload?
 
     public init(
         url: URL?,
@@ -107,7 +112,8 @@ public struct ImageDescriptor: Sendable {
         layoutHash: Int,
         appearanceHash: Int,
         thumbnailData: Data? = nil,
-        blurHash: String? = nil
+        blurHash: String? = nil,
+        customPlaceholderPayload: AnyPlaceholderPayload? = nil
     ) {
         self.url = url
         self.aspectRatio = aspectRatio
@@ -117,6 +123,7 @@ public struct ImageDescriptor: Sendable {
         self.appearanceHash = appearanceHash
         self.thumbnailData = thumbnailData
         self.blurHash = blurHash
+        self.customPlaceholderPayload = customPlaceholderPayload
     }
 }
 

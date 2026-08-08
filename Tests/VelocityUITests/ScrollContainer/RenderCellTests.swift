@@ -23,17 +23,45 @@ final class RenderCellTests: XCTestCase {
     private let validBlurHash = "L6PZfSi_.AyE_3t7t7R**0o#DgR4"
 
     private func imageFragment(
-        id: Int, frame: CGRect, thumbnailData: Data? = nil, blurHash: String? = nil
+        id: Int, frame: CGRect, thumbnailData: Data? = nil, blurHash: String? = nil,
+        customPlaceholderPayload: AnyPlaceholderPayload? = nil
     ) -> Fragment {
         Fragment(
             id: id,
             content: .image(ImageDescriptor(
                 url: nil, aspectRatio: 1.0, contentMode: 0,
                 cornerRadius: 0, layoutHash: id, appearanceHash: id,
-                thumbnailData: thumbnailData, blurHash: blurHash
+                thumbnailData: thumbnailData, blurHash: blurHash,
+                customPlaceholderPayload: customPlaceholderPayload
             )),
             frame: frame
         )
+    }
+
+    /// A payload shape thumbnailData/blurHash cannot express — proves .custom is not
+    /// limited to the two built-in field types.
+    private struct SolidColorPayload: Hashable, Sendable {
+        let red: UInt8, green: UInt8, blue: UInt8
+    }
+
+    /// Trivial injectable renderer for `.custom` payloads — returns a 1x1 BGRA8888
+    /// premultiplied CGImage of the payload's color, nil for anything else.
+    private struct FakeSolidColorPlaceholderRenderer: PlaceholderRenderer {
+        nonisolated func render(
+            _ payload: PlaceholderPayload, targetSize: CGSize, cornerRadius: CGFloat
+        ) -> CGImage? {
+            guard case .custom(let box) = payload,
+                  let color = box.unwrap(as: SolidColorPayload.self) else { return nil }
+            let pixels: [UInt8] = [color.blue, color.green, color.red, 255]
+            guard let provider = CGDataProvider(data: Data(pixels) as CFData) else { return nil }
+            return CGImage(
+                width: 1, height: 1, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 4,
+                space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGBitmapInfo(rawValue:
+                    CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+                provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent
+            )
+        }
     }
 
     private func makeCGImage(width: Int = 10, height: Int = 10) -> CGImage {
@@ -679,6 +707,64 @@ final class RenderCellTests: XCTestCase {
 
         XCTAssertTrue(firstContents === secondContents,
             "Placeholder must decode once per fragment lifetime — the gate is sub.contents == nil")
+    }
+
+    // MARK: - Injectable PlaceholderRenderer (VelocityUI-9x0.1)
+
+    func testInjectedCustomRendererPaintsCustomPayloadInsteadOfGrayTint() {
+        let color = SolidColorPayload(red: 200, green: 10, blue: 10)
+        let cell = RenderCell(kind: .standard, placeholderRenderer: FakeSolidColorPlaceholderRenderer())
+        cell.layer.frame = CGRect(origin: .zero, size: CGSize(width: 320, height: 400))
+        let frag = imageFragment(
+            id: 0, frame: CGRect(x: 0, y: 0, width: 40, height: 40),
+            customPlaceholderPayload: AnyPlaceholderPayload(color)
+        )
+
+        cell.applyLayout([frag])
+
+        guard let cl = contentLayer(of: cell) else { XCTFail("contentLayer missing"); return }
+        let sub = cl.sublayers?.first
+        XCTAssertNotNil(sub?.contents, "Custom renderer output must be painted instead of the gray tint")
+        XCTAssertNil(sub?.backgroundColor, "Custom placeholder paint must skip the gray tint")
+        XCTAssertEqual((sub?.contents as! CGImage?)?.width, 1)
+    }
+
+    func testDefaultRendererIgnoresCustomPayloadAndFallsBackToGrayTint() {
+        // Without an injected renderer, DefaultPlaceholderRenderer doesn't know how to
+        // interpret .custom — same gray-tint fallback as no placeholder data at all.
+        let cell = makeCell()
+        let color = SolidColorPayload(red: 5, green: 5, blue: 5)
+        let frag = imageFragment(
+            id: 0, frame: CGRect(x: 0, y: 0, width: 40, height: 40),
+            customPlaceholderPayload: AnyPlaceholderPayload(color)
+        )
+
+        cell.applyLayout([frag])
+
+        guard let cl = contentLayer(of: cell) else { XCTFail("contentLayer missing"); return }
+        let sub = cl.sublayers?.first
+        XCTAssertNil(sub?.contents)
+        XCTAssertNotNil(sub?.backgroundColor)
+    }
+
+    func testCustomPayloadIsThirdFallbackTierAfterThumbnailAndBlurHashFail() {
+        // Malformed thumbnail bytes AND malformed BlurHash both fail to decode — the cell
+        // must still fall through to a custom payload as the third tier, not the gray tint.
+        let color = SolidColorPayload(red: 1, green: 2, blue: 3)
+        let cell = RenderCell(kind: .standard, placeholderRenderer: FakeSolidColorPlaceholderRenderer())
+        cell.layer.frame = CGRect(origin: .zero, size: CGSize(width: 320, height: 400))
+        let frag = imageFragment(
+            id: 0, frame: CGRect(x: 0, y: 0, width: 40, height: 40),
+            thumbnailData: Data([0x00, 0x01, 0x02]), blurHash: "not-a-blurhash",
+            customPlaceholderPayload: AnyPlaceholderPayload(color)
+        )
+
+        cell.applyLayout([frag])
+
+        guard let cl = contentLayer(of: cell) else { XCTFail("contentLayer missing"); return }
+        let sub = cl.sublayers?.first
+        XCTAssertNotNil(sub?.contents, "Custom payload must still paint when both built-in tiers fail to decode")
+        XCTAssertEqual((sub?.contents as! CGImage?)?.width, 1)
     }
 
     func testApplyContentReplacingThumbnailPlaceholderReportsFromThumbnailPlaceholder() {

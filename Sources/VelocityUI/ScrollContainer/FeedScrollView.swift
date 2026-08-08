@@ -719,7 +719,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             #if canImport(XCTest)
             _dequeueAllocCount += 1
             #endif
-            return RenderCell(kind: kind)
+            return RenderCell(kind: kind, placeholderRenderer: environment.placeholderRenderer)
         }
         #if canImport(XCTest)
         _dequeueHitCount += 1
