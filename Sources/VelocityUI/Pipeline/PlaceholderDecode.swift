@@ -67,13 +67,11 @@ nonisolated func decodeBlurHashPlaceholder(
 }
 
 // MARK: - BlurHash algorithm (public-domain — https://blurha.sh)
-
-private let blurHashDigits: [Character: Int] = {
-    let chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz#$%*+,-.:;=?@[]^_{|}~"
-    var d = [Character: Int]()
-    for (i, c) in chars.enumerated() { d[c] = i }
-    return d
-}()
+//
+// Shared base83/color-space primitives (blurHashDigits, base83Decode, sRGBToLinear,
+// linearToSRGB, signPow, decodeDC, decodeAC) live in BlurHashMath.swift — no
+// CoreGraphics/UIKit dependency, so PlaceholderEncode.swift's macOS-buildable offline
+// tooling path can reuse the exact same math instead of a second implementation.
 
 /// Decodes a BlurHash string into an RGBA8 (non-premultiplied, alpha always 255) pixel
 /// buffer at the given grid size. Returns nil for malformed hashes (wrong length,
@@ -147,49 +145,6 @@ private nonisolated func blurHashDecodePixels(_ hash: String, width: Int, height
         }
     }
     return pixels
-}
-
-private nonisolated func base83Decode(_ chars: ArraySlice<Character>) -> Int? {
-    var value = 0
-    for c in chars {
-        guard let digit = blurHashDigits[c] else { return nil }
-        value = value * 83 + digit
-    }
-    return value
-}
-
-private nonisolated func decodeDC(_ value: Int) -> (Float, Float, Float) {
-    let r = (value >> 16) & 255
-    let g = (value >> 8) & 255
-    let b = value & 255
-    return (sRGBToLinear(r), sRGBToLinear(g), sRGBToLinear(b))
-}
-
-private nonisolated func decodeAC(_ value: Int, maxValue: Float) -> (Float, Float, Float) {
-    let quantR = value / (19 * 19)
-    let quantG = (value / 19) % 19
-    let quantB = value % 19
-    return (
-        signPow((Float(quantR) - 9) / 9, 2.0) * maxValue,
-        signPow((Float(quantG) - 9) / 9, 2.0) * maxValue,
-        signPow((Float(quantB) - 9) / 9, 2.0) * maxValue
-    )
-}
-
-private nonisolated func signPow(_ value: Float, _ exp: Float) -> Float {
-    let sign: Float = value < 0 ? -1 : 1
-    return sign * pow(abs(value), exp)
-}
-
-private nonisolated func sRGBToLinear(_ value: Int) -> Float {
-    let v = Float(value) / 255
-    return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
-}
-
-private nonisolated func linearToSRGB(_ value: Float) -> UInt8 {
-    let v = max(0, min(1, value))
-    let s: Float = v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1 / 2.4) - 0.055
-    return UInt8(max(0, min(255, (s * 255).rounded())))
 }
 
 private nonisolated func makeCGImage(rgba8 pixels: [UInt8], width: Int, height: Int) -> CGImage? {

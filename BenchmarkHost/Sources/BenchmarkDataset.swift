@@ -3,18 +3,6 @@
 import Foundation
 
 enum BenchmarkDataset {
-    /// Known-valid canonical BlurHash strings (public examples from https://blurha.sh).
-    /// Producer-side BlurHash ENCODING is out of scope for VelocityUI (VelocityUI-1su.3) —
-    /// items cycle through this fixed set instead of encoding one per photo.
-    private static let sampleBlurHashes = [
-        "L6PZfSi_.AyE_3t7t7R**0o#DgR4",
-        "LEHV6nWB2yk8pyo0adR*.7kCMdnj",
-        "LKO2?U%2Tw=w]~RBVZRi};RPxuwH",
-        "L5H2EC=PM+yV0g-mq.wG9c010J}I",
-        "LGF5]+Yk^6#M@-5c,1J5@[or[Q6.",
-        "LlMF%n00%#MwS|WCWEM{R*bbWBbH",
-    ]
-
     static func generate(count: Int, seed: UInt64 = 0) -> [BenchmarkItem] {
         var rng = LCG(state: seed)
         return (0..<count).map { i in
@@ -37,7 +25,12 @@ enum BenchmarkDataset {
                 cornerRadius: cornerRadius,
                 caption: "",
                 thumbnailData: nil,
-                blurHash: sampleBlurHashes[i % sampleBlurHashes.count]
+                // Real per-item BlurHash (VelocityUI-9x0), keyed by id — see
+                // PrecomputedBlurHashes.swift's header for how/why this table exists and
+                // how to regenerate it. Wraps past the table's own bound rather than
+                // crashing on a larger --items override; still per-item-derived data below
+                // that bound, reused (not cycled-from-a-tiny-sample) above it.
+                blurHash: PrecomputedBlurHashes.table[i % PrecomputedBlurHashes.table.count]
             )
         }
     }
