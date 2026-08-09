@@ -37,6 +37,15 @@ public final class RenderEnvironment: Sendable {
     /// `applyContent` entirely — see `RenderCell._debugIsContentRevealed`'s docstring).
     public let contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)?
 
+    /// Fires once per pipeline `Task` spawned by `FeedScrollView.notifyPipelineIfNeeded`
+    /// (one leading-index boundary crossing). Called synchronously, on `@MainActor`, at the
+    /// spawn site — before the `Task` body runs — so a BenchmarkHost observer can attribute
+    /// the event to the frame in which it was triggered. Routes instrumentation through the
+    /// composition root for the same reason as `contentDeliveryObserver`: `#if DEBUG` hooks on
+    /// library types would compile into every consumer DEBUG build, not just BenchmarkHost.
+    /// `nil` in production.
+    public let pipelineTaskSpawnObserver: (@Sendable () -> Void)?
+
     /// Designated init — all collaborators supplied by the caller.
     ///
     /// Enforces two identity DI contracts at runtime:
@@ -58,7 +67,8 @@ public final class RenderEnvironment: Sendable {
         videoController: VideoController,
         videoPreparation: VideoPreparationActor,
         placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer(),
-        contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil
+        contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil,
+        pipelineTaskSpawnObserver: (@Sendable () -> Void)? = nil
     ) {
         precondition(
             imageActor.dimensionCache === dimensionCache,
@@ -77,6 +87,7 @@ public final class RenderEnvironment: Sendable {
         self.videoPreparation = videoPreparation
         self.placeholderRenderer = placeholderRenderer
         self.contentDeliveryObserver = contentDeliveryObserver
+        self.pipelineTaskSpawnObserver = pipelineTaskSpawnObserver
     }
 
     /// Convenience init for app use.
@@ -101,7 +112,8 @@ public final class RenderEnvironment: Sendable {
         maxAttached: Int = 3,
         decodeScaleCeiling: CGFloat = 2.0,
         placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer(),
-        contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil
+        contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil,
+        pipelineTaskSpawnObserver: (@Sendable () -> Void)? = nil
     ) {
         let dc = DimensionCache(session: session)
         let videoPrep = VideoPreparationActor()
@@ -114,7 +126,8 @@ public final class RenderEnvironment: Sendable {
             videoController: VideoController(videoPreparation: videoPrep, maxAttached: maxAttached),
             videoPreparation: videoPrep,
             placeholderRenderer: placeholderRenderer,
-            contentDeliveryObserver: contentDeliveryObserver
+            contentDeliveryObserver: contentDeliveryObserver,
+            pipelineTaskSpawnObserver: pipelineTaskSpawnObserver
         )
     }
 }

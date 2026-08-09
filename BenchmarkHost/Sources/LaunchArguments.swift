@@ -76,7 +76,7 @@ struct LaunchArguments {
         velocityProfile: VelocityProfile = .medium,
         runtime: Runtime? = nil,
         imageMode: ImageMode = .idiomatic,
-        itemCount: Int = 100,
+        itemCount: Int = 300,
         measurementDuration: TimeInterval = 30,
         prefetchWindow: Int = 10,
         liveHUD: Bool = false,

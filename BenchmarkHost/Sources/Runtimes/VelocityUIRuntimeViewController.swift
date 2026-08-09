@@ -20,14 +20,19 @@ final class VelocityUIRuntimeViewController: UIViewController {
         self.orchestrator = orchestrator
         // `harness` (the init parameter, not `self.harness`) is captured here — `self` isn't
         // fully initialized until after `super.init()` below, so it can't be referenced yet.
-        self.environment = RenderEnvironment(contentDeliveryObserver: { kind in
-            switch kind {
-            case .fromGrayPlaceholder:
-                harness.recordGrayToImageTransition()
-            case .fromThumbnailPlaceholder:
-                harness.recordThumbnailToImageTransition()
+        self.environment = RenderEnvironment(
+            contentDeliveryObserver: { kind in
+                switch kind {
+                case .fromGrayPlaceholder:
+                    harness.recordGrayToImageTransition()
+                case .fromThumbnailPlaceholder:
+                    harness.recordThumbnailToImageTransition()
+                }
+            },
+            pipelineTaskSpawnObserver: {
+                harness.recordPipelineTaskSpawn()
             }
-        })
+        )
         super.init(nibName: nil, bundle: nil)
         title = "VelocityUI"
     }

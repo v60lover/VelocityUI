@@ -31,6 +31,8 @@ final class LiveMetricsCollector {
         var scrollVelocity: Double        // pt/s, smoothed
         var grayTransitions: Int
         var thumbnailTransitions: Int
+        /// Cumulative pipeline-Task spawns (VelocityUI-let suspect 3) since the runtime launched.
+        var pipelineTaskSpawns: Int
         var sampleCount: Int
     }
 
@@ -132,6 +134,7 @@ final class LiveMetricsCollector {
             scrollVelocity: smoothedVelocity,
             grayTransitions: harness?.peekGrayTransitionCount() ?? 0,
             thumbnailTransitions: harness?.peekThumbnailTransitionCount() ?? 0,
+            pipelineTaskSpawns: harness?.peekPipelineTaskSpawnCount() ?? 0,
             sampleCount: frames.count
         )
     }

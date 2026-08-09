@@ -36,6 +36,19 @@ final class BenchmarkHarness: NSObject {
     nonisolated private let metricPayloadsLock = OSAllocatedUnfairLock<[MXMetricPayload]>(initialState: [])
     nonisolated private let grayTransitionLock = OSAllocatedUnfairLock<Int>(initialState: 0)
     nonisolated private let thumbnailTransitionLock = OSAllocatedUnfairLock<Int>(initialState: 0)
+    /// Cumulative count of `RenderEnvironment.pipelineTaskSpawnObserver` firings — VelocityUI-let
+    /// suspect 3 (pipeline Task storm). Drained at stopCapture, peeked (non-draining) for the live HUD.
+    nonisolated private let pipelineTaskSpawnLock = OSAllocatedUnfairLock<Int>(initialState: 0)
+
+    // MARK: - Per-frame suspect-attribution counters (VelocityUI-let Phase 1)
+
+    /// Events since the last CADisplayLink tick — drained and reset every tick into
+    /// `perFrameApplyContentCounts`/`perFramePipelineTaskSpawnCounts` so `stopCapture` can pair
+    /// each frame's duration with the suspect-event counts that landed during it (suspects 1/2
+    /// vs suspect 3 — see `benchmarkComputeFrameAttribution`). Separate from the cumulative
+    /// locks above, which track the whole-capture totals surfaced in `BenchmarkReport`.
+    nonisolated private let perFrameApplyContentCounter = OSAllocatedUnfairLock<Int>(initialState: 0)
+    nonisolated private let perFramePipelineTaskSpawnCounter = OSAllocatedUnfairLock<Int>(initialState: 0)
 
     // MARK: - MainActor-isolated state
 
@@ -44,6 +57,11 @@ final class BenchmarkHarness: NSObject {
     private var captureStartTime: CFAbsoluteTime = 0
     private var captureDiscardSeconds: Double = 0
     private var frameTimestamps: [(ts: CFTimeInterval, target: CFTimeInterval)] = []
+    /// Kept in lockstep with `frameTimestamps` (same length, appended together every tick) —
+    /// index i holds the suspect-event counts drained at the i-th tick. See
+    /// `benchmarkComputeFrameAttribution`, which pairs these with `frameTimestamps` at stopCapture.
+    private var perFrameApplyContentCounts: [Int] = []
+    private var perFramePipelineTaskSpawnCounts: [Int] = []
 
     // MARK: - Capture lifecycle
 
@@ -59,10 +77,17 @@ final class BenchmarkHarness: NSObject {
         // F7: pre-size to 120 Hz × 60 s max; removes all CoW-resize jitter from the
         // @MainActor scroll path that this harness is supposed to measure cleanly.
         frameTimestamps.reserveCapacity(7_200)
+        perFrameApplyContentCounts.removeAll()
+        perFrameApplyContentCounts.reserveCapacity(7_200)
+        perFramePipelineTaskSpawnCounts.removeAll()
+        perFramePipelineTaskSpawnCounts.reserveCapacity(7_200)
         spawnCounter.withLock { $0 = 0 }
         metricPayloadsLock.withLock { $0.removeAll() }
         grayTransitionLock.withLock { $0 = 0 }
         thumbnailTransitionLock.withLock { $0 = 0 }
+        pipelineTaskSpawnLock.withLock { $0 = 0 }
+        perFrameApplyContentCounter.withLock { $0 = 0 }
+        perFramePipelineTaskSpawnCounter.withLock { $0 = 0 }
         captureStartTime = CFAbsoluteTimeGetCurrent()
 
         allocationProbe.start()
@@ -108,7 +133,14 @@ final class BenchmarkHarness: NSObject {
             metricKitSnapshots: mkSnapshots,
             warmupDiscardedSeconds: captureDiscardSeconds > 0 ? captureDiscardSeconds : nil,
             grayToImageTransitionCount: drainGrayTransitionCount(),
-            thumbnailToImageTransitionCount: drainThumbnailTransitionCount()
+            thumbnailToImageTransitionCount: drainThumbnailTransitionCount(),
+            pipelineTaskSpawnCount: drainPipelineTaskSpawnCount(),
+            perFrameAttribution: benchmarkComputeFrameAttribution(
+                timestamps: frameTimestamps,
+                applyContentCounts: perFrameApplyContentCounts,
+                pipelineTaskSpawnCounts: perFramePipelineTaskSpawnCounts,
+                hitchSlack: hitchSlack
+            )
         )
     }
 
@@ -161,6 +193,7 @@ final class BenchmarkHarness: NSObject {
     /// Called from VelocityUIRuntimeViewController via RenderEnvironment.contentDeliveryObserver.
     nonisolated func recordGrayToImageTransition() {
         grayTransitionLock.withLock { $0 += 1 }
+        recordApplyContentFrameEvent()
     }
 
     private func drainGrayTransitionCount() -> Int {
@@ -174,10 +207,41 @@ final class BenchmarkHarness: NSObject {
     /// Called from VelocityUIRuntimeViewController via RenderEnvironment.contentDeliveryObserver.
     nonisolated func recordThumbnailToImageTransition() {
         thumbnailTransitionLock.withLock { $0 += 1 }
+        recordApplyContentFrameEvent()
     }
 
     private func drainThumbnailTransitionCount() -> Int {
         thumbnailTransitionLock.withLock { let v = $0; $0 = 0; return v }
+    }
+
+    // MARK: - Pipeline-task-spawn counter (VelocityUI-let suspect 3)
+
+    /// Increment each time `notifyPipelineIfNeeded` spawns its boundary-crossing pipeline Task.
+    /// Called from VelocityUIRuntimeViewController via RenderEnvironment.pipelineTaskSpawnObserver.
+    nonisolated func recordPipelineTaskSpawn() {
+        pipelineTaskSpawnLock.withLock { $0 += 1 }
+        perFramePipelineTaskSpawnCounter.withLock { $0 += 1 }
+        signposter.emitEvent("pipeline-task-spawn")
+    }
+
+    private func drainPipelineTaskSpawnCount() -> Int {
+        pipelineTaskSpawnLock.withLock { let v = $0; $0 = 0; return v }
+    }
+
+    /// Reads the current pipeline-task-spawn count without resetting it. See
+    /// `peekGrayTransitionCount()` for the manual-flow contract.
+    nonisolated func peekPipelineTaskSpawnCount() -> Int {
+        pipelineTaskSpawnLock.withLock { $0 }
+    }
+
+    // MARK: - Per-frame applyContent counter (VelocityUI-let suspects 1/2)
+
+    /// Common increment point for both transition-kind counters above — feeds the per-frame
+    /// bin drained by `displayLinkTick` and emits a discrete Instruments marker so a captured
+    /// finger-fling trace shows applyContent density directly on the timeline.
+    nonisolated private func recordApplyContentFrameEvent() {
+        perFrameApplyContentCounter.withLock { $0 += 1 }
+        signposter.emitEvent("apply-content")
     }
 
     // MARK: - Non-draining peeks (LiveMetricsHUD)
@@ -200,6 +264,8 @@ final class BenchmarkHarness: NSObject {
 
     @objc private func displayLinkTick(_ link: CADisplayLink) {
         frameTimestamps.append((ts: link.timestamp, target: link.targetTimestamp))
+        perFrameApplyContentCounts.append(perFrameApplyContentCounter.withLock { let v = $0; $0 = 0; return v })
+        perFramePipelineTaskSpawnCounts.append(perFramePipelineTaskSpawnCounter.withLock { let v = $0; $0 = 0; return v })
     }
 }
 
@@ -254,7 +320,7 @@ func benchmarkComputeFrameStats(
         let actualDelta   = effective[i].ts     - effective[i - 1].ts
         let expectedDelta = effective[i].target - effective[i - 1].target
         frameTimes.append(actualDelta * 1_000)
-        if actualDelta - expectedDelta > hitchSlack {
+        if benchmarkIsHitch(actualDelta: actualDelta, expectedDelta: expectedDelta, hitchSlack: hitchSlack) {
             hitchCount += 1
         }
     }
@@ -281,4 +347,52 @@ func benchmarkPercentile(_ sorted: [Double], _ p: Double) -> Double {
     guard !sorted.isEmpty else { return 0 }
     let idx = min(Int((Double(sorted.count - 1) * p).rounded()), sorted.count - 1)
     return sorted[idx]
+}
+
+/// Single source of truth for the hitch predicate — shared by `benchmarkComputeFrameStats`
+/// and `benchmarkComputeFrameAttribution` so the two never drift apart on what counts as late.
+/// Matches Apple's Hangs heuristic: a frame is a hitch if it arrives more than `hitchSlack`
+/// later than its own expected cadence, relative to the previous frame.
+private func benchmarkIsHitch(actualDelta: CFTimeInterval, expectedDelta: CFTimeInterval, hitchSlack: TimeInterval) -> Bool {
+    actualDelta - expectedDelta > hitchSlack
+}
+
+/// VelocityUI-let Phase 1: pairs each frame interval from `timestamps` with the suspect-event
+/// counts that landed during it, so a single captured report can attribute dropped frames to a
+/// dominant suspect (applyContent bursts / crossfade = suspects 1–2, pipeline Task storm =
+/// suspect 3) without a separate Instruments pass. Exposed at module scope (mirrors
+/// `benchmarkComputeFrameStats`) so unit tests can drive it without a live CADisplayLink.
+///
+/// `applyContentCounts`/`pipelineTaskSpawnCounts` must be the same length as `timestamps` —
+/// index i holds the counts drained at the i-th CADisplayLink tick (events that landed between
+/// tick i-1 and tick i), mirroring how `BenchmarkHarness.displayLinkTick` appends all three
+/// arrays together every tick. index 0 is unused, matching how `benchmarkComputeFrameStats`
+/// treats `timestamps[0]` as the reference frame with no preceding interval. Mismatched lengths
+/// return an empty array rather than trapping — the harness keeps the three arrays in lockstep
+/// by construction, but a mismatch here means a caller bypassed that contract.
+func benchmarkComputeFrameAttribution(
+    timestamps: [(ts: CFTimeInterval, target: CFTimeInterval)],
+    applyContentCounts: [Int],
+    pipelineTaskSpawnCounts: [Int],
+    hitchSlack: TimeInterval
+) -> [BenchmarkReport.FrameAttribution] {
+    guard timestamps.count > 1,
+          applyContentCounts.count == timestamps.count,
+          pipelineTaskSpawnCounts.count == timestamps.count else { return [] }
+
+    var result: [BenchmarkReport.FrameAttribution] = []
+    result.reserveCapacity(timestamps.count - 1)
+
+    for i in 1..<timestamps.count {
+        let actualDelta   = timestamps[i].ts     - timestamps[i - 1].ts
+        let expectedDelta = timestamps[i].target - timestamps[i - 1].target
+        result.append(BenchmarkReport.FrameAttribution(
+            frameIndex: i - 1,
+            frameDurationMs: actualDelta * 1_000,
+            isHitch: benchmarkIsHitch(actualDelta: actualDelta, expectedDelta: expectedDelta, hitchSlack: hitchSlack),
+            applyContentCount: applyContentCounts[i],
+            pipelineTaskSpawnCount: pipelineTaskSpawnCounts[i]
+        ))
+    }
+    return result
 }

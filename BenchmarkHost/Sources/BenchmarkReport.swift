@@ -23,6 +23,15 @@ struct BenchmarkReport: Sendable, Codable {
     /// `maxFlingNoGray` asserts is `grayToImageTransitionCount == 0`, not this being zero.
     /// nil when not measured by this scenario.
     let thumbnailToImageTransitionCount: Int?
+    /// Number of pipeline Tasks spawned by `notifyPipelineIfNeeded` (leading-index boundary
+    /// crossings) during the capture — VelocityUI-let suspect 3 (pipeline Task storm).
+    /// nil when not measured by this scenario.
+    let pipelineTaskSpawnCount: Int?
+    /// Per-frame suspect attribution (VelocityUI-let Phase 1) — one entry per frame interval,
+    /// pairing its duration/hitch status with the applyContent and pipeline-Task-spawn counts
+    /// that landed during it. Lets offline analysis attribute dropped frames to a dominant
+    /// suspect from a captured report alone. nil when not measured by this scenario.
+    let perFrameAttribution: [FrameAttribution]?
 
     init(
         runtime: String,
@@ -33,7 +42,9 @@ struct BenchmarkReport: Sendable, Codable {
         metricKitSnapshots: [MetricKitSnapshot],
         warmupDiscardedSeconds: Double? = nil,
         grayToImageTransitionCount: Int? = nil,
-        thumbnailToImageTransitionCount: Int? = nil
+        thumbnailToImageTransitionCount: Int? = nil,
+        pipelineTaskSpawnCount: Int? = nil,
+        perFrameAttribution: [FrameAttribution]? = nil
     ) {
         self.runtime = runtime
         self.captureDurationSeconds = captureDurationSeconds
@@ -44,6 +55,8 @@ struct BenchmarkReport: Sendable, Codable {
         self.warmupDiscardedSeconds = warmupDiscardedSeconds
         self.grayToImageTransitionCount = grayToImageTransitionCount
         self.thumbnailToImageTransitionCount = thumbnailToImageTransitionCount
+        self.pipelineTaskSpawnCount = pipelineTaskSpawnCount
+        self.perFrameAttribution = perFrameAttribution
     }
 
     struct FrameStats: Sendable, Codable {
@@ -72,5 +85,15 @@ struct BenchmarkReport: Sendable, Codable {
     struct MetricKitSnapshot: Sendable, Codable {
         let deliveredAtTimestamp: TimeInterval
         let payloadJSONBase64: String
+    }
+
+    /// One frame interval's suspect-attribution sample. See `perFrameAttribution`'s docstring
+    /// and `benchmarkComputeFrameAttribution` (VelocityUI-let Phase 1).
+    struct FrameAttribution: Sendable, Codable {
+        let frameIndex: Int
+        let frameDurationMs: Double
+        let isHitch: Bool
+        let applyContentCount: Int
+        let pipelineTaskSpawnCount: Int
     }
 }

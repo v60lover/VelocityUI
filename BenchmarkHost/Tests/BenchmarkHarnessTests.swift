@@ -285,6 +285,135 @@ final class BenchmarkHarnessTests: XCTestCase {
         XCTAssertEqual(report.thumbnailToImageTransitionCount, 1)
     }
 
+    // MARK: - Pipeline-task-spawn counter (VelocityUI-let suspect 3)
+
+    @MainActor
+    func testPipelineTaskSpawnCounterResetsOnStart() {
+        let harness = BenchmarkHarness()
+        harness.startCapture()
+        let report = harness.stopCapture()
+        XCTAssertEqual(report.pipelineTaskSpawnCount, 0, "Fresh capture must start with zero count")
+    }
+
+    @MainActor
+    func testPipelineTaskSpawnCounterIncrements() {
+        let harness = BenchmarkHarness()
+        harness.startCapture()
+        let n = 6
+        for _ in 0..<n { harness.recordPipelineTaskSpawn() }
+        let report = harness.stopCapture()
+        XCTAssertEqual(report.pipelineTaskSpawnCount, n)
+    }
+
+    @MainActor
+    func testPipelineTaskSpawnCounterResetsAcrossRuns() {
+        let harness = BenchmarkHarness()
+
+        harness.startCapture()
+        harness.recordPipelineTaskSpawn()
+        harness.recordPipelineTaskSpawn()
+        let report1 = harness.stopCapture()
+        XCTAssertEqual(report1.pipelineTaskSpawnCount, 2)
+
+        harness.startCapture()
+        let report2 = harness.stopCapture()
+        XCTAssertEqual(report2.pipelineTaskSpawnCount, 0, "Counter must reset between captures")
+    }
+
+    @MainActor
+    func testPipelineTaskSpawnCounterIsNonisolated() async {
+        let harness = BenchmarkHarness()
+        harness.startCapture()
+
+        await Task.detached {
+            harness.recordPipelineTaskSpawn()
+        }.value
+
+        let report = harness.stopCapture()
+        XCTAssertEqual(report.pipelineTaskSpawnCount, 1)
+    }
+
+    @MainActor
+    func testPeekPipelineTaskSpawnCountDoesNotReset() {
+        // Mirrors peekGrayTransitionCount's manual-flow contract: no startCapture running,
+        // counter accumulates from launch and peeking must not perturb it.
+        let harness = BenchmarkHarness()
+        harness.recordPipelineTaskSpawn()
+        harness.recordPipelineTaskSpawn()
+        XCTAssertEqual(harness.peekPipelineTaskSpawnCount(), 2)
+        XCTAssertEqual(harness.peekPipelineTaskSpawnCount(), 2, "Peek must not drain the counter")
+    }
+
+    // MARK: - Per-frame suspect attribution (VelocityUI-let Phase 1)
+
+    func testFrameAttributionPairsCountsWithCorrectFrame() {
+        let frameIntervalSec: CFTimeInterval = 1.0 / 60.0
+        var timestamps: [(ts: CFTimeInterval, target: CFTimeInterval)] = []
+        for i in 0..<5 {
+            let t = Double(i) * frameIntervalSec
+            timestamps.append((ts: t, target: t))
+        }
+        // index 0 unused (no preceding interval); frames 1-4 get distinct counts.
+        let applyContentCounts = [99, 1, 2, 3, 4]
+        let pipelineTaskSpawnCounts = [99, 0, 1, 0, 1]
+
+        let attribution = benchmarkComputeFrameAttribution(
+            timestamps: timestamps,
+            applyContentCounts: applyContentCounts,
+            pipelineTaskSpawnCounts: pipelineTaskSpawnCounts,
+            hitchSlack: 0.004
+        )
+
+        XCTAssertEqual(attribution.count, 4, "One entry per frame interval — 5 ticks = 4 intervals")
+        XCTAssertEqual(attribution.map(\.applyContentCount), [1, 2, 3, 4])
+        XCTAssertEqual(attribution.map(\.pipelineTaskSpawnCount), [0, 1, 0, 1])
+        XCTAssertEqual(attribution.map(\.frameIndex), [0, 1, 2, 3])
+    }
+
+    func testFrameAttributionFlagsHitchOnLateFrame() {
+        let frameIntervalSec: CFTimeInterval = 1.0 / 60.0
+        var timestamps: [(ts: CFTimeInterval, target: CFTimeInterval)] = []
+        for i in 0..<10 {
+            let target = Double(i) * frameIntervalSec
+            let ts = target + (i == 4 ? 0.010 : 0)
+            timestamps.append((ts: ts, target: target))
+        }
+        let zeros = Array(repeating: 0, count: timestamps.count)
+
+        let attribution = benchmarkComputeFrameAttribution(
+            timestamps: timestamps,
+            applyContentCounts: zeros,
+            pipelineTaskSpawnCounts: zeros,
+            hitchSlack: 0.004
+        )
+
+        let hitchFrames = attribution.filter(\.isHitch)
+        XCTAssertEqual(hitchFrames.count, 1, "Exactly the injected 10 ms stall must be flagged")
+        XCTAssertEqual(hitchFrames.first?.frameIndex, 3, "Frame index 3 is the interval ending at the late tick (index 4)")
+    }
+
+    func testFrameAttributionMismatchedLengthsReturnsEmpty() {
+        let timestamps: [(ts: CFTimeInterval, target: CFTimeInterval)] = [(ts: 0, target: 0), (ts: 0.016, target: 0.016)]
+        let attribution = benchmarkComputeFrameAttribution(
+            timestamps: timestamps,
+            applyContentCounts: [0],
+            pipelineTaskSpawnCounts: [0, 0],
+            hitchSlack: 0.004
+        )
+        XCTAssertTrue(attribution.isEmpty, "Mismatched array lengths must return empty, not trap")
+    }
+
+    @MainActor
+    func testPerFrameAttributionEmptyWithoutLiveDisplayLink() {
+        // No real CADisplayLink ticks in a headless unit test — frameTimestamps stays empty,
+        // so perFrameAttribution must be an empty array (not nil, not a trap) rather than
+        // silently reporting stale data from a previous run.
+        let harness = BenchmarkHarness()
+        harness.startCapture()
+        let report = harness.stopCapture()
+        XCTAssertEqual(report.perFrameAttribution?.isEmpty, true)
+    }
+
     // MARK: - Harness per-frame overhead microbenchmark (VelocityUI-11q)
 
     func testHarnessPerFrameOverheadIsUnder0Point1ms() {

@@ -664,6 +664,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         #if canImport(XCTest)
         _taskSpawnCount += 1
         #endif
+        environment.pipelineTaskSpawnObserver?()
 
         Task { [weak self] in
             guard let self else { return }

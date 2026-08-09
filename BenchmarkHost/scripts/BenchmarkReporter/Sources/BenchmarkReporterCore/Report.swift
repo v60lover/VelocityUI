@@ -26,6 +26,12 @@ public struct BenchmarkReport: Codable, Sendable {
     /// Number of `applyContent` deliveries that replaced a decode-guaranteed
     /// thumbnail/BlurHash placeholder. nil when not measured by this scenario.
     public let thumbnailToImageTransitionCount: Int?
+    /// Number of pipeline Tasks spawned by `notifyPipelineIfNeeded` during the capture —
+    /// VelocityUI-let suspect 3 (pipeline Task storm). nil when not measured by this scenario.
+    public let pipelineTaskSpawnCount: Int?
+    /// Per-frame suspect attribution (VelocityUI-let Phase 1). nil when not measured by this
+    /// scenario, or for reports written before this field was added.
+    public let perFrameAttribution: [FrameAttribution]?
 
     public init(
         runtime: String,
@@ -36,7 +42,9 @@ public struct BenchmarkReport: Codable, Sendable {
         metricKitSnapshots: [MetricKitSnapshot],
         warmupDiscardedSeconds: Double? = nil,
         grayToImageTransitionCount: Int? = nil,
-        thumbnailToImageTransitionCount: Int? = nil
+        thumbnailToImageTransitionCount: Int? = nil,
+        pipelineTaskSpawnCount: Int? = nil,
+        perFrameAttribution: [FrameAttribution]? = nil
     ) {
         self.runtime = runtime
         self.captureDurationSeconds = captureDurationSeconds
@@ -47,6 +55,8 @@ public struct BenchmarkReport: Codable, Sendable {
         self.warmupDiscardedSeconds = warmupDiscardedSeconds
         self.grayToImageTransitionCount = grayToImageTransitionCount
         self.thumbnailToImageTransitionCount = thumbnailToImageTransitionCount
+        self.pipelineTaskSpawnCount = pipelineTaskSpawnCount
+        self.perFrameAttribution = perFrameAttribution
     }
 
     public struct FrameStats: Codable, Sendable {
@@ -72,6 +82,14 @@ public struct BenchmarkReport: Codable, Sendable {
     public struct MetricKitSnapshot: Codable, Sendable {
         public let deliveredAtTimestamp: TimeInterval
         public let payloadJSONBase64: String
+    }
+
+    public struct FrameAttribution: Codable, Sendable {
+        public let frameIndex: Int
+        public let frameDurationMs: Double
+        public let isHitch: Bool
+        public let applyContentCount: Int
+        public let pipelineTaskSpawnCount: Int
     }
 }
 

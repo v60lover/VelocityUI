@@ -158,9 +158,12 @@ final class LiveMetricsHUDView: UIView {
     private let allocLabel = LiveMetricsHUDView.makeLabel(size: 11, weight: .semibold)
     private let velocityLabel = LiveMetricsHUDView.makeLabel(size: 11, weight: .regular)
     private let churnLabel = LiveMetricsHUDView.makeLabel(size: 11, weight: .regular)
+    private let suspectLabel = LiveMetricsHUDView.makeLabel(size: 11, weight: .regular)
 
     private var collapsed = false
-    private var collapsibleRows: [UIView] { [frameLabel, hitchLabel, rssLabel, allocLabel, velocityLabel, churnLabel] }
+    private var collapsibleRows: [UIView] {
+        [frameLabel, hitchLabel, rssLabel, allocLabel, velocityLabel, churnLabel, suspectLabel]
+    }
 
     init(runtimeLabel: String, imageMode: LaunchArguments.ImageMode, targetFPS: Double) {
         self.targetFPS = targetFPS
@@ -187,7 +190,7 @@ final class LiveMetricsHUDView: UIView {
 
         headerLabel.text = header
         headerLabel.textColor = .secondaryLabel
-        [headerLabel, fpsLabel, frameLabel, hitchLabel, rssLabel, allocLabel, velocityLabel, churnLabel]
+        [headerLabel, fpsLabel, frameLabel, hitchLabel, rssLabel, allocLabel, velocityLabel, churnLabel, suspectLabel]
             .forEach { stack.addArrangedSubview($0) }
 
         NSLayoutConstraint.activate([
@@ -237,6 +240,9 @@ final class LiveMetricsHUDView: UIView {
 
         churnLabel.text = "gray→img \(s.grayTransitions)   thumb→img \(s.thumbnailTransitions)"
         churnLabel.textColor = s.grayTransitions > 0 ? .systemRed : .secondaryLabel
+
+        suspectLabel.text = "pipeline spawns \(s.pipelineTaskSpawns)"
+        suspectLabel.textColor = .secondaryLabel
     }
 
     // MARK: - Formatting

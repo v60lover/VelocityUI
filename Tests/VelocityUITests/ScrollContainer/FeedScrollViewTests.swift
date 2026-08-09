@@ -1722,6 +1722,50 @@ final class FeedScrollViewTests: XCTestCase {
         await drainFeedWork(feed)
     }
 
+    // MARK: - 25b. pipelineTaskSpawnObserver wiring (VelocityUI-let)
+
+    /// `RenderEnvironment.pipelineTaskSpawnObserver` is the production-safe counterpart to the
+    /// XCTest-only `_taskSpawnCount` (VelocityUI-let suspect 3, pipeline Task storm) — it lets
+    /// BenchmarkHost attribute the event without `#if canImport(XCTest)` gating. Verifies it
+    /// fires exactly once per `notifyPipelineIfNeeded` boundary crossing, in lockstep with
+    /// `_taskSpawnCount` (see test 2, `testTaskSpawnCountMatchesBoundaryCrossings`, for the
+    /// crossing semantics this mirrors).
+    func testPipelineTaskSpawnObserverFiresOnBoundaryCrossing() {
+        let dc = DimensionCache()
+        let videoPrep = VideoPreparationActor()
+        let spawnCount = OSAllocatedUnfairLock<Int>(initialState: 0)
+        let env = RenderEnvironment(
+            textPool: TextMeasurementPool(),
+            layoutCache: LayoutCache(),
+            dimensionCache: dc,
+            imageActor: ImageActor(dimensionCache: dc),
+            gifActor: GIFActor(),
+            videoController: VideoController(videoPreparation: videoPrep),
+            videoPreparation: videoPrep,
+            pipelineTaskSpawnObserver: {
+                spawnCount.withLock { $0 += 1 }
+            }
+        )
+
+        let feed = FeedScrollView<TestItem>(environment: env, frame: CGRect(x: 0, y: 0, width: 375, height: 812))
+        feed.cellBuilder = { item in AsyncImageNode(url: nil, aspectRatio: item.aspectRatio) }
+        feed.items = items(count: 200)
+        feed.layoutSubviews()
+
+        XCTAssertEqual(spawnCount.withLock { $0 }, 1, "One observer firing for the initial leading index")
+        #if canImport(XCTest)
+        XCTAssertEqual(spawnCount.withLock { $0 }, feed._taskSpawnCount,
+            "pipelineTaskSpawnObserver must fire exactly in lockstep with _taskSpawnCount")
+        #endif
+
+        feed.contentOffset = CGPoint(x: 0, y: 350)
+        feed.layoutSubviews()
+        XCTAssertEqual(spawnCount.withLock { $0 }, 2, "One additional firing per unique leading-index boundary")
+
+        feed.layoutSubviews()
+        XCTAssertEqual(spawnCount.withLock { $0 }, 2, "No firing when leading index does not change")
+    }
+
     // MARK: - 26. Synchronous intrinsic height before any async pipeline commit (VelocityUI-ksh)
 
     /// Root-cause regression for VelocityUI-ksh: `rebuildFrames` used to seed EVERY unmeasured
