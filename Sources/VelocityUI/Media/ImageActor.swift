@@ -253,6 +253,23 @@ public actor ImageActor {
 
     func _testGetPrefetchedURLs() -> [URL] { _testPrefetchedURLs }
     func _testResetPrefetchedURLs() { _testPrefetchedURLs.removeAll() }
+
+    /// Test seam: the `priority` argument each cold-path `prefetch()` call carried, paired
+    /// with its URL and appended in the same order as `_testPrefetchedURLs`. Lets tests
+    /// verify per-call admission tier (e.g. RenderPipeline's ahead/behind classification)
+    /// without threading a fake ImageActor through RenderPipeline.
+    private(set) var _testPrefetchedPriorities: [(url: URL, priority: DecodePriority)] = []
+
+    func _testGetPrefetchedPriorities() -> [(url: URL, priority: DecodePriority)] { _testPrefetchedPriorities }
+    func _testResetPrefetchedPriorities() { _testPrefetchedPriorities.removeAll() }
+
+    /// Test-only: number of decode-gate waiters queued at `priority` on `decodeSemaphore`.
+    /// Forwards to `AsyncSemaphore._waiterCount(priority:)` so tests get a deterministic
+    /// "this decode has reached the gate and is queued, not yet holding a slot" anchor to
+    /// poll on instead of sleeping a fixed duration.
+    func _testDecodeSemaphoreWaiterCount(priority: DecodePriority) async -> Int {
+        await decodeSemaphore._waiterCount(priority: priority)
+    }
     #endif
 
     // MARK: - Public API
@@ -300,7 +317,7 @@ public actor ImageActor {
 
         // 4. Launch a task that owns the network fetch + decode for this key.
         let task = Task<DecodeResult, Never> {
-            await self._networkFetchAndDecode(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: decodeScale)
+            await self._networkFetchAndDecode(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: decodeScale, priority: .visible)
         }
         inFlight[key] = task
         let result = await task.value
@@ -372,7 +389,8 @@ public actor ImageActor {
                 data: capturedData,
                 targetSize: capturedTargetSize,
                 cornerRadius: capturedCornerRadius,
-                scale: capturedScale
+                scale: capturedScale,
+                priority: .visible
             )
         }
         inFlight[key] = task
@@ -413,6 +431,10 @@ public actor ImageActor {
     ///                   paired `image(for:…)` call so the cache key aligns.
     ///   - cornerRadius: Rounding radius in points. Pass 0 for no rounding.
     ///   - scale:        Screen scale captured at a @MainActor call site.
+    ///   - priority:     Decode-gate admission tier (see `DecodePriority`). Caller-supplied —
+    ///                   no default, so every call site states its intent explicitly. Only
+    ///                   affects the order slots are handed out among contended waiters;
+    ///                   never cancels or preempts a decode that already holds a slot.
     ///   - isCurrent:    Optional generation-guard closure. Called immediately before the
     ///                   inner decode Task is spawned — no await between the check and the
     ///                   spawn. Returns `false` when the originating prefetch batch has been
@@ -424,6 +446,7 @@ public actor ImageActor {
         targetSize: CGSize,
         cornerRadius: CGFloat,
         scale: CGFloat,
+        priority: DecodePriority,
         isCurrent: (@Sendable () -> Bool)? = nil
     ) async {
         let decodeScale = min(scale, decodeScaleCeiling)
@@ -448,10 +471,11 @@ public actor ImageActor {
 
         #if canImport(XCTest)
         _testPrefetchedURLs.append(url)
+        _testPrefetchedPriorities.append((url, priority))
         #endif
 
         let task = Task<DecodeResult, Never>(priority: .utility) {
-            await self._networkFetchAndDecode(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: decodeScale)
+            await self._networkFetchAndDecode(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: decodeScale, priority: priority)
         }
         inFlight[key] = task
         let result = await task.value
@@ -518,7 +542,8 @@ public actor ImageActor {
         data: Data,
         targetSize: CGSize,
         cornerRadius: CGFloat,
-        scale: CGFloat
+        scale: CGFloat,
+        priority: DecodePriority
     ) async -> DecodeResult {
         // Cancellation paths below (`catch` + post-acquire guard) are exercised by
         // `cancelInFlightPrefetches`, which cancels the inner Task<DecodeResult, Never>
@@ -529,7 +554,7 @@ public actor ImageActor {
         // Acquire a decode slot. Throws CancellationError if cancelled while waiting;
         // the slot is never consumed on the thrown path — do NOT call signal().
         do {
-            try await decodeSemaphore.wait()
+            try await decodeSemaphore.wait(priority: priority)
         } catch {
             return DecodeResult(image: nil, rawSourceSize: nil)
         }
@@ -639,7 +664,8 @@ public actor ImageActor {
         url: URL,
         targetSize: CGSize,
         cornerRadius: CGFloat,
-        scale: CGFloat
+        scale: CGFloat,
+        priority: DecodePriority
     ) async -> DecodeResult {
         #if DEBUG
         let networkStart = CFAbsoluteTimeGetCurrent()
@@ -655,7 +681,7 @@ public actor ImageActor {
         log.debug("network \(url.lastPathComponent) \(String(format: "%.1f", networkMs))ms")
         #endif
         guard !Task.isCancelled else { return DecodeResult(image: nil, rawSourceSize: nil) }
-        return await _decode(data: data, targetSize: targetSize, cornerRadius: cornerRadius, scale: scale)
+        return await _decode(data: data, targetSize: targetSize, cornerRadius: cornerRadius, scale: scale, priority: priority)
     }
 
     /// Synchronous cache probe — callable from any isolation context, including `@MainActor`.

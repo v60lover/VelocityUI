@@ -297,7 +297,9 @@ public struct AsyncFeed<
                         let s = fragment.frame.size
                         let r = d.cornerRadius
                         group.addTask {
-                            await actor.prefetch(for: u, targetSize: s, cornerRadius: r, scale: capturedScale)
+                            // Pre-mount warm-up: nothing has scrolled yet, so these items are
+                            // "coming into view next" rather than "already scrolled past".
+                            await actor.prefetch(for: u, targetSize: s, cornerRadius: r, scale: capturedScale, priority: .ahead)
                         }
                     }
                 }

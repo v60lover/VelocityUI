@@ -7,6 +7,10 @@ import CoreGraphics
 import os
 @testable import VelocityUI
 
+#if DEBUG
+private let log = Logger(subsystem: "com.velocityui.tests", category: "ImageActorTests")
+#endif
+
 private final class CountingURLProtocol: URLProtocol {
     private static let _lock = OSAllocatedUnfairLock(initialState: 0)
 
@@ -439,6 +443,161 @@ final class ImageActorTests: XCTestCase {
         XCTAssertEqual(order, [0, 1, 2], "Waiters must wake in FIFO order")
     }
 
+    // MARK: - Test 9a: AsyncSemaphore priority admission — .visible jumps ahead of
+    // earlier-enqueued .ahead/.behind waiters; FIFO preserved within a tier.
+
+    /// Trace + assertion:
+    /// | Invariant | Assertion |
+    /// |---|---|
+    /// | A later-enqueued `.visible` waiter is admitted before earlier `.ahead`/`.behind` waiters | wake order starts with "visible0" even though it was enqueued last |
+    /// | FIFO is preserved WITHIN a tier | "behind0" wakes before "behind1" |
+    func testSemaphorePriorityAdmissionOrder() async throws {
+        let sem = AsyncSemaphore(value: 1)
+        try await sem.wait()  // take the only slot — every subsequent wait() below contends
+
+        let lock = OSAllocatedUnfairLock(initialState: [String]())
+
+        // Enqueue two .behind, then one .ahead, then one .visible — each spawned only after
+        // the previous one has actually reached its tier's queue (deterministic anchor via
+        // _waiterCount; no sleeping).
+        let behind0 = Task {
+            try? await sem.wait(priority: .behind)
+            lock.withLock { $0.append("behind0") }
+            await sem.signal()
+        }
+        while await sem._waiterCount(priority: .behind) < 1 { await Task.yield() }
+
+        let behind1 = Task {
+            try? await sem.wait(priority: .behind)
+            lock.withLock { $0.append("behind1") }
+            await sem.signal()
+        }
+        while await sem._waiterCount(priority: .behind) < 2 { await Task.yield() }
+
+        let ahead0 = Task {
+            try? await sem.wait(priority: .ahead)
+            lock.withLock { $0.append("ahead0") }
+            await sem.signal()
+        }
+        while await sem._waiterCount(priority: .ahead) < 1 { await Task.yield() }
+
+        // Enqueued LAST but must be admitted FIRST — proves priority beats arrival order.
+        let visible0 = Task {
+            try? await sem.wait(priority: .visible)
+            lock.withLock { $0.append("visible0") }
+            await sem.signal()
+        }
+        while await sem._waiterCount(priority: .visible) < 1 { await Task.yield() }
+
+        // Release the slot held at the top. Each waiter signals after recording, cascading
+        // the release through the remaining queue.
+        await sem.signal()
+
+        _ = await behind0.value
+        _ = await behind1.value
+        _ = await ahead0.value
+        _ = await visible0.value
+
+        XCTAssertEqual(
+            lock.withLock { $0 },
+            ["visible0", "ahead0", "behind0", "behind1"],
+            "A later-enqueued .visible waiter must be admitted before earlier .ahead/.behind "
+            + "waiters, and FIFO must hold within the .behind tier"
+        )
+    }
+
+    // MARK: - Test 9b: AsyncSemaphore cancellation removes the waiter from its own tier
+    // only, and never consumes a slot.
+
+    func testSemaphoreCancellationRemovesFromCorrectTierWithoutConsumingSlot() async throws {
+        let sem = AsyncSemaphore(value: 0)  // no slots — every wait() blocks
+
+        let behindTask = Task<Void, any Error> {
+            try await sem.wait(priority: .behind)
+        }
+        while await sem._waiterCount(priority: .behind) < 1 { await Task.yield() }
+
+        let visibleTask = Task<Void, any Error> {
+            try await sem.wait(priority: .visible)
+        }
+        while await sem._waiterCount(priority: .visible) < 1 { await Task.yield() }
+
+        behindTask.cancel()
+
+        do {
+            try await behindTask.value
+            XCTFail("Cancelled .behind waiter must throw CancellationError")
+        } catch is CancellationError {
+            // Expected — and by the time this continuation resumes, cancelWaiter() has
+            // already removed the entry from waiterTiers[.behind] (removal happens before
+            // the resume, in the same actor-isolated call).
+        }
+
+        let behindCountAfterCancel = await sem._waiterCount(priority: .behind)
+        XCTAssertEqual(
+            behindCountAfterCancel, 0,
+            "Cancelled waiter must be removed from its own tier"
+        )
+        let visibleCountAfterCancel = await sem._waiterCount(priority: .visible)
+        XCTAssertEqual(
+            visibleCountAfterCancel, 1,
+            "Cancelling a .behind waiter must not disturb the .visible tier's queue"
+        )
+
+        // Releasing once must wake the surviving .visible waiter — proving the cancelled
+        // waiter's slot was never consumed (it never held one to leak).
+        await sem.signal()
+        try await visibleTask.value
+
+        // A second signal() with no waiters left increments count. A fresh wait() must
+        // then hit the uncontended fast path (not block) — confirms no slot was lost to
+        // the earlier cancellation.
+        await sem.signal()
+        try await sem.wait()
+    }
+
+    // MARK: - Test 9c: AsyncSemaphore uncontended fast-path round-trip stays cheap
+    // (VelocityUI-qtc) — priority lanes must not add cost to the count>0 / no-waiter paths.
+
+    /// Threshold rationale: quiet hardware measures ~2-5us; loaded CI measures ~20-50us.
+    /// 100us is a generous ~10x-regression trigger, not a perf guarantee — it absorbs CI
+    /// noise while still catching the fast path silently growing (e.g. a per-call array
+    /// allocation, an executor hop, or a tier scan on every wait()/signal()).
+    func testSemaphoreUncontendedRoundTripStaysFast() async throws {
+        let sem = AsyncSemaphore(value: 1)
+        let warmupIterations = 1_000
+        let measuredIterations = 10_000
+
+        for _ in 0..<warmupIterations {
+            try await sem.wait()
+            await sem.signal()
+        }
+
+        var samplesNs: [UInt64] = []
+        samplesNs.reserveCapacity(measuredIterations)
+        for _ in 0..<measuredIterations {
+            let start = DispatchTime.now()
+            try await sem.wait()
+            await sem.signal()
+            let end = DispatchTime.now()
+            samplesNs.append(end.uptimeNanoseconds - start.uptimeNanoseconds)
+        }
+
+        let sorted = samplesNs.sorted()
+        let median = sorted[sorted.count / 2]
+        let p99 = sorted[max(0, Int(Double(sorted.count) * 0.99) - 1)]
+
+        #if DEBUG
+        log.debug("[qtc] AsyncSemaphore uncontended round-trip N=\(measuredIterations): median=\(median)ns  p99=\(p99)ns")
+        #endif
+
+        XCTAssertLessThan(
+            Double(p99), 100_000,
+            "Uncontended wait()/signal() round-trip p99 must stay < 100us; measured \(p99)ns. "
+            + "Priority lanes must not add cost to the uncontended fast path."
+        )
+    }
+
     // MARK: - Test 10: Actor work runs on the dedicated serial executor
 
     func testActorRunsOnDedicatedExecutor() async {
@@ -594,7 +753,7 @@ final class ImageActorTests: XCTestCase {
         XCTAssertEqual(CountingURLProtocol.count, 0, "preload() must not use the network session")
 
         // prefetch() must detect the cache hit and return without a network request.
-        await actor.prefetch(for: url, targetSize: size, cornerRadius: 0, scale: 1)
+        await actor.prefetch(for: url, targetSize: size, cornerRadius: 0, scale: 1, priority: .ahead)
         XCTAssertEqual(CountingURLProtocol.count, 0, "prefetch() on a cached key must not make a network request")
     }
 
@@ -610,7 +769,7 @@ final class ImageActorTests: XCTestCase {
         let url = URL(string: "https://test.prefetch.then.image.example/a.jpg")!
         let size = CGSize(width: 40, height: 40)
 
-        await actor.prefetch(for: url, targetSize: size, cornerRadius: 0, scale: 1)
+        await actor.prefetch(for: url, targetSize: size, cornerRadius: 0, scale: 1, priority: .ahead)
         XCTAssertEqual(CountingURLProtocol.count, 1, "prefetch() must make exactly one network request")
 
         let result = await actor.image(for: url, targetSize: size, cornerRadius: 0, scale: 1)
@@ -633,7 +792,7 @@ final class ImageActorTests: XCTestCase {
         // prefetch returns Void; image returns CGImage?. Wrap both as CGImage? so the group
         // is typed and Swift 6 doesn't flag the captured-var mutation.
         let results = await withTaskGroup(of: CGImage?.self) { group in
-            group.addTask { await actor.prefetch(for: url, targetSize: size, cornerRadius: 0, scale: 1); return nil }
+            group.addTask { await actor.prefetch(for: url, targetSize: size, cornerRadius: 0, scale: 1, priority: .ahead); return nil }
             group.addTask { return await actor.image(for: url, targetSize: size, cornerRadius: 0, scale: 1) }
             var collected: [CGImage?] = []
             for await r in group { collected.append(r) }
@@ -673,7 +832,7 @@ final class ImageActorTests: XCTestCase {
         // BarrierURLProtocol blocks startLoading() until released.
         // inFlight[key] is set before the actor suspends at `await task.value`.
         let prefetchTask = Task {
-            await actor.prefetch(for: url, targetSize: size, cornerRadius: 0, scale: 1)
+            await actor.prefetch(for: url, targetSize: size, cornerRadius: 0, scale: 1, priority: .ahead)
         }
 
         // Step 2: Block a background thread until the network request has started.
@@ -715,6 +874,87 @@ final class ImageActorTests: XCTestCase {
         )
     }
 
+    // MARK: - Test 21a: A .visible image() decode acquires a slot before a queued .behind prefetch
+
+    /// Trace + assertion:
+    /// | Invariant | Assertion |
+    /// |---|---|
+    /// | After N `.behind` waiters are blocked on the 3 decode slots, a subsequently-requested `.visible` decode acquires a slot before any remaining `.behind` | `visibleTask` completes with a non-nil image while the queued `.behind` prefetch is still waiting (`_testDecodeSemaphoreWaiterCount(priority: .behind) == 1`) after only one slot is released |
+    ///
+    /// Method: fill all 3 decode slots with `.behind` prefetches held open at
+    /// `_testDecodeBodyGateHook` (fires immediately after `decodeSemaphore.wait()` returns,
+    /// slot already held — every invocation blocks here, not just the first 3, so the test
+    /// can also catch and hold the `.visible` decode the instant it is admitted, before it
+    /// finishes and releases its own slot). Queue a 4th `.behind` prefetch (blocks — slots
+    /// exhausted), then a `.visible` image() call enqueued strictly after it. Release exactly
+    /// one held slot and confirm the very next hook invocation — held before it can complete
+    /// and cascade a second release — is the `.visible` call, with the earlier-queued
+    /// `.behind` waiter still queued at that instant.
+    func testVisibleDecodeJumpsAheadOfQueuedBehindPrefetch() async throws {
+        CountingURLProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CountingURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let actor = ImageActor(session: session, dimensionCache: DimensionCache())
+
+        let holderURLs = (0..<3).map { URL(string: "https://priority.holder.example/\($0).jpg")! }
+        let queuedBehindURL = URL(string: "https://priority.queued.behind.example/x.jpg")!
+        let visibleURL = URL(string: "https://priority.visible.example/x.jpg")!
+        let size = CGSize(width: 20, height: 20)
+
+        let atGate = AsyncSemaphore(value: 0)
+        let holdGate = AsyncSemaphore(value: 0)
+        await actor.set_testDecodeBodyGateHook {
+            await atGate.signal()          // notify test: this decode now holds a slot
+            try? await holdGate.wait()     // hold until the test explicitly releases it
+        }
+        defer { Task { await actor.set_testDecodeBodyGateHook(nil) } }
+
+        // Fill all 3 decode slots. Each acquires its slot on the uncontended fast path
+        // (count starts at 3) and blocks at the hook, holding it.
+        for url in holderURLs {
+            Task { await actor.prefetch(for: url, targetSize: size, cornerRadius: 0, scale: 1, priority: .behind) }
+        }
+        for _ in 0..<3 { try? await atGate.wait() }
+
+        // Queue a 4th .behind prefetch — slots exhausted, so it blocks in the .behind tier.
+        // Confirm it actually reached the queue before proceeding.
+        let queuedBehindTask = Task {
+            await actor.prefetch(for: queuedBehindURL, targetSize: size, cornerRadius: 0, scale: 1, priority: .behind)
+        }
+        while await actor._testDecodeSemaphoreWaiterCount(priority: .behind) < 1 { await Task.yield() }
+
+        // Queue a .visible image() call AFTER the .behind waiter — enqueued later, must
+        // still be admitted first once a slot frees.
+        let visibleTask = Task {
+            await actor.image(for: visibleURL, targetSize: size, cornerRadius: 0, scale: 1)
+        }
+        while await actor._testDecodeSemaphoreWaiterCount(priority: .visible) < 1 { await Task.yield() }
+
+        // Release exactly one held slot. Since only one waiter can be admitted, and every
+        // hook invocation now blocks (including this one), waiting on atGate again anchors
+        // precisely to "the admitted decode has acquired its slot and is held at the hook,
+        // not yet completed" — before it could finish and cascade a second release that
+        // would otherwise let the still-queued .behind waiter in too.
+        await holdGate.signal()
+        try? await atGate.wait()
+
+        let behindWaiterCountAfterOneRelease = await actor._testDecodeSemaphoreWaiterCount(priority: .behind)
+        XCTAssertEqual(
+            behindWaiterCountAfterOneRelease, 1,
+            "The .behind waiter must remain queued — the single released slot must have gone to .visible"
+        )
+
+        // Drain everything: the 2 remaining original holders, the now-held .visible decode,
+        // and (once admitted) the queued .behind decode. Extra signals beyond what's needed
+        // are harmless — AsyncSemaphore.signal() with no waiters just increments count.
+        for _ in 0..<8 { await holdGate.signal() }
+
+        let visibleResult = await visibleTask.value
+        XCTAssertNotNil(visibleResult, "The .visible decode must be admitted and complete")
+        await queuedBehindTask.value
+    }
+
     // MARK: - Test 22: prefetch() populates DimensionCache with raw source dimensions
 
     func testPrefetchPopulatesDimensionCache() async throws {
@@ -729,7 +969,7 @@ final class ImageActorTests: XCTestCase {
         let size = CGSize(width: 40, height: 40)
 
         XCTAssertNil(dc.get(url), "DimensionCache must be empty before prefetch()")
-        await actor.prefetch(for: url, targetSize: size, cornerRadius: 0, scale: 1)
+        await actor.prefetch(for: url, targetSize: size, cornerRadius: 0, scale: 1, priority: .ahead)
 
         // CountingURLProtocol returns a 2×2 JPEG; raw source dimensions must be stored.
         let stored = dc.get(url)
@@ -751,7 +991,7 @@ final class ImageActorTests: XCTestCase {
         let size = CGSize(width: 50.4, height: 80.6)
         let scale: CGFloat = 2
 
-        await actor.prefetch(for: url, targetSize: size, cornerRadius: 8, scale: scale)
+        await actor.prefetch(for: url, targetSize: size, cornerRadius: 8, scale: scale, priority: .ahead)
         XCTAssertEqual(CountingURLProtocol.count, 1, "prefetch() must make exactly one network request")
 
         // image() with identical fractional params must hit the cache and not re-fetch.

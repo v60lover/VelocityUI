@@ -209,12 +209,17 @@ public actor RenderPipeline {
                         let capturedSize = fragment.frame.size
                         let capturedRadius = d.cornerRadius
                         let gen = myGen
+                        // Items at/after leadingIndex are coming into view next; items before
+                        // it were already scrolled past. No scroll-direction signal exists yet —
+                        // this assumes downward scroll; a velocity-aware pass can refine it later.
+                        let p: DecodePriority = i >= leadingIndex ? .ahead : .behind
                         spawnedPrefetches.append(Task {
                             await actor.prefetch(
                                 for: capturedURL,
                                 targetSize: capturedSize,
                                 cornerRadius: capturedRadius,
                                 scale: capturedScale,
+                                priority: p,
                                 isCurrent: { token.generation == gen }
                             )
                         })

@@ -866,7 +866,7 @@ final class RenderPipelineTests: XCTestCase {
         // enters _decode(), acquires a slot, and blocks at the hook.
         for url in cancelURLs {
             let capturedURL = url
-            Task { await actor.prefetch(for: capturedURL, targetSize: targetSize, cornerRadius: 0, scale: 1) }
+            Task { await actor.prefetch(for: capturedURL, targetSize: targetSize, cornerRadius: 0, scale: 1, priority: .ahead) }
         }
 
         // Deterministic anchor: wait until all 3 decode slots are held.
@@ -880,7 +880,7 @@ final class RenderPipelineTests: XCTestCase {
 
         // Witness starts with 3 slots in-cancellation; blocks at decodeSemaphore.wait()
         // until a cancelled task releases its slot, then proceeds through the hook no-op path.
-        let witnessTask = Task { await actor.prefetch(for: witnessURL, targetSize: targetSize, cornerRadius: 0, scale: 1) }
+        let witnessTask = Task { await actor.prefetch(for: witnessURL, targetSize: targetSize, cornerRadius: 0, scale: 1, priority: .ahead) }
         await witnessTask.value
 
         XCTAssertGreaterThanOrEqual(
@@ -891,6 +891,73 @@ final class RenderPipelineTests: XCTestCase {
             XCTAssertEqual(
                 PipelinePrefetchCountingProtocol.count(for: url), 1,
                 "Cancelled URL \(i) must have exactly 1 network fetch — no retry after deep cancel"
+            )
+        }
+    }
+
+    // MARK: - Test 13: onIndexBoundary classifies prefetch priority by index vs. leadingIndex
+
+    /// Verifies VelocityUI-he0: items at/after leadingIndex request `.ahead`; items before it
+    /// request `.behind`. Uses the `_testGetPrefetchedPriorities()` seam on ImageActor to
+    /// capture the per-call priority without needing a fake ImageActor threaded through
+    /// RenderPipeline.
+    func testPrefetchPriorityReflectsAheadBehindClassification() async {
+        let n = 6
+        let imageURLs = (0..<n).map { i in
+            URL(string: "https://prefetch-priority.example.com/\(i).jpg")!
+        }
+
+        PipelinePrefetchCountingProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [PipelinePrefetchCountingProtocol.self]
+        let session = URLSession(configuration: config)
+        let dc = DimensionCache(session: session)
+        let imageActor = ImageActor(session: session, dimensionCache: dc)
+        await imageActor._testResetPrefetchedURLs()
+        await imageActor._testResetPrefetchedPriorities()
+
+        func makeURLTable(_ id: Int, url: URL) -> NodeTable {
+            NodeTable(
+                itemID: id,
+                nodes: [.image(ImageDescriptor(
+                    url: url, aspectRatio: 1.5, contentMode: 0,
+                    cornerRadius: 0, layoutHash: id, appearanceHash: 0
+                ))],
+                parentIndices: [-1],
+                layoutHash: id,
+                appearanceHash: 0
+            )
+        }
+
+        let tables = (0..<n).map { makeURLTable($0, url: imageURLs[$0]) }
+        let range = await WorkingRange(capacity: 30)
+        let leadingIndex = 3
+
+        // ahead=n, behind=n: prefetchRange clamps to [0, n) — the full table — so every
+        // index's classification is exercised in one boundary call.
+        let pipeline = RenderPipeline(
+            textPool: TextMeasurementPool(),
+            layoutCache: LayoutCache(),
+            imageActor: imageActor,
+            prefetchAhead: n,
+            prefetchBehind: n
+        )
+
+        await pipeline.onIndexBoundary(
+            leadingIndex, workingRange: range, tables: tables, availableWidth: 320, scale: 2
+        )
+        await pipeline.waitForCurrentPrefetch()
+
+        let priorities = await imageActor._testGetPrefetchedPriorities()
+        let byURL = Dictionary(uniqueKeysWithValues: priorities.map { ($0.url, $0.priority) })
+
+        XCTAssertEqual(byURL.count, n, "Every image URL must have a recorded prefetch priority")
+
+        for (i, url) in imageURLs.enumerated() {
+            let expected: DecodePriority = i >= leadingIndex ? .ahead : .behind
+            XCTAssertEqual(
+                byURL[url], expected,
+                "Table index \(i) (leadingIndex=\(leadingIndex)) must request \(expected); got \(String(describing: byURL[url]))"
             )
         }
     }
