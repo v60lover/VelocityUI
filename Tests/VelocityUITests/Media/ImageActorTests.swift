@@ -598,6 +598,152 @@ final class ImageActorTests: XCTestCase {
         )
     }
 
+    // MARK: - Test 9d: AsyncSemaphore.elevate moves a queued waiter to a higher tier and it
+    // is admitted ahead of a non-elevated waiter in its original tier (VelocityUI-8nz).
+
+    /// Trace + assertion:
+    /// | Invariant | Assertion |
+    /// |---|---|
+    /// | `elevate(id: A, to: .visible)` moves A out of `.behind` into `.visible` while still queued | `_waiterCount(.behind) == 1` and `_waiterCount(.visible) == 1` immediately after the call |
+    /// | The elevated waiter A is admitted before non-elevated `.behind` waiter B, even though A was enqueued first at `.behind` (elevation, not arrival order, decides) | wake order is `["A", "B"]` |
+    func testSemaphoreElevateAdmitsAheadOfOriginalTier() async throws {
+        let sem = AsyncSemaphore(value: 1)
+        try await sem.wait()  // take the only slot — both waiters below contend
+
+        let lock = OSAllocatedUnfairLock(initialState: [String]())
+        let idA = UUID()
+        let idB = UUID()
+
+        let taskA = Task {
+            try? await sem.wait(id: idA, priority: .behind)
+            lock.withLock { $0.append("A") }
+            await sem.signal()
+        }
+        while await sem._waiterCount(priority: .behind) < 1 { await Task.yield() }
+
+        let taskB = Task {
+            try? await sem.wait(id: idB, priority: .behind)
+            lock.withLock { $0.append("B") }
+            await sem.signal()
+        }
+        while await sem._waiterCount(priority: .behind) < 2 { await Task.yield() }
+
+        await sem.elevate(id: idA, to: .visible)
+
+        let behindCountAfterElevate = await sem._waiterCount(priority: .behind)
+        XCTAssertEqual(behindCountAfterElevate, 1, "A must have moved out of .behind")
+        let visibleCountAfterElevate = await sem._waiterCount(priority: .visible)
+        XCTAssertEqual(visibleCountAfterElevate, 1, "A must now be queued in .visible")
+
+        await sem.signal()  // admits the sole .visible waiter (A) ahead of .behind
+        _ = await taskA.value
+
+        await sem.signal()  // admits the remaining .behind waiter (B)
+        _ = await taskB.value
+
+        XCTAssertEqual(
+            lock.withLock { $0 }, ["A", "B"],
+            "Elevated waiter A must be admitted before non-elevated waiter B"
+        )
+    }
+
+    // MARK: - Test 9e: AsyncSemaphore.elevate with an id not queued in any lower tier is a
+    // safe no-op (unknown id — never enqueued, or enqueued at/above the target already).
+
+    func testSemaphoreElevateUnknownIdIsNoOp() async throws {
+        let sem = AsyncSemaphore(value: 1)
+        try await sem.wait()  // take the only slot
+
+        let queuedID = UUID()
+        let waiterTask = Task {
+            try? await sem.wait(id: queuedID, priority: .behind)
+            await sem.signal()
+        }
+        while await sem._waiterCount(priority: .behind) < 1 { await Task.yield() }
+
+        // Unrelated id — must not crash, and must not disturb the real waiter's tier.
+        await sem.elevate(id: UUID(), to: .visible)
+
+        let behindCountAfterNoOp = await sem._waiterCount(priority: .behind)
+        XCTAssertEqual(behindCountAfterNoOp, 1, "Unknown-id elevate must not move the real waiter")
+        let visibleCountAfterNoOp = await sem._waiterCount(priority: .visible)
+        XCTAssertEqual(visibleCountAfterNoOp, 0, "Unknown-id elevate must not create a phantom .visible entry")
+
+        await sem.signal()
+        _ = await waiterTask.value
+    }
+
+    // MARK: - Test 9f: AsyncSemaphore.elevate targeting a waiter that already holds its slot
+    // is a safe no-op — no crash, no double-signal, no count corruption.
+
+    func testSemaphoreElevateAfterSlotAcquiredIsNoOpAndDoesNotDoubleSignal() async throws {
+        let sem = AsyncSemaphore(value: 1)
+        let id = UUID()
+        try await sem.wait(id: id, priority: .behind)  // uncontended fast path — id holds the slot now
+
+        // id is not queued anywhere (it already holds the slot) — elevate must no-op.
+        await sem.elevate(id: id, to: .visible)
+
+        let visibleCountWhileHeld = await sem._waiterCount(priority: .visible)
+        XCTAssertEqual(visibleCountWhileHeld, 0)
+        let behindCountWhileHeld = await sem._waiterCount(priority: .behind)
+        XCTAssertEqual(behindCountWhileHeld, 0)
+
+        await sem.signal()      // release the held slot — count goes 0 -> 1
+        try await sem.wait()    // fresh wait() hits the fast path — proves count wasn't corrupted
+
+        // Elevate again now that the same id has "completed" (released, no longer tracked
+        // anywhere in the semaphore at all) — still a safe no-op.
+        await sem.elevate(id: id, to: .visible)
+        let visibleCountAfterCompletion = await sem._waiterCount(priority: .visible)
+        XCTAssertEqual(visibleCountAfterCompletion, 0)
+    }
+
+    // MARK: - Test 9g: Cancelling a waiter AFTER it has been elevated to a different tier
+    // still throws CancellationError and is fully removed — not just from its original tier
+    // (VelocityUI-8nz fix-round regression: cancelWaiter must scan all tiers by id, since
+    // elevate(id:to:) can have moved the waiter since wait() enqueued it).
+
+    func testSemaphoreCancellationAfterElevationRemovesFromAllTiers() async throws {
+        let sem = AsyncSemaphore(value: 0)  // no slots — every wait() blocks
+
+        let idA = UUID()
+        let taskA = Task<Void, any Error> {
+            try await sem.wait(id: idA, priority: .behind)
+        }
+        while await sem._waiterCount(priority: .behind) < 1 { await Task.yield() }
+
+        await sem.elevate(id: idA, to: .visible)
+
+        let behindCountAfterElevate = await sem._waiterCount(priority: .behind)
+        XCTAssertEqual(behindCountAfterElevate, 0, "A must have moved out of .behind")
+        let visibleCountAfterElevate = await sem._waiterCount(priority: .visible)
+        XCTAssertEqual(visibleCountAfterElevate, 1, "A must now be queued in .visible")
+
+        // Cancel A while it sits in .visible — NOT the tier wait() originally enqueued it
+        // into. A tier-hinted cancelWaiter(id:priority:) would look in .behind, find nothing,
+        // and leave A neither removed nor resumed — the bug this test guards against.
+        taskA.cancel()
+
+        do {
+            try await taskA.value
+            XCTFail("Cancelled waiter must throw CancellationError even after elevation to a different tier")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        let behindCountAfterCancel = await sem._waiterCount(priority: .behind)
+        XCTAssertEqual(behindCountAfterCancel, 0, "A must not reappear in its original tier")
+        let visibleCountAfterCancel = await sem._waiterCount(priority: .visible)
+        XCTAssertEqual(visibleCountAfterCancel, 0, "A must be removed from the tier it was elevated into")
+
+        // A second signal() with no waiters left increments count. A fresh wait() must
+        // then hit the uncontended fast path (not block) — confirms the cancelled waiter's
+        // slot was never consumed (no count corruption from the elevation + cancellation).
+        await sem.signal()
+        try await sem.wait()
+    }
+
     // MARK: - Test 10: Actor work runs on the dedicated serial executor
 
     func testActorRunsOnDedicatedExecutor() async {
@@ -953,6 +1099,181 @@ final class ImageActorTests: XCTestCase {
         let visibleResult = await visibleTask.value
         XCTAssertNotNil(visibleResult, "The .visible decode must be admitted and complete")
         await queuedBehindTask.value
+    }
+
+    // MARK: - Test 21b: A .visible image() joining an already-queued .behind prefetch's
+    // inFlight decode elevates that decode's semaphore waiter to .visible — admitted ahead of
+    // an independent .behind waiter that was queued earlier but never joined (VelocityUI-8nz).
+
+    /// Trace + assertion:
+    /// | Invariant | Assertion |
+    /// |---|---|
+    /// | `image()` joining an in-flight `.behind` prefetch elevates `inFlightDecodes[key]` to `.visible` | `actor._testInFlightDecodePriority(...) == .visible` right after the join |
+    /// | The elevation moves the already-queued semaphore waiter out of `.behind` into `.visible` | `_testDecodeSemaphoreWaiterCount(.behind)` drops from 2 to 1; `_testDecodeSemaphoreWaiterCount(.visible)` becomes 1 |
+    /// | The elevated (joined) decode is admitted ahead of the independent, never-joined `.behind` waiter | releasing exactly one slot leaves the independent `.behind` waiter still queued |
+    func testVisibleImageJoinElevatesInFlightPrefetchAheadOfIndependentBehindWaiter() async throws {
+        CountingURLProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CountingURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let actor = ImageActor(session: session, dimensionCache: DimensionCache())
+
+        let holderURLs = (0..<3).map { URL(string: "https://elevate.holder.example/\($0).jpg")! }
+        let joinedURL = URL(string: "https://elevate.joined.example/x.jpg")!
+        let independentBehindURL = URL(string: "https://elevate.independent.behind.example/x.jpg")!
+        let size = CGSize(width: 20, height: 20)
+
+        let atGate = AsyncSemaphore(value: 0)
+        let holdGate = AsyncSemaphore(value: 0)
+        await actor.set_testDecodeBodyGateHook {
+            await atGate.signal()
+            try? await holdGate.wait()
+        }
+        defer { Task { await actor.set_testDecodeBodyGateHook(nil) } }
+
+        // Fill all 3 decode slots so both waiters below must queue.
+        for url in holderURLs {
+            Task { await actor.prefetch(for: url, targetSize: size, cornerRadius: 0, scale: 1, priority: .behind) }
+        }
+        for _ in 0..<3 { try? await atGate.wait() }
+
+        // This prefetch is the one that will later be JOINED by a .visible image() call —
+        // "prefetch started it, now it's on screen". Queues at .behind (slots exhausted).
+        let joinedPrefetchTask = Task {
+            await actor.prefetch(for: joinedURL, targetSize: size, cornerRadius: 0, scale: 1, priority: .behind)
+        }
+        while await actor._testDecodeSemaphoreWaiterCount(priority: .behind) < 1 { await Task.yield() }
+
+        // An independent .behind prefetch — never joined by anything — must stay put.
+        let independentBehindTask = Task {
+            await actor.prefetch(for: independentBehindURL, targetSize: size, cornerRadius: 0, scale: 1, priority: .behind)
+        }
+        while await actor._testDecodeSemaphoreWaiterCount(priority: .behind) < 2 { await Task.yield() }
+
+        // The .visible image() call joins the SAME key as joinedPrefetchTask (same URL/size/
+        // radius/scale) — it must hit the inFlight coalescing path and elevate.
+        let visibleJoinTask = Task {
+            await actor.image(for: joinedURL, targetSize: size, cornerRadius: 0, scale: 1)
+        }
+        while await actor._testDecodeSemaphoreWaiterCount(priority: .visible) < 1 { await Task.yield() }
+
+        let joinedPriorityAfterElevate = await actor._testInFlightDecodePriority(url: joinedURL, targetSize: size, cornerRadius: 0, scale: 1)
+        XCTAssertEqual(
+            joinedPriorityAfterElevate,
+            .visible,
+            "Joining a .visible image() call must elevate the in-flight admission record to .visible"
+        )
+        let behindCountAfterElevate = await actor._testDecodeSemaphoreWaiterCount(priority: .behind)
+        XCTAssertEqual(
+            behindCountAfterElevate, 1,
+            "The joined decode must have moved OUT of .behind, leaving only the independent waiter"
+        )
+
+        // Release exactly one held slot. Every hook invocation blocks (holders included), so
+        // waiting on atGate again anchors precisely to "the admitted decode is held at the
+        // hook" before it could finish and cascade a second release.
+        await holdGate.signal()
+        try? await atGate.wait()
+
+        let behindCountAfterOneRelease = await actor._testDecodeSemaphoreWaiterCount(priority: .behind)
+        XCTAssertEqual(
+            behindCountAfterOneRelease, 1,
+            "The independent .behind waiter must remain queued — the released slot went to the elevated (now .visible) joined decode"
+        )
+
+        // Drain everything.
+        for _ in 0..<8 { await holdGate.signal() }
+
+        let visibleResult = await visibleJoinTask.value
+        XCTAssertNotNil(visibleResult, "The joined+elevated decode must complete and image() must return a valid CGImage")
+        await joinedPrefetchTask.value
+        await independentBehindTask.value
+    }
+
+    // MARK: - Test 21c: A .visible image() join that lands while the prefetch decode is still
+    // in its network-fetch phase (before it has even reached decodeSemaphore.wait()) elevates
+    // inFlightDecodes[key] in time for _decode()'s admission read — the decode goes straight
+    // into the .visible tier and never touches .behind at all (VelocityUI-8nz).
+
+    func testVisibleImageJoinDuringNetworkPhaseElevatesBeforeDecodeReachesSemaphore() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [BarrierURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let actor = ImageActor(session: session, dimensionCache: DimensionCache())
+
+        let holderURLs = (0..<3).map { URL(string: "https://elevate.network.holder.example/\($0).jpg")! }
+        let sharedURL = URL(string: "https://elevate.network.shared.example/x.jpg")!
+        let size = CGSize(width: 20, height: 20)
+
+        let atGate = AsyncSemaphore(value: 0)
+        let holdGate = AsyncSemaphore(value: 0)
+        await actor.set_testDecodeBodyGateHook {
+            await atGate.signal()
+            try? await holdGate.wait()
+        }
+        defer { Task { await actor.set_testDecodeBodyGateHook(nil) } }
+
+        // Fill all 3 decode slots via holder prefetches. Each blocks momentarily in
+        // BarrierURLProtocol; release the network barrier for each immediately so they reach
+        // the decode body hook and hold their slot there.
+        var holderTasks: [Task<Void, Never>] = []
+        for url in holderURLs {
+            holderTasks.append(Task {
+                await actor.prefetch(for: url, targetSize: size, cornerRadius: 0, scale: 1, priority: .behind)
+            })
+        }
+        for _ in holderURLs {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    BarrierURLProtocol.waitForHit()
+                    cont.resume()
+                }
+            }
+            BarrierURLProtocol.release()
+        }
+        for _ in 0..<3 { try? await atGate.wait() }
+
+        // Launch the prefetch that will be joined. Its network fetch blocks in
+        // BarrierURLProtocol — it has NOT reached decodeSemaphore.wait() yet.
+        let prefetchTask = Task {
+            await actor.prefetch(for: sharedURL, targetSize: size, cornerRadius: 0, scale: 1, priority: .behind)
+        }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                BarrierURLProtocol.waitForHit()
+                cont.resume()
+            }
+        }
+
+        // Join with a .visible image() call while the decode is still stuck in the network
+        // phase — inFlight[key] is populated, but inFlightDecodes[key] still reads .behind
+        // and the semaphore has no waiter for this id yet (elevate() will no-op on the
+        // semaphore side, but the actor-side record updates synchronously).
+        let imageTask = Task {
+            await actor.image(for: sharedURL, targetSize: size, cornerRadius: 0, scale: 1)
+        }
+        while await actor._testInFlightDecodePriority(url: sharedURL, targetSize: size, cornerRadius: 0, scale: 1) != .visible {
+            await Task.yield()
+        }
+
+        // Release the network barrier. The decode proceeds into _decode(), reads the
+        // (already-elevated) admission record, and calls wait(priority: .visible) directly —
+        // it must queue straight into .visible, never touching .behind.
+        BarrierURLProtocol.release()
+
+        while await actor._testDecodeSemaphoreWaiterCount(priority: .visible) < 1 { await Task.yield() }
+        let behindCountAfterNetworkPhaseElevation = await actor._testDecodeSemaphoreWaiterCount(priority: .behind)
+        XCTAssertEqual(
+            behindCountAfterNetworkPhaseElevation, 0,
+            "The network-phase-elevated decode must never enqueue in .behind — it should read .visible before its first wait() call"
+        )
+
+        for _ in 0..<8 { await holdGate.signal() }
+
+        let imageResult = await imageTask.value
+        XCTAssertNotNil(imageResult, "The network-phase-elevated join must complete and image() must return a valid CGImage")
+        await prefetchTask.value
+        for t in holderTasks { await t.value }
     }
 
     // MARK: - Test 22: prefetch() populates DimensionCache with raw source dimensions

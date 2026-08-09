@@ -33,24 +33,34 @@ public actor AsyncSemaphore {
     /// Blocks in FIFO-within-tier order when count == 0, admitted by tier per `DecodePriority`
     /// ordering. Throws `CancellationError` on cancellation — the slot is not consumed, and
     /// the caller must NOT call `signal()`.
-    public func wait(priority: DecodePriority = .visible) async throws {
+    ///
+    /// - Parameter id: Identity used to target this waiter from `elevate(id:to:)`. Defaults to
+    ///   `nil`, in which case a fresh `UUID()` is generated only on the contended path below
+    ///   (preserves prior behaviour — and prior COST — for every existing call site; the
+    ///   uncontended `count > 0` fast path never allocates a UUID, matching the pre-priority
+    ///   fast path exactly). Callers that want a later caller to be able to elevate this wait
+    ///   — e.g. `ImageActor` tracking a decode's admission record before it reaches this call
+    ///   — pass a stable id they already generated.
+    public func wait(id: UUID? = nil, priority: DecodePriority = .visible) async throws {
         try Task.checkCancellation()
         if count > 0 { count -= 1; return }
 
-        let id = UUID()
+        let waiterID = id ?? UUID()
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in
                 if Task.isCancelled {
                     // Cancellation raced the continuation registration — resolve immediately.
                     cont.resume(throwing: CancellationError())
                 } else {
-                    waiterTiers[priority.rawValue].append((id: id, cont: cont))
+                    waiterTiers[priority.rawValue].append((id: waiterID, cont: cont))
                     totalWaiterCount += 1
                 }
             }
         } onCancel: {
             // onCancel fires on an arbitrary thread; hop to the actor to remove safely.
-            Task { [id, priority] in await self.cancelWaiter(id: id, priority: priority) }
+            // Scans all tiers by id (not just `priority`'s) — `elevate(id:to:)` can have moved
+            // this waiter to a different tier since it was enqueued above.
+            Task { [waiterID] in await self.cancelWaiter(id: waiterID) }
         }
     }
 
@@ -68,14 +78,46 @@ public actor AsyncSemaphore {
         }
     }
 
+    /// Move a still-queued waiter to a higher-priority tier — used when a later, more
+    /// urgent caller joins work that an earlier, lower-priority caller already started
+    /// (e.g. a `.visible` `image()` call coalescing onto an in-flight `.behind` prefetch).
+    ///
+    /// Scans only tiers strictly lower-priority than `newPriority` (`rawValue >
+    /// newPriority.rawValue`); if `id` is found there, it is removed from that tier and
+    /// appended to the back of `newPriority`'s FIFO queue. `totalWaiterCount` is unchanged —
+    /// this is a move between tiers, not an add or a remove.
+    ///
+    /// No-op — safe to call unconditionally — when `id` is not currently queued in any
+    /// lower tier. This covers: the waiter already acquired its slot, already completed,
+    /// was already cancelled, has not yet enqueued (still between `wait()`'s cancellation
+    /// check and the tier append — see the residual race noted at `ImageActor._decode`'s
+    /// admission read), or is already at/above `newPriority`. Never touches `count`, never
+    /// resumes a continuation — `elevate` only reorders queued waiters, it does not admit one.
+    public func elevate(id: UUID, to newPriority: DecodePriority) {
+        for tier in waiterTiers.indices where tier > newPriority.rawValue {
+            guard let idx = waiterTiers[tier].firstIndex(where: { $0.id == id }) else { continue }
+            let waiter = waiterTiers[tier].remove(at: idx)
+            waiterTiers[newPriority.rawValue].append(waiter)
+            return
+        }
+    }
+
     // MARK: - Private
 
-    private func cancelWaiter(id: UUID, priority: DecodePriority) {
-        // If signal() already dequeued this waiter, the id is gone — nothing to do.
-        guard let idx = waiterTiers[priority.rawValue].firstIndex(where: { $0.id == id }) else { return }
-        waiterTiers[priority.rawValue].remove(at: idx).cont.resume(throwing: CancellationError())
-        totalWaiterCount -= 1
-        // Slot is NOT consumed — the cancelled caller must not signal().
+    /// Scans every tier by `id` — not just the tier `wait()` originally enqueued into —
+    /// because `elevate(id:to:)` may have moved this waiter to a different tier since then.
+    /// A tier-hinted lookup would silently miss an elevated waiter's cancellation, leaving it
+    /// neither removed nor resumed, in violation of `wait()`'s cancellation contract.
+    private func cancelWaiter(id: UUID) {
+        for tier in waiterTiers.indices {
+            // If signal() already dequeued this waiter, the id is gone from every tier —
+            // nothing to do.
+            guard let idx = waiterTiers[tier].firstIndex(where: { $0.id == id }) else { continue }
+            waiterTiers[tier].remove(at: idx).cont.resume(throwing: CancellationError())
+            totalWaiterCount -= 1
+            // Slot is NOT consumed — the cancelled caller must not signal().
+            return
+        }
     }
 
     #if canImport(XCTest)

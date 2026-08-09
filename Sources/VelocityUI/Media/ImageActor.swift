@@ -115,6 +115,19 @@ public actor ImageActor {
     // Required for cachedImage() — a nonisolated synchronous probe on the hot path.
     nonisolated(unsafe) private let cache = NSCache<ImageCacheKey, CachedImage>()
     private var inFlight: [ImageCacheKey: Task<DecodeResult, Never>] = [:]
+    /// Per-key admission record for the in-flight decode's `decodeSemaphore` waiter.
+    ///
+    /// Populated/cleared in lockstep with `inFlight` at every call site (`image()`,
+    /// `preload()`, `prefetch()`) — same key, same moment. Exists so a later, higher-priority
+    /// joiner (see `image()` step 2 / `elevateInFlightDecode(key:to:)`) can find the waiter
+    /// identity and current tier of a decode that another caller already started, and elevate
+    /// it via `AsyncSemaphore.elevate(id:to:)` — without which the joiner would silently
+    /// inherit the original caller's (possibly lower) priority for the remainder of the wait.
+    ///
+    /// The `id` is generated here, once per key, at `inFlight` population time — NOT inside
+    /// `AsyncSemaphore.wait()` — so it stays stable and lookup-able across the (potentially
+    /// long) network-fetch phase, before the decode has even reached the semaphore.
+    private var inFlightDecodes: [ImageCacheKey: (id: UUID, priority: DecodePriority)] = [:]
     private let session: URLSession
     /// `nonisolated` so RenderEnvironment can check identity (===) in its designated init.
     nonisolated let dimensionCache: DimensionCache
@@ -270,6 +283,22 @@ public actor ImageActor {
     func _testDecodeSemaphoreWaiterCount(priority: DecodePriority) async -> Int {
         await decodeSemaphore._waiterCount(priority: priority)
     }
+
+    /// Test-only: the admission priority currently recorded in `inFlightDecodes` for the key
+    /// identified by these parameters, or `nil` if there is no in-flight decode for that key.
+    /// `ImageCacheKey` is file-private, so tests cannot construct one directly — this hook
+    /// takes the same parameters `image()`/`preload()`/`prefetch()` do and builds the key
+    /// internally. Lets a test observe a `VelocityUI-8nz` elevation (`.behind`/`.ahead` →
+    /// `.visible`) directly, independent of `AsyncSemaphore`'s own waiter-tier bookkeeping.
+    func _testInFlightDecodePriority(
+        url: URL,
+        targetSize: CGSize,
+        cornerRadius: CGFloat,
+        scale: CGFloat
+    ) -> DecodePriority? {
+        let key = ImageCacheKey(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: min(scale, decodeScaleCeiling))
+        return inFlightDecodes[key]?.priority
+    }
     #endif
 
     // MARK: - Public API
@@ -306,8 +335,11 @@ public actor ImageActor {
         if let hit = cache.object(forKey: key) { return hit.image }
 
         // 2. Join an existing in-flight task for the same key rather than launching a
-        //    second network fetch + decode — creator handles cache store.
+        //    second network fetch + decode — creator handles cache store. A .visible
+        //    caller joining a lower-tier (prefetch-started) decode elevates it first —
+        //    "prefetch started it, now it's on screen" (VelocityUI-8nz).
         if let existing = inFlight[key] {
+            await elevateInFlightDecode(key: key, to: .visible)
             let result = await existing.value
             return result.image
         }
@@ -317,11 +349,13 @@ public actor ImageActor {
 
         // 4. Launch a task that owns the network fetch + decode for this key.
         let task = Task<DecodeResult, Never> {
-            await self._networkFetchAndDecode(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: decodeScale, priority: .visible)
+            await self._networkFetchAndDecode(key: key, url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: decodeScale, priority: .visible)
         }
         inFlight[key] = task
+        inFlightDecodes[key] = (id: UUID(), priority: .visible)
         let result = await task.value
         inFlight[key] = nil
+        inFlightDecodes[key] = nil
 
         // 5. Cache store + DimensionCache side-effect.
         if let decoded = result.image {
@@ -386,6 +420,7 @@ public actor ImageActor {
         let capturedScale = decodeScale
         let task = Task<DecodeResult, Never> {
             await self._decode(
+                key: key,
                 data: capturedData,
                 targetSize: capturedTargetSize,
                 cornerRadius: capturedCornerRadius,
@@ -394,8 +429,10 @@ public actor ImageActor {
             )
         }
         inFlight[key] = task
+        inFlightDecodes[key] = (id: UUID(), priority: .visible)
         let result = await task.value
         inFlight[key] = nil
+        inFlightDecodes[key] = nil
 
         if let decoded = result.image {
             let cost = decoded.width * decoded.height * 4
@@ -475,11 +512,13 @@ public actor ImageActor {
         #endif
 
         let task = Task<DecodeResult, Never>(priority: .utility) {
-            await self._networkFetchAndDecode(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: decodeScale, priority: priority)
+            await self._networkFetchAndDecode(key: key, url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: decodeScale, priority: priority)
         }
         inFlight[key] = task
+        inFlightDecodes[key] = (id: UUID(), priority: priority)
         let result = await task.value
         inFlight[key] = nil
+        inFlightDecodes[key] = nil
 
         if let decoded = result.image {
             let cost = decoded.width * decoded.height * 4
@@ -532,13 +571,32 @@ public actor ImageActor {
 
     // MARK: - Private helpers
 
+    /// Elevates the semaphore waiter for `key`'s in-flight decode to `newPriority`, if that
+    /// decode is currently recorded at a strictly lower priority. No-op otherwise (already
+    /// at/above `newPriority`, or no in-flight record for `key`).
+    ///
+    /// Used by `image()` step 2 when a `.visible` caller joins a decode that a lower-priority
+    /// caller (prefetch) already started — "prefetch started it, now it's on screen"
+    /// (VelocityUI-8nz). `preload()`/`prefetch()` joiners do not call this — only a `.visible`
+    /// `image()` join elevates.
+    private func elevateInFlightDecode(key: ImageCacheKey, to newPriority: DecodePriority) async {
+        guard let admission = inFlightDecodes[key], admission.priority > newPriority else { return }
+        inFlightDecodes[key]?.priority = newPriority
+        await decodeSemaphore.elevate(id: admission.id, to: newPriority)
+    }
+
     /// Acquire a decode slot, run CGImageSource decode on `decodeQueue`, release the slot,
     /// and return the result. Semaphore acquire/release and continuation are owned here so
     /// callers share one implementation.
     ///
+    /// - Parameter key: The in-flight cache key this decode is running for — used solely to
+    ///   read `inFlightDecodes[key]` immediately before `decodeSemaphore.wait()`, so a priority
+    ///   elevation that happened during the (potentially long) network-fetch phase — before
+    ///   this decode ever reached the semaphore — still takes effect on first admission.
     /// - Returns: `DecodeResult(image: nil, rawSourceSize: nil)` on cancellation or decode
     ///   failure. Never throws — all error paths are folded into the nil result.
     private func _decode(
+        key: ImageCacheKey,
         data: Data,
         targetSize: CGSize,
         cornerRadius: CGFloat,
@@ -551,10 +609,24 @@ public actor ImageActor {
         // arrives while blocked on `decodeSemaphore.wait()`; the post-acquire guard
         // fires if cancellation arrives after the slot is consumed. Both release the slot.
         //
+        // Read the current admission record immediately before `wait()` — no `await` between
+        // this read and the call below — so the id/priority passed in reflect any elevation
+        // applied since the decode Task was created (e.g. while still in the network-fetch
+        // phase in `_networkFetchAndDecode`, before this function was even called). Falls back
+        // to a fresh id and the call's own `priority` when there is no record (preload()'s
+        // direct-to-_decode path always has one; this guards a future caller that doesn't).
+        //
+        // Residual micro-race (documented, not closed — benign, outside this bead's scope):
+        // if a `.visible` join lands in the tiny window after this read and before `wait()`
+        // enqueues the waiter below, `elevate` will have already no-op'd (nothing was queued
+        // yet to find) and this decode admits one cycle later, at its original tier. That is a
+        // momentary priority inversion, never a correctness bug — no slot leak, no crash.
+        let admission = inFlightDecodes[key]
+
         // Acquire a decode slot. Throws CancellationError if cancelled while waiting;
         // the slot is never consumed on the thrown path — do NOT call signal().
         do {
-            try await decodeSemaphore.wait(priority: priority)
+            try await decodeSemaphore.wait(id: admission?.id ?? UUID(), priority: admission?.priority ?? priority)
         } catch {
             return DecodeResult(image: nil, rawSourceSize: nil)
         }
@@ -660,7 +732,10 @@ public actor ImageActor {
     /// implementation. Called from inside an unstructured `Task<DecodeResult, Never>` — hops
     /// to the actor for `session` access, suspends during the network request (releasing the
     /// actor), then hops back for `_decode`.
+    ///
+    /// - Parameter key: Threaded through to `_decode` unchanged — see that method's doc for why.
     private func _networkFetchAndDecode(
+        key: ImageCacheKey,
         url: URL,
         targetSize: CGSize,
         cornerRadius: CGFloat,
@@ -681,7 +756,7 @@ public actor ImageActor {
         log.debug("network \(url.lastPathComponent) \(String(format: "%.1f", networkMs))ms")
         #endif
         guard !Task.isCancelled else { return DecodeResult(image: nil, rawSourceSize: nil) }
-        return await _decode(data: data, targetSize: targetSize, cornerRadius: cornerRadius, scale: scale, priority: priority)
+        return await _decode(key: key, data: data, targetSize: targetSize, cornerRadius: cornerRadius, scale: scale, priority: priority)
     }
 
     /// Synchronous cache probe — callable from any isolation context, including `@MainActor`.
