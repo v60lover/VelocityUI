@@ -205,6 +205,94 @@ final class FragmentTests: XCTestCase {
         XCTAssertEqual(txtF.frame.origin.x, 108, accuracy: 0.5)
     }
 
+    // MARK: - Test: HStack TextNode is measured at its proportional share, not the full width (VelocityUI-g5x)
+
+    func testHStackTextChildMeasuredAtProportionalWidthNotFullWidth() async throws {
+        // HStack (0, spacing: 8)
+        //   Hosting(100×100) (1) — fixed claim
+        //   Text (2)             — must resolve to width=320-100-8=212, not 320
+        // Long enough that wrapping differs measurably between width 212 and width 320,
+        // so the resulting height is an observable proxy for "which width was it measured at".
+        let longText = "The quick brown fox jumps over the lazy dog while the sun sets slowly behind distant mountains."
+        let table = NodeTable(
+            itemID: "hstack-proportional",
+            nodes: [
+                .hstack(HStackDescriptor(alignment: 1, spacing: 8)),
+                .hosting(HostingDescriptor(size: CGSize(width: 100, height: 100), layoutHash: 1, appearanceHash: 1)),
+                .text(textDesc(longText, hash: 2)),
+            ],
+            parentIndices: [-1, 0, 0],
+            layoutHash: 300, appearanceHash: 300
+        )
+
+        let pool = TextMeasurementPool(capacity: 1)
+        let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: pool)
+        let fragments = extractFragments(table: table, layout: layout)
+        let txtF = try XCTUnwrap(fragments.first { $0.id == 2 })
+
+        let referenceTable = NodeTable(
+            itemID: "reference",
+            nodes: [.text(textDesc(longText, hash: 2))],
+            parentIndices: [-1],
+            layoutHash: 301, appearanceHash: 301
+        )
+        let expectedAt212 = await measureNode(referenceTable, nodeIndex: 0, width: 212, textPool: pool)
+        let wouldBeAt320 = await measureNode(referenceTable, nodeIndex: 0, width: 320, textPool: pool)
+
+        XCTAssertEqual(txtF.frame.height, expectedAt212.totalFrame.height, accuracy: 1.0)
+        XCTAssertGreaterThan(
+            abs(expectedAt212.totalFrame.height - wouldBeAt320.totalFrame.height), 1.0,
+            "test fixture must wrap differently at 212 vs 320 or this test can't distinguish the two widths"
+        )
+    }
+
+    // MARK: - Test: HStack totalFrame.width never exceeds the container width (VelocityUI-g5x)
+
+    func testHStackTotalFrameWidthDoesNotExceedContainerWidth() async {
+        let table = NodeTable(
+            itemID: "hstack-bounded",
+            nodes: [
+                .hstack(HStackDescriptor(alignment: 1, spacing: 8)),
+                .hosting(HostingDescriptor(size: CGSize(width: 100, height: 100), layoutHash: 1, appearanceHash: 1)),
+                .text(textDesc("short", hash: 2)),
+            ],
+            parentIndices: [-1, 0, 0],
+            layoutHash: 302, appearanceHash: 302
+        )
+
+        let pool = TextMeasurementPool(capacity: 1)
+        let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: pool)
+
+        XCTAssertLessThanOrEqual(layout.totalFrame.width, 320.5)
+    }
+
+    // MARK: - Test: HStack Spacer claims its own size, not the container width (VelocityUI-g5x)
+
+    func testHStackSpacerClaimsOwnSizeNotContainerWidth() async throws {
+        // HStack (0, spacing: 8)
+        //   Spacer(20) (1)
+        //   Hosting(50×50) (2)
+        // Expected: Hosting starts at 20 (spacer width) + 8 (spacing) = 28.
+        let table = NodeTable(
+            itemID: "hstack-spacer",
+            nodes: [
+                .hstack(HStackDescriptor(alignment: 1, spacing: 8)),
+                .spacer(20),
+                .hosting(HostingDescriptor(size: CGSize(width: 50, height: 50), layoutHash: 1, appearanceHash: 1)),
+            ],
+            parentIndices: [-1, 0, 0],
+            layoutHash: 303, appearanceHash: 303
+        )
+
+        let pool = TextMeasurementPool(capacity: 1)
+        let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: pool)
+        let fragments = extractFragments(table: table, layout: layout)
+
+        let hostF = try XCTUnwrap(fragments.first { $0.id == 2 })
+        XCTAssertEqual(hostF.frame.origin.x, 28, accuracy: 0.5)
+        XCTAssertEqual(layout.totalFrame.width, 78, accuracy: 0.5)
+    }
+
     // MARK: - Test 7: Spacer produces a geometry fragment at correct position
 
     func testSpacerProducesGeometryFragment() async throws {

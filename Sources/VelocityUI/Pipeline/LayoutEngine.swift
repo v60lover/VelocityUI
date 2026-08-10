@@ -17,24 +17,16 @@ public func measureNode(
     }
     switch table.nodes[nodeIndex] {
     case .vstack(let d):
-        return await measureStack(
+        return await measureVStack(
             table: table, nodeIndex: nodeIndex,
             width: width, textPool: textPool,
-            spacing: d.spacing, axis: .vertical
+            spacing: d.spacing
         )
     case .hstack(let d):
-        // KNOWN LIMITATION (VelocityUI-g5x): every HStack child is measured at the full
-        // container width instead of a proportional share. Correct for Phase 1 because all
-        // cells are image-only VStacks — no HStack child cares about its width constraint.
-        // Breaks in Phase 2: TextNode inside an HStack wraps at the wrong width, producing
-        // an incorrect cell height and breaking the Spike 4 measure/render parity invariant.
-        // Fix: split measureStack → measureVStack / measureHStack. measureHStack needs a
-        // two-pass approach — serial pass to collect fixed-size claims, parallel pass to
-        // measure flexible children at their resolved widths. Do this before Phase 2 starts.
-        return await measureStack(
+        return await measureHStack(
             table: table, nodeIndex: nodeIndex,
             width: width, textPool: textPool,
-            spacing: d.spacing, axis: .horizontal
+            spacing: d.spacing
         )
     case .zstack:
         let childIndices = table.children(of: nodeIndex)
@@ -102,12 +94,13 @@ func intrinsicHeight(for table: NodeTable, width: CGFloat) -> CGFloat? {
 
 // MARK: - Private helpers
 
-private enum StackAxis { case vertical, horizontal }
-
-private func measureStack(
+/// Parallel measurement is unconditionally correct for VStack: each child independently
+/// fills the full available width — siblings are irrelevant, now and after any future
+/// node types are added. No sequential pass is ever needed here.
+private func measureVStack(
     table: NodeTable, nodeIndex: Int,
     width: CGFloat, textPool: TextMeasurementPool,
-    spacing: CGFloat, axis: StackAxis
+    spacing: CGFloat
 ) async -> ResolvedLayout {
     let childIndices = table.children(of: nodeIndex)
     guard !childIndices.isEmpty else {
@@ -115,14 +108,6 @@ private func measureStack(
     }
 
     var ordered = [(Int, ResolvedLayout)]()
-    // Parallel measurement is unconditionally correct for VStack: each child
-    // independently fills the full available width — siblings are irrelevant, now
-    // and after any future node types are added.
-    // For HStack this is a Phase 1 simplification — see the hstack case above and
-    // bead VelocityUI-g5x. Parallelism breaks when a child's measured size depends
-    // on how much width siblings claimed (proportional sizing). That requires a
-    // sequential first pass to resolve widths, then a parallel second pass —
-    // a structural change that belongs in a dedicated measureHStack, not here.
     await withTaskGroup(of: (Int, ResolvedLayout).self) { group in
         for (i, ci) in childIndices.enumerated() {
             group.addTask {
@@ -139,24 +124,84 @@ private func measureStack(
     var crossMax: CGFloat = 0
 
     for (idx, (_, layout)) in ordered.enumerated() {
-        switch axis {
-        case .vertical:
-            children.append(layout.offsetBy(dy: cursor))
-            cursor += layout.totalFrame.height
-            if idx < ordered.count - 1 { cursor += spacing }
-            crossMax = max(crossMax, layout.totalFrame.width)
-        case .horizontal:
-            children.append(layout.offsetBy(dx: cursor, dy: 0))
-            cursor += layout.totalFrame.width
-            if idx < ordered.count - 1 { cursor += spacing }
-            crossMax = max(crossMax, layout.totalFrame.height)
+        children.append(layout.offsetBy(dy: cursor))
+        cursor += layout.totalFrame.height
+        if idx < ordered.count - 1 { cursor += spacing }
+        crossMax = max(crossMax, layout.totalFrame.width)
+    }
+
+    let frame = CGRect(x: 0, y: 0, width: width, height: cursor)
+    return ResolvedLayout(totalFrame: frame, children: children, nodeIndex: nodeIndex)
+}
+
+/// Two-pass HStack measurement (VelocityUI-g5x): a serial pass measures fixed-size children
+/// in order — each fed the width still remaining after its predecessors' claims — then a
+/// parallel pass distributes whatever width is left evenly across flexible (`.text`) children.
+///
+/// `.text` is the only flexible kind. Everything else (`.hosting`, `.image`, `.gif`, `.video`,
+/// `.customLayer`, nested stacks, and `.spacer`) is fixed: it claims serially from the running
+/// width budget rather than waiting for the proportional split. `.spacer` is measured inline
+/// here rather than via `measureNode` because the shared `.spacer` case in `measureNode` maps
+/// its CGFloat onto whichever axis `width` represents — correct for VStack (size is the
+/// along-axis height, `width` is the cross length) but wrong for HStack, where size must be the
+/// along-axis *width* claim and the cross length (height) is unknown at this call depth.
+private func measureHStack(
+    table: NodeTable, nodeIndex: Int,
+    width: CGFloat, textPool: TextMeasurementPool,
+    spacing: CGFloat
+) async -> ResolvedLayout {
+    let childIndices = table.children(of: nodeIndex)
+    guard !childIndices.isEmpty else {
+        return ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: width, height: 0), nodeIndex: nodeIndex)
+    }
+
+    let totalSpacing = spacing * CGFloat(max(0, childIndices.count - 1))
+    var remainingWidth = max(0, width - totalSpacing)
+
+    var results = [ResolvedLayout?](repeating: nil, count: childIndices.count)
+    var flexibleSlots: [(slot: Int, childIndex: Int)] = []
+
+    for (i, ci) in childIndices.enumerated() {
+        if case .text = table.nodes[ci] {
+            flexibleSlots.append((i, ci))
+            continue
+        }
+        let layout: ResolvedLayout
+        if case .spacer(let size) = table.nodes[ci] {
+            layout = ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: size, height: 0), nodeIndex: ci)
+        } else {
+            layout = await measureNode(table, nodeIndex: ci, width: remainingWidth, textPool: textPool)
+        }
+        remainingWidth = max(0, remainingWidth - layout.totalFrame.width)
+        results[i] = layout
+    }
+
+    if !flexibleSlots.isEmpty {
+        let perFlexWidth = remainingWidth / CGFloat(flexibleSlots.count)
+        await withTaskGroup(of: (Int, ResolvedLayout).self) { group in
+            for (slot, ci) in flexibleSlots {
+                group.addTask {
+                    let r = await measureNode(table, nodeIndex: ci, width: perFlexWidth, textPool: textPool)
+                    return (slot, r)
+                }
+            }
+            for await (slot, r) in group { results[slot] = r }
         }
     }
 
-    let frame: CGRect = axis == .vertical
-        ? CGRect(x: 0, y: 0, width: width, height: cursor)
-        : CGRect(x: 0, y: 0, width: cursor, height: crossMax)
+    var cursor: CGFloat = 0
+    var children: [ResolvedLayout] = []
+    var crossMax: CGFloat = 0
 
+    for (idx, layout) in results.enumerated() {
+        guard let layout else { continue }
+        children.append(layout.offsetBy(dx: cursor, dy: 0))
+        cursor += layout.totalFrame.width
+        if idx < results.count - 1 { cursor += spacing }
+        crossMax = max(crossMax, layout.totalFrame.height)
+    }
+
+    let frame = CGRect(x: 0, y: 0, width: cursor, height: crossMax)
     return ResolvedLayout(totalFrame: frame, children: children, nodeIndex: nodeIndex)
 }
 #endif
