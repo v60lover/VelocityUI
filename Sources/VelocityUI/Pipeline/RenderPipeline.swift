@@ -52,6 +52,11 @@ public actor RenderPipeline {
     /// rather than re-measuring. Internal for testing only.
     private(set) var cacheHitCount: Int = 0
 
+    /// Scroll direction from the most recent `onIndexBoundary` call. Internal for
+    /// testing only — lets tests assert on the classification-driving signal directly
+    /// instead of round-tripping through ImageActor's prefetch-priority seam.
+    private(set) var lastDirection: ScrollDirection = .down
+
     private let textPool: TextMeasurementPool
     private let layoutCache: LayoutCache
     private let imageActor: ImageActor
@@ -113,15 +118,21 @@ public actor RenderPipeline {
     ///   - scale:          Screen scale captured at the MainActor call site (e.g. `traitCollection.displayScale`).
     ///                     `UITraitCollection.displayScale` is MainActor-isolated; capturing it at the call site
     ///                     ensures the `ImageCacheKey` matches the one mount-time `spawnMediaFetches` constructs.
+    ///   - direction:      Real scroll-travel direction (from `FeedScrollView`'s `contentOffset` delta),
+    ///                     not a hardcoded assumption. Determines which side of `leadingIndex` prefetch
+    ///                     items classify `.ahead` vs `.behind`. Defaults to `.down` — VelocityUI-he0's
+    ///                     original assumption — so callers that don't observe direction are unaffected.
     public func onIndexBoundary(
         _ leadingIndex: Int,
         workingRange: WorkingRange,
         tables: [NodeTable],
         availableWidth: CGFloat,
-        scale: CGFloat
+        scale: CGFloat,
+        direction: ScrollDirection = .down
     ) {
         guard leadingIndex != lastLeadingIndex else { return }
         lastLeadingIndex = leadingIndex
+        lastDirection = direction
 
         // Deep cancel (secondary layer): items from the previous batch whose index falls
         // outside the new range are guaranteed not to be needed. Cancel their in-flight
@@ -209,10 +220,16 @@ public actor RenderPipeline {
                         let capturedSize = fragment.frame.size
                         let capturedRadius = d.cornerRadius
                         let gen = myGen
-                        // Items at/after leadingIndex are coming into view next; items before
-                        // it were already scrolled past. No scroll-direction signal exists yet —
-                        // this assumes downward scroll; a velocity-aware pass can refine it later.
-                        let p: DecodePriority = i >= leadingIndex ? .ahead : .behind
+                        // On downward scroll, items at/after leadingIndex are coming into view
+                        // next (higher indices, below the viewport). On upward scroll the travel
+                        // direction inverts: items at/before leadingIndex (lower indices, above
+                        // the viewport) are what's coming next. `direction` is a real signal —
+                        // FeedScrollView derives it from contentOffset.y deltas, not assumed.
+                        let p: DecodePriority
+                        switch direction {
+                        case .down: p = i >= leadingIndex ? .ahead : .behind
+                        case .up:   p = i <= leadingIndex ? .ahead : .behind
+                        }
                         spawnedPrefetches.append(Task {
                             await actor.prefetch(
                                 for: capturedURL,

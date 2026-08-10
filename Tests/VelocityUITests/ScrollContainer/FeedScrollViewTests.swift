@@ -109,6 +109,41 @@ final class FeedScrollViewTests: XCTestCase {
         #endif
     }
 
+    // MARK: - 2b. Scroll direction is derived from real contentOffset deltas (VelocityUI-im6)
+
+    func testScrollDirectionTracksRealContentOffsetDelta() {
+        let feed = makeFeed(width: 375, height: 812)
+        feed.items = items(count: 200)
+        feed.layoutSubviews()
+
+        #if canImport(XCTest)
+        // Initial layout: contentOffset never moved from 0 — default direction (.down) holds.
+        XCTAssertEqual(feed._lastScrollDirection, .down, "No offset delta yet — direction stays at its default")
+
+        // Scroll down (increasing contentOffset.y) — direction must read .down from the real delta.
+        feed.contentOffset = CGPoint(x: 0, y: 350)
+        feed.layoutSubviews()
+        XCTAssertEqual(feed._lastScrollDirection, .down, "Increasing contentOffset.y must derive .down")
+
+        feed.contentOffset = CGPoint(x: 0, y: 900)
+        feed.layoutSubviews()
+        XCTAssertEqual(feed._lastScrollDirection, .down, "Continued downward scroll stays .down")
+
+        // Reverse — decreasing contentOffset.y must flip the derived direction to .up.
+        feed.contentOffset = CGPoint(x: 0, y: 400)
+        feed.layoutSubviews()
+        XCTAssertEqual(feed._lastScrollDirection, .up, "Decreasing contentOffset.y must derive .up")
+
+        feed.contentOffset = CGPoint(x: 0, y: 100)
+        feed.layoutSubviews()
+        XCTAssertEqual(feed._lastScrollDirection, .up, "Continued upward scroll stays .up")
+
+        // No delta (same offset, e.g. rubber-banding at rest) — direction holds its last value.
+        feed.layoutSubviews()
+        XCTAssertEqual(feed._lastScrollDirection, .up, "Zero delta must not flip direction")
+        #endif
+    }
+
     // MARK: - 3. Correct visible set at sampled offsets
 
     func testVisibleSetMatchesExpectedIndices() {

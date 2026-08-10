@@ -92,6 +92,17 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// Leading index sent to pipeline on last boundary crossing.
     private var lastNotifiedLeadingIndex: Int = -1
 
+    /// `contentOffset.y` observed on the previous `layoutSubviews` pass. Compared against
+    /// the current value each pass to derive `scrollDirection` from a real scroll metric.
+    private var lastScrollOffsetY: CGFloat = 0
+
+    /// Direction of travel along the scroll axis, updated in `layoutSubviews` from the sign
+    /// of the `contentOffset.y` delta. Holds its last value when the offset doesn't change
+    /// (at rest, or between two layout passes with no scroll) — avoids flicker at the top/
+    /// bottom rubber-band edges. Threaded into `pipeline.onIndexBoundary(direction:)` so
+    /// .ahead/.behind prefetch classification tracks actual travel direction. See VelocityUI-im6.
+    private var scrollDirection: ScrollDirection = .down
+
     private var lastLayoutWidth: CGFloat = 0
     /// False until the first `layoutSubviews` width transition has been handled. Distinguishes
     /// the initial `0 -> bounds.width` sentinel transition (nothing stale to evict — WorkingRange
@@ -127,6 +138,11 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// Counts Task spawns from leading-index boundary crossings inside `notifyPipelineIfNeeded`.
     /// Does NOT count the one-shot `onReachEnd` spawn — that fires at most once per page.
     private(set) var _taskSpawnCount: Int = 0
+
+    /// Mirrors `scrollDirection` as it's set in `layoutSubviews`. Test-only observability for
+    /// VelocityUI-im6 — lets tests assert the signal flips from a real `contentOffset.y` delta
+    /// without needing to round-trip through `RenderPipeline`/`ImageActor`.
+    private(set) var _lastScrollDirection: ScrollDirection = .down
 
     /// Branch counters for `AsyncFeed.itemsDiffer`'s buffer-identity fast path (case b, O(1))
     /// vs the `Equatable` deep-comparison fallback (case c, O(n)). Incremented by `itemsDiffer`
@@ -254,6 +270,15 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
     override public func layoutSubviews() {
         super.layoutSubviews()
+
+        let offsetY = contentOffset.y
+        if offsetY != lastScrollOffsetY {
+            scrollDirection = offsetY > lastScrollOffsetY ? .down : .up
+            lastScrollOffsetY = offsetY
+            #if canImport(XCTest)
+            _lastScrollDirection = scrollDirection
+            #endif
+        }
 
         let w = bounds.width
         if w > 0, w != lastLayoutWidth {
@@ -660,6 +685,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         let capturedTables = tables
         let capturedWidth  = bounds.width  // width contract: verbatim, no arithmetic
         let capturedScale  = max(1, traitCollection.displayScale)  // same guard as spawnMediaFetches
+        let capturedDirection = scrollDirection
 
         #if canImport(XCTest)
         _taskSpawnCount += 1
@@ -673,7 +699,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                 workingRange: self.workingRange,
                 tables: capturedTables,
                 availableWidth: capturedWidth,
-                scale: capturedScale
+                scale: capturedScale,
+                direction: capturedDirection
             )
             await self.pipeline.waitForCurrentPrefetch()
             self.setNeedsLayout()

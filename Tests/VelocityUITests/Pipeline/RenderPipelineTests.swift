@@ -961,5 +961,78 @@ final class RenderPipelineTests: XCTestCase {
             )
         }
     }
+
+    // MARK: - Test 14: onIndexBoundary(direction: .up) mirrors the downward classification
+
+    /// Verifies VelocityUI-im6 AC(1): on upward scroll, items in the travel direction (lower
+    /// indices, at/before leadingIndex) classify `.ahead`, and already-passed items (higher
+    /// indices, after leadingIndex) classify `.behind` — the mirror image of
+    /// `testPrefetchPriorityReflectsAheadBehindClassification`'s downward case.
+    func testPrefetchPriorityReflectsUpwardClassificationWhenScrollingUp() async {
+        let n = 6
+        let imageURLs = (0..<n).map { i in
+            URL(string: "https://prefetch-priority-up.example.com/\(i).jpg")!
+        }
+
+        PipelinePrefetchCountingProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [PipelinePrefetchCountingProtocol.self]
+        let session = URLSession(configuration: config)
+        let dc = DimensionCache(session: session)
+        let imageActor = ImageActor(session: session, dimensionCache: dc)
+        await imageActor._testResetPrefetchedURLs()
+        await imageActor._testResetPrefetchedPriorities()
+
+        func makeURLTable(_ id: Int, url: URL) -> NodeTable {
+            NodeTable(
+                itemID: id,
+                nodes: [.image(ImageDescriptor(
+                    url: url, aspectRatio: 1.5, contentMode: 0,
+                    cornerRadius: 0, layoutHash: id, appearanceHash: 0
+                ))],
+                parentIndices: [-1],
+                layoutHash: id,
+                appearanceHash: 0
+            )
+        }
+
+        let tables = (0..<n).map { makeURLTable($0, url: imageURLs[$0]) }
+        let range = await WorkingRange(capacity: 30)
+        let leadingIndex = 3
+
+        // ahead=n, behind=n: prefetchRange clamps to [0, n) — the full table — so every
+        // index's classification is exercised in one boundary call.
+        let pipeline = RenderPipeline(
+            textPool: TextMeasurementPool(),
+            layoutCache: LayoutCache(),
+            imageActor: imageActor,
+            prefetchAhead: n,
+            prefetchBehind: n
+        )
+
+        await pipeline.onIndexBoundary(
+            leadingIndex, workingRange: range, tables: tables, availableWidth: 320, scale: 2,
+            direction: .up
+        )
+        await pipeline.waitForCurrentPrefetch()
+
+        let recordedDirection = await pipeline.lastDirection
+        XCTAssertEqual(recordedDirection, .up, "RenderPipeline must record the direction passed to onIndexBoundary")
+
+        let priorities = await imageActor._testGetPrefetchedPriorities()
+        let byURL = Dictionary(uniqueKeysWithValues: priorities.map { ($0.url, $0.priority) })
+
+        XCTAssertEqual(byURL.count, n, "Every image URL must have a recorded prefetch priority")
+
+        for (i, url) in imageURLs.enumerated() {
+            // Mirror of the downward case: at/before leadingIndex is the travel direction (.ahead),
+            // after leadingIndex is already-passed (.behind).
+            let expected: DecodePriority = i <= leadingIndex ? .ahead : .behind
+            XCTAssertEqual(
+                byURL[url], expected,
+                "Table index \(i) (leadingIndex=\(leadingIndex), direction=.up) must request \(expected); got \(String(describing: byURL[url]))"
+            )
+        }
+    }
 }
 #endif
