@@ -325,5 +325,325 @@ final class FragmentTests: XCTestCase {
         XCTAssertEqual(spacerF.frame.height,   40,  accuracy: 0.5)
         XCTAssertEqual(spacerF.frame.origin.y, 160, accuracy: 0.5)
     }
+
+    // MARK: - Framing: applyFrame semantics (VelocityUI-rsg / VelocityUI-3a4)
+
+    // MARK: Test 8: center alignment, slot LARGER than content
+
+    func testApplyFrame_centerAlignment_slotLargerThanContent() async {
+        // Hosting(100x50) framed to a 300x150 slot — center alignment (default) must center
+        // the intrinsic content box within the larger slot: offset = (slot-content)/2 on each axis.
+        let table = NodeTable(
+            itemID: "frame-center-larger",
+            nodes: [.hosting(HostingDescriptor(size: CGSize(width: 100, height: 50), layoutHash: 1, appearanceHash: 1))],
+            parentIndices: [-1],
+            layoutHash: 1, appearanceHash: 1,
+            frames: [FrameSpec(width: 300, height: 150)]
+        )
+        let pool = TextMeasurementPool(capacity: 1)
+        let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: pool)
+
+        XCTAssertEqual(layout.totalFrame, CGRect(x: 0, y: 0, width: 300, height: 150),
+            "totalFrame must equal the framed slot exactly")
+        XCTAssertEqual(layout.contentFrame, CGRect(x: 100, y: 50, width: 100, height: 50),
+            "contentFrame must be the intrinsic box centered: offset ((300-100)/2, (150-50)/2)")
+    }
+
+    // MARK: Test 9: clip-to-frame, slot SMALLER than content
+
+    func testApplyFrame_clipToFrame_slotSmallerThanContent() async {
+        // Hosting(200x200) framed DOWN to a smaller 50x50 slot — the slot wins: contentFrame
+        // is clamped to the slot (never larger than it), with zero offset on both axes.
+        let table = NodeTable(
+            itemID: "frame-clip-smaller",
+            nodes: [.hosting(HostingDescriptor(size: CGSize(width: 200, height: 200), layoutHash: 1, appearanceHash: 1))],
+            parentIndices: [-1],
+            layoutHash: 1, appearanceHash: 1,
+            frames: [FrameSpec(width: 50, height: 50)]
+        )
+        let pool = TextMeasurementPool(capacity: 1)
+        let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: pool)
+
+        XCTAssertEqual(layout.totalFrame, CGRect(x: 0, y: 0, width: 50, height: 50))
+        XCTAssertEqual(layout.contentFrame, CGRect(x: 0, y: 0, width: 50, height: 50),
+            "content must clamp to the slot bounds with zero offset — no negative-padding shift beyond the slot")
+    }
+
+    // MARK: Test 10: image .fill fills the slot; .fit letterboxes
+
+    func testApplyFrame_imageFill_fillsSlotExactly() async {
+        // aspectRatio 3.0 at width 200 would normally give height 66.67 (letterboxed) — .fill
+        // ignores aspect ratio entirely and fills the slot exactly.
+        let d = ImageDescriptor(url: nil, aspectRatio: 3.0, contentMode: VContentMode.fill.rawValue,
+                                 cornerRadius: 0, layoutHash: 1, appearanceHash: 1)
+        let table = NodeTable(
+            itemID: "frame-image-fill",
+            nodes: [.image(d)],
+            parentIndices: [-1],
+            layoutHash: 1, appearanceHash: 1,
+            frames: [FrameSpec(width: 200, height: 200)]
+        )
+        let pool = TextMeasurementPool(capacity: 1)
+        let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: pool)
+
+        XCTAssertEqual(layout.contentFrame, CGRect(x: 0, y: 0, width: 200, height: 200),
+            ".fill must fill the framed slot exactly, not letterbox")
+    }
+
+    func testApplyFrame_imageFit_letterboxesWithinSlot() async {
+        let table = NodeTable(
+            itemID: "frame-image-fit",
+            nodes: [.image(imageDesc(aspectRatio: 2.0, hash: 1))],  // contentMode defaults to .fit (0)
+            parentIndices: [-1],
+            layoutHash: 1, appearanceHash: 1,
+            frames: [FrameSpec(width: 200, height: 200)]
+        )
+        let pool = TextMeasurementPool(capacity: 1)
+        let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: pool)
+
+        // Intrinsic at framed width 200, aspectRatio 2.0 => height 100 — smaller than the
+        // 200-tall slot, so .fit letterboxes it and centers vertically: y = (200-100)/2 = 50.
+        XCTAssertEqual(layout.contentFrame, CGRect(x: 0, y: 50, width: 200, height: 100),
+            ".fit must letterbox (not stretch) and center within the slot")
+    }
+
+    // MARK: Test 11: container framing shifts children, contentFrame stays nil
+
+    func testApplyFrame_container_shiftsChildrenByCenterOffset_contentFrameNil() async throws {
+        // VStack(0, framed height:300) → Hosting(1, 100x50)
+        // VStack's own intrinsic height (50, single child) is smaller than the framed slot
+        // (300) — applyFrame's CONTAINER branch must shift children by the center offset
+        // rather than reporting a separate contentFrame (which stays nil for containers).
+        let table = NodeTable(
+            itemID: "frame-container-vstack",
+            nodes: [
+                .vstack(VStackDescriptor(alignment: 1, spacing: 0)),
+                .hosting(HostingDescriptor(size: CGSize(width: 100, height: 50), layoutHash: 1, appearanceHash: 1)),
+            ],
+            parentIndices: [-1, 0],
+            layoutHash: 10, appearanceHash: 10,
+            frames: [FrameSpec(height: 300)]
+        )
+        let pool = TextMeasurementPool(capacity: 1)
+        let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: pool)
+
+        XCTAssertEqual(layout.totalFrame, CGRect(x: 0, y: 0, width: 320, height: 300))
+        XCTAssertNil(layout.contentFrame, "containers express framing via child offset, never contentFrame")
+        let child = try XCTUnwrap(layout.children.first)
+        // Single 50-tall child centered in a 300-tall slot => y = (300-50)/2 = 125.
+        XCTAssertEqual(child.totalFrame.origin.y, 125, accuracy: 0.5)
+    }
+
+    // MARK: Test 12: extractFragments emits a framed leaf at its absolute contentFrame
+
+    func testExtractFragments_framedLeaf_emitsAtAbsoluteContentFrame() async throws {
+        // VStack(0) → Hosting(1, 60x40) then Hosting(2, framed to 200x200, centered) below it.
+        // Fragment.frame for the framed leaf must equal its LOCAL contentFrame shifted by the
+        // parent's absolute origin — not totalFrame (the full, unaligned slot).
+        let table = NodeTable(
+            itemID: "frame-extract-leaf",
+            nodes: [
+                .vstack(VStackDescriptor(alignment: 1, spacing: 0)),
+                .hosting(HostingDescriptor(size: CGSize(width: 60, height: 40), layoutHash: 1, appearanceHash: 1)),
+                .hosting(HostingDescriptor(size: CGSize(width: 100, height: 100), layoutHash: 2, appearanceHash: 2)),
+            ],
+            parentIndices: [-1, 0, 0],
+            layoutHash: 11, appearanceHash: 11,
+            frames: [FrameSpec.unspecified, FrameSpec.unspecified, FrameSpec(width: 200, height: 200)]
+        )
+        let pool = TextMeasurementPool(capacity: 1)
+        let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: pool)
+        let fragments = extractFragments(table: table, layout: layout)
+        let framedF = try XCTUnwrap(fragments.first { $0.id == 2 })
+
+        // Second child sits below the first (y=40, VStack cursor). The framed hosting's own
+        // contentFrame centers its 100x100 intrinsic content within its 200x200 slot: local
+        // offset (50, 50). Absolute frame = parent origin (0,40) + local contentFrame (50,50).
+        XCTAssertEqual(framedF.frame, CGRect(x: 50, y: 90, width: 100, height: 100))
+    }
+
+    // MARK: Test 13: intrinsicHeight <-> measureNode parity across frame combinations (LayoutEngine.swift:82 invariant)
+
+    func testIntrinsicHeight_matchesMeasureNode_acrossFrameCombinations() async throws {
+        let pool = TextMeasurementPool(capacity: 1)
+        let width: CGFloat = 300
+
+        func makeTable(frame: FrameSpec?) -> NodeTable {
+            NodeTable(
+                itemID: "parity",
+                nodes: [.image(imageDesc(aspectRatio: 1.6, hash: 1))],
+                parentIndices: [-1],
+                layoutHash: 1, appearanceHash: 1,
+                frames: frame.map { [$0] }
+            )
+        }
+
+        let combos: [(name: String, spec: FrameSpec?)] = [
+            ("neither", nil),
+            ("height-only", FrameSpec(height: 220)),
+            ("width-only", FrameSpec(width: 150)),
+            ("both", FrameSpec(width: 150, height: 220)),
+        ]
+
+        for combo in combos {
+            let table = makeTable(frame: combo.spec)
+            let layout = await measureNode(table, nodeIndex: 0, width: width, textPool: pool)
+            let intrinsic = try XCTUnwrap(intrinsicHeight(for: table, width: width),
+                "single-image row must always produce a non-nil intrinsic height, combo: \(combo.name)")
+            XCTAssertEqual(intrinsic, layout.totalFrame.height, accuracy: 0.01,
+                "intrinsicHeight must mirror measureNode exactly for combo: \(combo.name)")
+        }
+    }
+
+    // MARK: Test 14: measureHStack — fixed-width-framed text does not absorb flexible remainder
+
+    func testMeasureHStack_fixedWidthFramedText_claimsExactWidth_flexibleGetsRemainder() async throws {
+        // HStack(0, spacing: 0) → Text(1, framed width:80) , Text(2, flexible/unframed)
+        // The framed text's own ResolvedLayout.totalFrame.width must be EXACTLY its framed
+        // width (80) — not a proportional share — and the flexible sibling must start
+        // immediately after it (x=80) and be measured at the full remainder (320-80=240),
+        // not an even 160/160 split.
+        let longText = "The quick brown fox jumps over the lazy dog while the sun sets slowly behind distant mountains."
+        let table = NodeTable(
+            itemID: "hstack-fixed-and-flexible-text",
+            nodes: [
+                .hstack(HStackDescriptor(alignment: 1, spacing: 0)),
+                .text(textDesc("Fixed", hash: 1)),
+                .text(textDesc(longText, hash: 2)),
+            ],
+            parentIndices: [-1, 0, 0],
+            layoutHash: 20, appearanceHash: 20,
+            frames: [FrameSpec.unspecified, FrameSpec(width: 80), FrameSpec.unspecified]
+        )
+        let pool = TextMeasurementPool(capacity: 2)
+        let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: pool)
+
+        XCTAssertEqual(layout.children.count, 2)
+        let fixedChild = try XCTUnwrap(layout.children.first { $0.nodeIndex == 1 })
+        let flexChild = try XCTUnwrap(layout.children.first { $0.nodeIndex == 2 })
+
+        XCTAssertEqual(fixedChild.totalFrame.width, 80,
+            "framed text must claim exactly its framed width, not a proportional share")
+        XCTAssertEqual(flexChild.totalFrame.origin.x, 80, accuracy: 0.5)
+
+        // Confirm the flexible sibling was actually measured at the full remainder (240), not
+        // an even 320/2=160 split, using wrap-sensitive height as the observable proxy
+        // (same pattern as testHStackTextChildMeasuredAtProportionalWidthNotFullWidth above).
+        let referenceTable = NodeTable(
+            itemID: "reference", nodes: [.text(textDesc(longText, hash: 2))],
+            parentIndices: [-1], layoutHash: 21, appearanceHash: 21
+        )
+        let expectedAt240 = await measureNode(referenceTable, nodeIndex: 0, width: 240, textPool: pool)
+        let wouldBeAt160 = await measureNode(referenceTable, nodeIndex: 0, width: 160, textPool: pool)
+
+        XCTAssertEqual(flexChild.totalFrame.height, expectedAt240.totalFrame.height, accuracy: 1.0,
+            "flexible sibling must be measured at the full remainder (320-80=240), not an even 160/160 split")
+        XCTAssertGreaterThan(
+            abs(expectedAt240.totalFrame.height - wouldBeAt160.totalFrame.height), 1.0,
+            "test fixture must wrap differently at 240 vs 160 or this test can't distinguish the two widths"
+        )
+    }
+
+    // MARK: - Framing: geometry-level clip-to-frame for overflowing descendants (VelocityUI-983)
+
+    // MARK: Test 15: benchmark repro — framed container clips an overflowing unframed leaf
+
+    func testFramedContainer_clipsOverflowingUnframedImageChild() async throws {
+        // Reproduces the BenchmarkHost glitch: HStack { Image(aspectRatio: 0.5, .fit) }.frame(width:400, height:200).
+        // The unframed image child measures 400x800 (width / aspectRatio) — far taller than
+        // the 200pt framed slot. `applyFrame`'s container branch only shifts children by an
+        // alignment offset; it does NOT resize/clip them, so without a geometry-level clip in
+        // extractFragments this leaf's fragment overflows the cell by 600pt. Because
+        // RenderCell never sets masksToBounds, the overflow paints over neighboring cells on
+        // scroll-up ("cells expanding/glitching"). The clip must clamp the emitted fragment
+        // to the framed slot.
+        let table = NodeTable(
+            itemID: "benchmark-repro",
+            nodes: [
+                .hstack(HStackDescriptor(alignment: 1, spacing: 0)),
+                .image(imageDesc(aspectRatio: 0.5, hash: 1)),  // contentMode defaults to .fit (0)
+            ],
+            parentIndices: [-1, 0],
+            layoutHash: 1, appearanceHash: 1,
+            frames: [FrameSpec(width: 400, height: 200), FrameSpec.unspecified]
+        )
+        let pool = TextMeasurementPool(capacity: 1)
+        let layout = await measureNode(table, nodeIndex: 0, width: 400, textPool: pool)
+
+        // Sanity: confirms the bug's own premise still holds pre-clip — the raw (unclipped)
+        // child layout really does overflow, and the container's own totalFrame is correctly
+        // the framed 400x200 slot. If either of these stops being true the repro is stale.
+        XCTAssertEqual(layout.totalFrame, CGRect(x: 0, y: 0, width: 400, height: 200))
+        let rawChild = try XCTUnwrap(layout.children.first)
+        XCTAssertEqual(rawChild.totalFrame.height, 800,
+            "sanity: the raw child ResolvedLayout must still overflow — this is what extractFragments clamps")
+
+        let fragments = extractFragments(table: table, layout: layout)
+        let imgF = try XCTUnwrap(fragments.first { $0.id == 1 })
+
+        XCTAssertEqual(imgF.frame, CGRect(x: 0, y: 0, width: 400, height: 200),
+            "image fragment must be clamped to the framed slot (400x200), not the raw 400x800")
+        XCTAssertTrue(CGRect(x: 0, y: 0, width: 400, height: 200).contains(imgF.frame),
+            "clamped fragment must lie entirely within the framed slot")
+    }
+
+    // MARK: Test 16: unframed control — no clip is ever introduced without an explicit .frame()
+
+    func testUnframedContainer_doesNotClipChildren_byteIdenticalToPreClipBehavior() async throws {
+        // Same HStack{Image} shape as the benchmark repro, but with NO `.frame()` anywhere —
+        // `NodeTable.frames` stays nil, so `extractFragments`'s `clip` argument stays nil for
+        // the entire recursion and the intersection never runs. The overflowing image must be
+        // emitted at its full, unclamped size — clipping is only ever introduced by an
+        // explicit `.frame()` on an ancestor, never inferred from an unrelated overflow.
+        let table = NodeTable(
+            itemID: "unframed-control",
+            nodes: [
+                .hstack(HStackDescriptor(alignment: 1, spacing: 0)),
+                .image(imageDesc(aspectRatio: 0.5, hash: 1)),
+            ],
+            parentIndices: [-1, 0],
+            layoutHash: 2, appearanceHash: 2
+            // frames omitted -> nil, matching a genuinely unframed NodeTable (VelocityUI-dv7's
+            // zero-cost invariant: no [FrameSpec] array at all, not merely all-.unspecified).
+        )
+        XCTAssertNil(table.frames)
+
+        let pool = TextMeasurementPool(capacity: 1)
+        let layout = await measureNode(table, nodeIndex: 0, width: 400, textPool: pool)
+        let fragments = extractFragments(table: table, layout: layout)
+        let imgF = try XCTUnwrap(fragments.first { $0.id == 1 })
+
+        XCTAssertEqual(imgF.frame, CGRect(x: 0, y: 0, width: 400, height: 800),
+            "unframed rows must be unaffected by the clip fix — same output as before VelocityUI-983")
+    }
+
+    // MARK: Test 17: framed container whose child is SMALLER than the slot — clip never fires spuriously
+
+    func testFramedContainer_childSmallerThanSlot_isNotClipped() async throws {
+        // VStack(0, framed to 300x300) → Hosting(1, 60x40)
+        // The child is well within the slot on both axes — the clip established by the framed
+        // ancestor must intersect harmlessly (child ⊆ clip), producing the SAME fragment as if
+        // no clip had ever been introduced. Guards against the fix being overly aggressive.
+        let table = NodeTable(
+            itemID: "framed-container-no-spurious-clip",
+            nodes: [
+                .vstack(VStackDescriptor(alignment: 1, spacing: 0)),
+                .hosting(HostingDescriptor(size: CGSize(width: 60, height: 40), layoutHash: 1, appearanceHash: 1)),
+            ],
+            parentIndices: [-1, 0],
+            layoutHash: 3, appearanceHash: 3,
+            frames: [FrameSpec(width: 300, height: 300), FrameSpec.unspecified]
+        )
+        let pool = TextMeasurementPool(capacity: 1)
+        let layout = await measureNode(table, nodeIndex: 0, width: 300, textPool: pool)
+        let fragments = extractFragments(table: table, layout: layout)
+        let hostF = try XCTUnwrap(fragments.first { $0.id == 1 })
+
+        // 60x40 child centered vertically in a 300-tall slot (VStack always reports its own
+        // intrinsic width as the full proposed width, so only vertical centering applies
+        // here): offset = (0, (300-40)/2) = (0, 130).
+        XCTAssertEqual(hostF.frame, CGRect(x: 0, y: 130, width: 60, height: 40),
+            "a child well within the framed slot must be unaffected by the clip — no spurious clamping")
+    }
 }
 #endif

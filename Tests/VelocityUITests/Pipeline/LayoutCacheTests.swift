@@ -236,5 +236,33 @@ final class LayoutCacheTests: XCTestCase {
         let count = await cache.count
         XCTAssertLessThanOrEqual(count, 500, "Count must not exceed capacity after concurrent access")
     }
+
+    // MARK: - Framing (VelocityUI-rsg / VelocityUI-3a4)
+
+    /// Pipeline-level guarantee: a `.frame()` edit must invalidate the cache rather than
+    /// silently reusing a stale (differently-sized) measurement. `NodeTable.layoutHash`
+    /// already folds framing in (VelocityUI-x8a/dv7, see `testFlatten_framing_foldsIntoLayoutHash`
+    /// in FlattenTests) — this test exercises the consumer of that hash: `CacheKey` +
+    /// `LayoutCache` built from two REAL flatten()-produced tables that differ only by `.frame()`.
+    @MainActor
+    func testFramingChangesLayoutHash_producesDistinctCacheKey_missOnLookup() async {
+        let unframedTable = flatten(AsyncImageNode(url: nil, aspectRatio: 1.0), itemID: "cache-frame")
+        let framedTable = flatten(AsyncImageNode(url: nil, aspectRatio: 1.0).frame(width: 200), itemID: "cache-frame")
+
+        XCTAssertNotEqual(unframedTable.layoutHash, framedTable.layoutHash,
+            "a .frame() change must produce a different layoutHash for otherwise-identical content")
+
+        let cache = LayoutCache()
+        let unframedKey = CacheKey(layoutHash: unframedTable.layoutHash, width: 375)
+        let framedKey = CacheKey(layoutHash: framedTable.layoutHash, width: 375)
+
+        await cache.set(makeEntry(height: 100), for: unframedKey)
+
+        let hitOnFramedKey = await cache.get(framedKey)
+        XCTAssertNil(hitOnFramedKey, "a .frame() change must miss the cache entry stored for the unframed table")
+
+        let hitOnUnframedKey = await cache.get(unframedKey)
+        XCTAssertNotNil(hitOnUnframedKey, "the original unframed entry must remain retrievable under its own key")
+    }
 }
 #endif

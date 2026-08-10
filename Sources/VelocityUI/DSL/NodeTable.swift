@@ -217,6 +217,15 @@ public struct NodeTable: Sendable {
     public let layoutHash: Int
     public let appearanceHash: Int
 
+    /// Parallel array of per-node `.frame()` specs, indexed identically to `nodes`.
+    /// `nil` (not an all-`.unspecified` array) whenever no node in the tree was framed —
+    /// that is the zero-cost unframed path: no `[FrameSpec]` allocation, and `frame(at:)`
+    /// takes a single predicted `nil`-check branch instead of an array bounds check.
+    /// Populated by `flatten()` (VelocityUI-dv7) at the wrapped node's index — see
+    /// `FrameModifierNode`'s doc comment for why framing folds in rather than becoming
+    /// its own `NodeKind`.
+    public let frames: [FrameSpec]?
+
     // Precomputed in init — turns the old O(n) scan in children(of:) into O(k).
     // childIndices is a contiguous array of child node indices grouped by parent.
     // childRanges[i] is the slice in childIndices that holds the children of node i.
@@ -232,13 +241,15 @@ public struct NodeTable: Sendable {
         nodes: [NodeKind],
         parentIndices: [Int],
         layoutHash: Int,
-        appearanceHash: Int
+        appearanceHash: Int,
+        frames: [FrameSpec]? = nil
     ) {
         self._itemID = AnyHashable(itemID)
         self.nodes = nodes
         self.parentIndices = parentIndices
         self.layoutHash = layoutHash
         self.appearanceHash = appearanceHash
+        self.frames = frames
         (childRanges, childIndices) = NodeTable.buildChildIndex(parentIndices: parentIndices)
     }
 
@@ -247,6 +258,15 @@ public struct NodeTable: Sendable {
     public func children(of nodeIndex: Int) -> ArraySlice<Int> {
         guard nodeIndex >= 0, nodeIndex < childRanges.count else { return [] }
         return childIndices[childRanges[nodeIndex]]
+    }
+
+    /// Returns the `.frame()` spec recorded for `i`, or `.unspecified` when this table has
+    /// no frames at all (the common unframed case) or `i` is out of bounds. Callers on the
+    /// measure path (`measureNode`) branch on `spec.isSpecified` rather than on `frames == nil`
+    /// directly so a bounds-safe default reads identically to "never framed".
+    public func frame(at i: Int) -> FrameSpec {
+        guard let frames, i >= 0, i < frames.count else { return .unspecified }
+        return frames[i]
     }
 
     // MARK: - Private

@@ -336,4 +336,105 @@ final class FlattenTests: XCTestCase {
         XCTAssertEqual(table.children(of: 5), [])
         XCTAssertEqual(table.children(of: -1), [])
     }
+
+    // MARK: - .frame() folding (VelocityUI-dv7)
+
+    @MainActor func testFlatten_plainRow_framesIsNil() {
+        // No .frame() anywhere in the tree — frames must stay nil, not an all-.unspecified array.
+        let root = VStackNode {
+            AsyncImageNode(url: nil, aspectRatio: 1.0)
+            TextNode("caption")
+        }
+        let table = flatten(root, itemID: "plain")
+        XCTAssertNil(table.frames, "unframed tree must not allocate a [FrameSpec] array")
+        // frame(at:) must still be safe and return .unspecified for every index.
+        for i in 0..<table.nodes.count {
+            XCTAssertEqual(table.frame(at: i), .unspecified)
+        }
+    }
+
+    @MainActor func testFlatten_framedImageLeaf_recordsSpecAtWrappedIndex() {
+        // VStack(0) → Image(1, framed 100x200)
+        let root = VStackNode {
+            AsyncImageNode(url: nil, aspectRatio: 1.0).frame(width: 100, height: 200)
+        }
+        let table = flatten(root, itemID: "framed-leaf")
+
+        XCTAssertNotNil(table.frames)
+        // FrameModifierNode must be fully transparent: still exactly 2 nodes (vstack + image),
+        // no extra NodeKind and no extra parentIndices entry for the wrapper.
+        XCTAssertEqual(table.nodes.count, 2)
+        XCTAssertEqual(table.parentIndices, [-1, 0])
+        guard case .image = table.nodes[1] else { XCTFail("expected .image at wrapped index"); return }
+
+        let spec = table.frame(at: 1)
+        XCTAssertEqual(spec.width, 100)
+        XCTAssertEqual(spec.height, 200)
+        // The vstack (unframed) index reports .unspecified.
+        XCTAssertEqual(table.frame(at: 0), .unspecified)
+    }
+
+    @MainActor func testFlatten_framedContainer_recordsSpecAtContainerIndex() {
+        // VStack(0, framed height:200) → Text(1)
+        let root = VStackNode {
+            TextNode("x")
+        }.frame(height: 200)
+        let table = flatten(root, itemID: "framed-container")
+
+        XCTAssertEqual(table.nodes.count, 2)
+        XCTAssertEqual(table.parentIndices, [-1, 0])
+        guard case .vstack = table.nodes[0] else { XCTFail("expected .vstack at wrapped index"); return }
+
+        let spec = table.frame(at: 0)
+        XCTAssertNil(spec.width)
+        XCTAssertEqual(spec.height, 200)
+        XCTAssertEqual(table.frame(at: 1), .unspecified)
+    }
+
+    @MainActor func testFlatten_nestedFrameFrame_mergesToOneEntry_innerDimensionWins() {
+        // .frame(width:100).frame(width:200) — inner (closer to content) frame wins per dimension.
+        let root = VStackNode {
+            TextNode("x").frame(width: 100).frame(width: 200)
+        }
+        let table = flatten(root, itemID: "nested-frame")
+
+        // Still exactly 2 nodes: neither FrameModifierNode contributes a NodeKind entry.
+        XCTAssertEqual(table.nodes.count, 2)
+        XCTAssertEqual(table.parentIndices, [-1, 0])
+
+        let spec = table.frame(at: 1)
+        XCTAssertEqual(spec.width, 100, "inner (closer-to-content) frame's width must win over the outer frame")
+    }
+
+    @MainActor func testFlatten_nestedFrameFrame_unspecifiedInnerDimFallsThroughToOuter() {
+        // Inner frame only constrains width; outer only constrains height. Both should apply.
+        let root = VStackNode {
+            TextNode("x").frame(width: 100).frame(height: 50)
+        }
+        let table = flatten(root, itemID: "nested-frame-2")
+        let spec = table.frame(at: 1)
+        XCTAssertEqual(spec.width, 100)
+        XCTAssertEqual(spec.height, 50)
+    }
+
+    @MainActor func testFlatten_framing_foldsIntoLayoutHash() {
+        // A .frame() change must change NodeTable.layoutHash so LayoutCache's CacheKey misses.
+        let unframed = flatten(TextNode("x"), itemID: "a")
+        let framed = flatten(TextNode("x").frame(width: 100), itemID: "a")
+        XCTAssertNotEqual(unframed.layoutHash, framed.layoutHash,
+            "framing is geometry — it must fold into layoutHash")
+    }
+
+    @MainActor func testFlatten_framing_doesNotAffectAppearanceHash() {
+        let unframed = flatten(TextNode("x"), itemID: "a")
+        let framed = flatten(TextNode("x").frame(width: 100), itemID: "a")
+        XCTAssertEqual(unframed.appearanceHash, framed.appearanceHash,
+            "framing must never trigger the repaint-only appearance path")
+    }
+
+    @MainActor func testNodeTable_frameAt_outOfBounds_returnsUnspecified() {
+        let table = flatten(TextNode("x").frame(width: 100), itemID: "oob")
+        XCTAssertEqual(table.frame(at: -1), .unspecified)
+        XCTAssertEqual(table.frame(at: 99), .unspecified)
+    }
 }
