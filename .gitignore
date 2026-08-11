@@ -9,6 +9,8 @@
 .gitnexus
 .build
 CLAUDE.md
+FEATURE_MATRIX.md
+GRID_LAYOUT_DESIGN.md
 AGENTS.md
 velocityui-prompt.md
 .DS_Store
