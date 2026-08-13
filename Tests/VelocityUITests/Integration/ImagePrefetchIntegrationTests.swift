@@ -89,7 +89,8 @@ final class ImagePrefetchIntegrationTests: XCTestCase {
             imageActor: imageActor,
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
-            videoPreparation: videoPrep
+            videoPreparation: videoPrep,
+            frozenBitmapStore: FrozenBitmapStore()
         )
     }
 

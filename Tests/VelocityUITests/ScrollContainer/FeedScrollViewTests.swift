@@ -44,7 +44,8 @@ final class FeedScrollViewTests: XCTestCase {
             imageActor: ImageActor(dimensionCache: dc),
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
-            videoPreparation: videoPrep
+            videoPreparation: videoPrep,
+            frozenBitmapStore: FrozenBitmapStore()
         )
     }
 
@@ -357,7 +358,8 @@ final class FeedScrollViewTests: XCTestCase {
             imageActor: ImageActor(dimensionCache: dc),
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
-            videoPreparation: videoPrep
+            videoPreparation: videoPrep,
+            frozenBitmapStore: FrozenBitmapStore()
         )
 
         let feed = FeedScrollView<TestItem>(
@@ -427,7 +429,8 @@ final class FeedScrollViewTests: XCTestCase {
             imageActor: ImageActor(dimensionCache: dc),
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
-            videoPreparation: videoPrep
+            videoPreparation: videoPrep,
+            frozenBitmapStore: FrozenBitmapStore()
         )
 
         struct ImageItem: Identifiable, Sendable {
@@ -549,7 +552,8 @@ final class FeedScrollViewTests: XCTestCase {
             imageActor: imageActor,
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
-            videoPreparation: videoPrep
+            videoPreparation: videoPrep,
+            frozenBitmapStore: FrozenBitmapStore()
         )
 
         struct ImageItem: Identifiable, Sendable {
@@ -648,7 +652,8 @@ final class FeedScrollViewTests: XCTestCase {
             imageActor: ImageActor(dimensionCache: dc),
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
-            videoPreparation: videoPrep
+            videoPreparation: videoPrep,
+            frozenBitmapStore: FrozenBitmapStore()
         )
 
         let feed = FeedScrollView<URLItem>(
@@ -726,7 +731,8 @@ final class FeedScrollViewTests: XCTestCase {
             imageActor: ImageActor(dimensionCache: dc),
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
-            videoPreparation: videoPrep
+            videoPreparation: videoPrep,
+            frozenBitmapStore: FrozenBitmapStore()
         )
 
         struct URLItem: Identifiable, Sendable {
@@ -842,7 +848,8 @@ final class FeedScrollViewTests: XCTestCase {
             imageActor: ImageActor(dimensionCache: dc),
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
-            videoPreparation: videoPrep
+            videoPreparation: videoPrep,
+            frozenBitmapStore: FrozenBitmapStore()
         )
 
         struct StyleItem: Identifiable, Sendable {
@@ -1404,7 +1411,8 @@ final class FeedScrollViewTests: XCTestCase {
             imageActor: ImageActor(dimensionCache: dc),
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
-            videoPreparation: videoPrep
+            videoPreparation: videoPrep,
+            frozenBitmapStore: FrozenBitmapStore()
         )
 
         struct ImageItem: Identifiable, Sendable {
@@ -1721,6 +1729,7 @@ final class FeedScrollViewTests: XCTestCase {
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
             videoPreparation: videoPrep,
+            frozenBitmapStore: FrozenBitmapStore(),
             contentDeliveryObserver: { kind in
                 deliveredLock.withLock { $0.append(kind) }
             }
@@ -1777,6 +1786,7 @@ final class FeedScrollViewTests: XCTestCase {
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
             videoPreparation: videoPrep,
+            frozenBitmapStore: FrozenBitmapStore(),
             pipelineTaskSpawnObserver: {
                 spawnCount.withLock { $0 += 1 }
             }

@@ -44,7 +44,8 @@ final class AsyncFeedTests: XCTestCase {
             imageActor: ImageActor(dimensionCache: dc),
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
-            videoPreparation: videoPrep
+            videoPreparation: videoPrep,
+            frozenBitmapStore: FrozenBitmapStore()
         )
     }
 

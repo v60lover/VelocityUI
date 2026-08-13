@@ -21,6 +21,11 @@ public final class RenderEnvironment: Sendable {
     public let videoController: VideoController
     public let videoPreparation: VideoPreparationActor
 
+    /// The working-range / LRU-bounded cache for frozen block bitmaps (VelocityUI-qc7 phase B).
+    /// See `FrozenBitmapStore`'s doc for why it is a lock-guarded `final class`, not an actor —
+    /// the MainActor bind/scroll path reads it synchronously, with zero `await`.
+    public let frozenBitmapStore: FrozenBitmapStore
+
     /// Produces a fragment's first-paint image before its real image has decoded. Defaults
     /// to `DefaultPlaceholderRenderer` (thumbnail/BlurHash, VelocityUI's original behavior) —
     /// inject a different `PlaceholderRenderer` to plug in a custom first-paint strategy. See
@@ -66,6 +71,7 @@ public final class RenderEnvironment: Sendable {
         gifActor: GIFActor,
         videoController: VideoController,
         videoPreparation: VideoPreparationActor,
+        frozenBitmapStore: FrozenBitmapStore,
         placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer(),
         contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil,
         pipelineTaskSpawnObserver: (@Sendable () -> Void)? = nil
@@ -85,6 +91,7 @@ public final class RenderEnvironment: Sendable {
         self.gifActor = gifActor
         self.videoController = videoController
         self.videoPreparation = videoPreparation
+        self.frozenBitmapStore = frozenBitmapStore
         self.placeholderRenderer = placeholderRenderer
         self.contentDeliveryObserver = contentDeliveryObserver
         self.pipelineTaskSpawnObserver = pipelineTaskSpawnObserver
@@ -103,6 +110,8 @@ public final class RenderEnvironment: Sendable {
     /// - The same `VideoPreparationActor` into both `videoController` and `videoPreparation`.
     /// - `decodeScaleCeiling` into `imageActor` — see `ImageActor.decodeScaleCeiling`'s
     ///   docstring for why 2.0 is the default (VelocityUI-zgs).
+    /// - A fresh `FrozenBitmapStore` at its own default byte budget — pass `frozenBitmapStore`
+    ///   to inject a store with a custom budget or to share one across a caller-managed graph.
     @MainActor
     public convenience init(
         textPool: TextMeasurementPool = .init(),
@@ -111,6 +120,7 @@ public final class RenderEnvironment: Sendable {
         gifActor: GIFActor = .init(),
         maxAttached: Int = 3,
         decodeScaleCeiling: CGFloat = 2.0,
+        frozenBitmapStore: FrozenBitmapStore = .init(),
         placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer(),
         contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil,
         pipelineTaskSpawnObserver: (@Sendable () -> Void)? = nil
@@ -125,6 +135,7 @@ public final class RenderEnvironment: Sendable {
             gifActor: gifActor,
             videoController: VideoController(videoPreparation: videoPrep, maxAttached: maxAttached),
             videoPreparation: videoPrep,
+            frozenBitmapStore: frozenBitmapStore,
             placeholderRenderer: placeholderRenderer,
             contentDeliveryObserver: contentDeliveryObserver,
             pipelineTaskSpawnObserver: pipelineTaskSpawnObserver
