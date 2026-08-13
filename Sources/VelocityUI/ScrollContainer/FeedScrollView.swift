@@ -201,6 +201,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
     /// Counts `dequeue(kind:)` calls served from `cellPools` (a pool hit — no allocation).
     var _dequeueHitCount: Int = 0
+
+    /// Counts `returnToPool(_:)` calls — every time a cell's shell is handed back to
+    /// `cellPools` rather than kept bound in `visibleCells`. VelocityUI-socg C2: a same-id
+    /// streaming update must NOT increment this (the `.inPlace` branch keeps the shell); a
+    /// different-id item replacement, or genuine scroll-driven eviction, still does.
+    private(set) var _returnToPoolCount: Int = 0
     #endif
 
     // MARK: - Init
@@ -365,12 +371,56 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         rebuildFrames(oldFrames: oldFrames, survivors: survivors)
 
         if needsFullInvalidation {
-            for (_, cell) in visibleCells {
-                cell.layer.removeFromSuperlayer()
-                returnToPool(cell)
+            // reuseDecision(oldID:newID:) (Pipeline/ReuseDecision.swift, VelocityUI-0wi) gates
+            // recycling here instead of the old unconditional pool-return of every visible cell.
+            // `survivors` (built above) is exactly the set of (prevIdx, nextIdx) pairs the differ
+            // already matched by item id — every prevIdx present in `survivorByPrevIdx` is bound
+            // to the SAME item identity as its nextIdx slot (RenderDiffer.diff keys survived/
+            // layoutChanged/appearanceChanged/mediaChanged off itemID). Calling reuseDecision
+            // explicitly, rather than silently trusting that invariant, makes the decision rule
+            // the one source of truth for "keep the shell vs. pool it" and gives a real branch
+            // to unit-test (VelocityUI-socg C2).
+            var survivorByPrevIdx: [Int: Int] = [:]
+            survivorByPrevIdx.reserveCapacity(survivors.count)
+            for s in survivors { survivorByPrevIdx[s.prevIdx] = s.nextIdx }
+
+            var keptCells: [Int: RenderCell] = [:]
+            keptCells.reserveCapacity(visibleCells.count)
+            for (prevIdx, cell) in visibleCells {
+                if let nextIdx = survivorByPrevIdx[prevIdx], nextIdx < tables.count,
+                   reuseDecision(oldID: cell.currentItemID, newID: tables[nextIdx].itemID) == .inPlace {
+                    // C3: the per-block diff (diff(previous:new:) + freeze application) lands
+                    // here — unchanged blocks reused verbatim from FrozenBitmapStore, only the
+                    // hot tail re-measured/re-rasterized. For this bead (C2), the shell is kept
+                    // as-is and re-enrolled into `_pendingFragmentIndices` below, so the EXISTING
+                    // `refineKnownFrames` delivery path (see its `visibleCells[index]` branch)
+                    // re-applies this index's fresh fragments the moment WorkingRange recommits
+                    // it (workingRange.invalidateAll() above forces that recommit through the
+                    // pipeline Task). The cell shows its prior content only as a placeholder for
+                    // the brief window until that commit lands — not indefinitely stale.
+                    //
+                    // Detach (do not reposition here): survivor indices can shift relative to
+                    // items still to be freshly mounted this pass (e.g. a prepend moves this
+                    // cell from index 0 to 1 while a brand-new item takes index 0) — reattaching
+                    // now would leave it z-ordered ahead of a not-yet-mounted lower index.
+                    // `updateVisibleCells`' mount loop re-attaches it in the same ascending
+                    // visible-index order a fresh mount uses, so z-order still matches display
+                    // order without a pool round-trip.
+                    cell.layer.removeFromSuperlayer()
+                    keptCells[nextIdx] = cell
+                } else {
+                    cell.layer.removeFromSuperlayer()
+                    returnToPool(cell)
+                }
             }
-            visibleCells.removeAll(keepingCapacity: true)
+            visibleCells = keptCells
             _pendingFragmentIndices.removeAll(keepingCapacity: true)
+            // Re-enroll every kept .inPlace index so refineKnownFrames refreshes its content
+            // once the pipeline recommits WorkingRange — must run AFTER removeAll above, or
+            // the clear would wipe these entries right back out. Without this, a same-id
+            // survivor freezes on its pre-change content until it scrolls out of keep-range
+            // and re-mounts (see VelocityUI-socg review finding).
+            _pendingFragmentIndices.formUnion(keptCells.keys)
         } else {
             for e in changeSet.appearanceChanged {
                 guard let cell = visibleCells[e.nextIdx],
@@ -592,7 +642,19 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         // Mount newly visible cells.
         for index in visRange {
             guard index < resolvedFrames.count, index < tables.count else { continue }
-            guard visibleCells[index] == nil else { continue }
+            if let keptCell = visibleCells[index] {
+                // VelocityUI-socg C2: a cell kept in-place by itemsDidChange's reuseDecision
+                // branch is detached from the layer tree (superlayer == nil) but still bound —
+                // reattach it here, in the SAME ascending visRange order a fresh mount uses, so
+                // z-order matches display order exactly as a full remount would have produced.
+                // A steady-state already-attached cell (the common case) is a single pointer
+                // read and `continue` — no allocation, no pool round-trip.
+                if keptCell.layer.superlayer == nil {
+                    keptCell.layer.frame = resolvedFrames[index]
+                    layer.addSublayer(keptCell.layer)
+                }
+                continue
+            }
 
             let frame = resolvedFrames[index]
             let table = tables[index]
@@ -763,6 +825,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     private func returnToPool(_ cell: RenderCell) {
         cell.cancelPendingMedia()
         cellPools[cell.kind, default: []].append(cell)
+        #if canImport(XCTest)
+        _returnToPoolCount += 1
+        #endif
     }
 
     // MARK: - Media pipeline

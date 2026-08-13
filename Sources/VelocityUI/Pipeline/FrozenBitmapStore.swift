@@ -89,6 +89,42 @@ public final class FrozenBitmapStore: Sendable {
         self.state = OSAllocatedUnfairLock(initialState: State())
     }
 
+    /// Sizes `byteBudget` from the real working-range footprint (`windowCount` bitmaps at
+    /// `perBitmapCost` bytes, plus `headroom` slack) instead of the fixed 16 MB default. See
+    /// `budget(forWindowCount:perBitmapCost:headroom:)` — a budget smaller than the visible
+    /// window's own bitmap footprint would evict a still-visible block and force a re-freeze
+    /// (jank), which is exactly the failure mode this initializer exists to avoid. Pass the
+    /// caller's own working-range size (e.g. `prefetchBehind + visible + prefetchAhead`) as
+    /// `windowCount` — the driver, not this store, knows the real window shape.
+    public convenience init(windowCount: Int, perBitmapCost: Int = FrozenBitmapStore.defaultPerBitmapCost, headroom: Double = 1.5) {
+        self.init(byteBudget: Self.budget(forWindowCount: windowCount, perBitmapCost: perBitmapCost, headroom: headroom))
+    }
+
+    /// Default per-bitmap byte cost for `budget(forWindowCount:)` — VelocityUI-6qd LB3 measured
+    /// ~0.5 MB per text-block bitmap at 2x scale on device.
+    public static let defaultPerBitmapCost: Int = 512 * 1024
+
+    /// Computes a byte budget sized from the real working-range footprint: `windowCount`
+    /// bitmaps at `perBitmapCost` bytes each, times `headroom` for slack.
+    ///
+    /// `headroom` exists because the window's OWN footprint is not a safe budget by itself: a
+    /// hot-tail re-freeze briefly holds both the old and new bitmap for the same key before the
+    /// old one is evicted (`store(...)`'s re-store path subtracts the old cost first, but the
+    /// caller's `freeze(_:)` call that PRODUCES the new bitmap happens before `store` sees it),
+    /// and LRU churn at the window boundary (a key admitted just before another is evicted) can
+    /// transiently exceed the raw window total. A budget with `headroom <= 1.0` can evict an
+    /// in-window block the instant that happens — this bead's design section calls that out as
+    /// the re-freeze/jank failure mode to avoid. Default `1.5` gives 50% slack above the raw
+    /// window footprint.
+    ///
+    /// Returns `0` for a non-positive `windowCount` or `perBitmapCost` (nothing to size a
+    /// working-range budget from) — callers passing `0` before the working range is known get a
+    /// budget that evicts everything, never a negative or nonsensical value.
+    public static func budget(forWindowCount windowCount: Int, perBitmapCost: Int = defaultPerBitmapCost, headroom: Double = 1.5) -> Int {
+        guard windowCount > 0, perBitmapCost > 0, headroom > 0 else { return 0 }
+        return Int((Double(windowCount) * Double(perBitmapCost) * headroom).rounded(.up))
+    }
+
     // MARK: - Synchronous read (scroll/bind path)
 
     /// Returns the cached bitmap for `key`, or `nil` on a miss (never stored, evicted by the
@@ -183,6 +219,31 @@ public final class FrozenBitmapStore: Sendable {
             st.window = keys
             let toRemove = st.entries.keys.filter { !keys.contains($0) }
             for key in toRemove {
+                Self.remove(&st, key)
+            }
+        }
+    }
+
+    /// Removes exactly the entries for `keysThatLeft`, in O(k) via the store's existing O(1)
+    /// intrusive-list `remove` — the per-frame fast path a scroll-driven eviction should use
+    /// instead of `evict(outside:)`'s O(count) full sweep. This is the RecyclerView "you are
+    /// told what left, you don't scan" model: the caller (the scroll/bind driver) already knows
+    /// precisely which keys fell out of the working range this frame — no need to test every
+    /// cached key against a window `Set` to rediscover that.
+    ///
+    /// Unlike `evict(outside:)`, this does NOT touch the tracked `window` — it is a pure,
+    /// incremental removal of the named keys, not a declaration of the new authoritative window.
+    /// Pair with `admit(_:)` (which the driver already calls to declare entering keys) to keep
+    /// `window` in sync with what's actually still in-range; call `evict(outside:)` instead of
+    /// this when the caller wants to both replace the window wholesale AND sweep everything
+    /// outside it (e.g. a width change or a full-list invalidation).
+    ///
+    /// A key with no cached entry is silently ignored (nothing to remove). `currentByteTotal`
+    /// drops by exactly the summed cost of the keys that WERE cached among `keysThatLeft`.
+    public func evict(_ keysThatLeft: Set<BlockKey>) {
+        guard !keysThatLeft.isEmpty else { return }
+        state.withLock { st in
+            for key in keysThatLeft {
                 Self.remove(&st, key)
             }
         }

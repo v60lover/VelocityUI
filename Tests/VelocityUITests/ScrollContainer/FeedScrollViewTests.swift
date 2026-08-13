@@ -1997,5 +1997,156 @@ final class FeedScrollViewTests: XCTestCase {
 
         await drainFeedWork(feed)
     }
+
+    // MARK: - 29. reuseDecision gates the bind-site recycle (VelocityUI-socg C2)
+
+    /// A same-id streaming update (item content changes, identity doesn't) must classify as
+    /// `.layout` — `AsyncImageNode.layoutHash` covers `aspectRatio`, so changing it on the SAME
+    /// item id forces `RenderDiffer.classify` to `.layout`, which is exactly the "full
+    /// invalidation" branch of `itemsDidChange` that used to unconditionally return every
+    /// visible cell to the pool. `reuseDecision(oldID:newID:)` now gates that branch: since
+    /// `layoutChanged` pairs are matched by item id (RenderDiffer.diff keys off `itemID`), the
+    /// slot's `oldID` (the cell's `currentItemID`) equals the new item's id, so the decision
+    /// must be `.inPlace` — the shell is kept, not pooled.
+    func testSameIDLayoutChange_TakesInPlaceBranch_DoesNotReturnShellToPool() async {
+        let feed = makeFeed()
+        feed.items = [TestItem(id: 0, aspectRatio: 1.0)]
+        feed.layoutSubviews()
+
+        let cellBefore = feed._cellLayer(at: 0)
+        XCTAssertNotNil(cellBefore, "Precondition: item 0 must be mounted before the update")
+
+        // aspectRatio 1.0 at width 375 -> intrinsic/measured height 375 (width / aspectRatio).
+        XCTAssertEqual(feed._debugResolvedFrame(at: 0)?.height ?? -1, 375, accuracy: 0.5,
+            "Precondition: index 0 must resolve to the aspectRatio-1.0 height before the update")
+
+        let returnToPoolBefore = feed._returnToPoolCount
+        let dequeueAllocBefore = feed._dequeueAllocCount
+        let dequeueHitBefore = feed._dequeueHitCount
+
+        // Same id (0), aspectRatio 1.0 -> 2.0: layoutHash changes, itemID does not.
+        feed.items = [TestItem(id: 0, aspectRatio: 2.0)]
+        feed.layoutSubviews()
+
+        XCTAssertEqual(feed._returnToPoolCount, returnToPoolBefore,
+            "Same-id streaming update must NOT return the shell to the pool")
+        XCTAssertEqual(feed._dequeueAllocCount, dequeueAllocBefore,
+            "The .inPlace branch must not trigger a fresh RenderCell allocation")
+        XCTAssertEqual(feed._dequeueHitCount, dequeueHitBefore,
+            "The .inPlace branch must not round-trip through dequeue(kind:) at all")
+
+        let cellAfter = feed._cellLayer(at: 0)
+        XCTAssertTrue(cellBefore === cellAfter,
+            ".inPlace branch must keep the SAME RenderCell instance bound at index 0 — no recycle")
+
+        // The kept shell must not freeze on its pre-change content: aspectRatio 2.0 at width 375
+        // measures to 187.5 (width / aspectRatio — LayoutEngine.measureNode and intrinsicHeight
+        // are guaranteed to agree, see LayoutEngine.swift:195-196). `rebuildFrames` seeds a
+        // survivor's height from its OLD frame, so index 0 starts this poll still at 375 — the
+        // assertion only holds once refineKnownFrames delivers the NEW measured height, which
+        // requires the .inPlace keep branch to have re-enrolled index 0 into
+        // `_pendingFragmentIndices` (this is what breaks without the fix: the index never
+        // refreshes and the loop times out still reporting 375).
+        // Poll layoutSubviews the same way sibling async-delivery tests in this file do
+        // (Task.yield + wall-clock deadline) — never Task.sleep as a coordination primitive.
+        var refreshedHeight: CGFloat?
+        let refreshDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < refreshDeadline {
+            await Task.yield()
+            feed.layoutSubviews()
+            if let h = feed._debugResolvedFrame(at: 0)?.height, abs(h - 187.5) < 0.5 {
+                refreshedHeight = h
+                break
+            }
+        }
+
+        XCTAssertNotNil(refreshedHeight,
+            "Kept .inPlace cell at index 0 must pick up the NEW aspectRatio-2.0 height (187.5) "
+            + "once WorkingRange recommits — it must not stay frozen at the pre-change height "
+            + "(375) until it scrolls out of keep-range and re-mounts")
+        XCTAssertTrue(cellBefore === feed._cellLayer(at: 0),
+            "Content refresh must still be delivered to the SAME kept RenderCell instance — "
+            + "not a pool round-trip in disguise")
+
+        await drainFeedWork(feed)
+    }
+
+    /// Counterpart to the test above: a genuinely different item id at the same slot (list
+    /// replace, not a streaming update) must still take the `.pool` branch — `reuseDecision`
+    /// must not over-fire and keep shells that no longer belong to the same identity.
+    func testDifferentIDReplacement_StillRecyclesThroughPool() {
+        let feed = makeFeed()
+        feed.items = [TestItem(id: 0, aspectRatio: 1.0)]
+        feed.layoutSubviews()
+        XCTAssertNotNil(feed._cellLayer(at: 0), "Precondition: item 0 must be mounted before the update")
+
+        let returnToPoolBefore = feed._returnToPoolCount
+
+        // A different id entirely at the same slot — no shared identity to keep in place.
+        feed.items = [TestItem(id: 1, aspectRatio: 1.0)]
+        feed.layoutSubviews()
+
+        XCTAssertEqual(feed._returnToPoolCount, returnToPoolBefore + 1,
+            "A different-id item replacing the old one must still recycle the old shell through the pool")
+        XCTAssertNotNil(feed._cellLayer(at: 0), "The new item must still end up mounted at index 0")
+    }
+
+    /// A pure scroll feed (every item keeps its own identity; only the visible window slides)
+    /// must be completely unaffected by the reuseDecision wiring — this is the "pool dequeue/
+    /// return count is unchanged for a pure scroll feed" acceptance criterion from VelocityUI
+    /// -socg. `itemsDidChange`'s full-invalidation branch is never even reached here (no
+    /// `items` reassignment happens at all after the initial load — only `contentOffset`
+    /// changes), so this is really asserting the scroll-driven recycle loop in
+    /// `updateVisibleCells` (untouched by C2) keeps behaving exactly as before.
+    func testPureScrollFeed_PoolDequeueReturnCountsUnaffectedByReuseDecisionWiring() async {
+        let width: CGFloat = 375
+        let env = makeEnvironment()
+        let itemCount = 100
+        let testItems = (0..<itemCount).map { TestItem(id: $0, aspectRatio: 1.0) }
+        let builder: (TestItem) -> any RenderNode = { item in
+            AsyncImageNode(url: nil, aspectRatio: item.aspectRatio)
+        }
+        await warmLayoutCache(items: testItems, width: width, cellBuilder: builder, environment: env)
+
+        let feed = FeedScrollView<TestItem>(environment: env, frame: CGRect(x: 0, y: 0, width: width, height: 812))
+        feed.cellBuilder = { item in builder(item) }
+        feed.items = testItems
+        feed.layoutSubviews()
+
+        // Warm-up: the working-range window has to fill with pooled cells at least once before
+        // allocations stop. Measured directly (temporary per-step instrumentation) that with this
+        // feed's geometry (100 items, aspectRatio 1.0 → 375pt rows at width 375, stepSize 200) the
+        // window fills and `_dequeueAllocCount` plateaus at step 19; `warmupSteps = 40` gives a
+        // generous margin over that fill point — matches
+        // testCellPoolConvergesAfterWarmupWithHeterogeneousRealHeights' "generous margin over the
+        // working-range window" rationale. `.inPlace` never fires here (every index binds a
+        // distinct item id), so this test is really re-confirming the untouched scroll-driven
+        // recycle loop in updateVisibleCells behaves exactly as before C2's wiring.
+        let stepSize: CGFloat = 200
+        let totalSteps = 90
+        let warmupSteps = 40
+        var dequeueAllocAtWarmup: Int?
+
+        for step in 1...totalSteps {
+            feed.contentOffset = CGPoint(x: 0, y: CGFloat(step) * stepSize)
+            feed.layoutSubviews()
+            if step == warmupSteps {
+                dequeueAllocAtWarmup = feed._dequeueAllocCount
+            }
+        }
+
+        guard let allocAtWarmup = dequeueAllocAtWarmup else {
+            XCTFail("warmupSteps must be <= totalSteps"); return
+        }
+
+        XCTAssertGreaterThan(feed._returnToPoolCount, 0,
+            "Pure scrolling must still recycle cells that scroll out of the keep-range window")
+        XCTAssertEqual(feed._dequeueAllocCount, allocAtWarmup,
+            "Once the working-range window has filled once, pure scrolling must be served "
+            + "entirely from the pool — no new RenderCell allocations past warm-up, exactly as "
+            + "before the reuseDecision wiring (VelocityUI-ksh's convergence guarantee)")
+
+        await drainFeedWork(feed)
+    }
 }
 #endif

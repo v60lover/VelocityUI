@@ -93,6 +93,20 @@ private struct ReferenceLRU {
 /// - "RenderEnvironment owns it ... no singleton ... releases all bitmaps on env deinit"
 ///     -> RenderEnvironment ownership section below (`#if canImport(UIKit)`, needs the
 ///        UIKit-gated RenderEnvironment/VideoController/ImageActor types).
+///
+/// Acceptance-criterion -> test mapping (VelocityUI-socg phase C1):
+/// - "evict(_ keysThatLeft:) removes exactly the named keys in O(k); currentByteTotal drops by
+///    their cost; other entries and the tracked window are untouched"
+///     -> testEvictKeysThatLeft_RemovesExactlyNamedKeys_OtherEntriesAndWindowUntouched
+///     -> testEvictKeysThatLeft_KeyNotCached_IsSilentlyIgnored
+///     -> testEvictKeysThatLeft_EmptySet_IsNoOp
+///     -> testEvictKeysThatLeft_LargeCache_OnlyNamedKeysRemoved
+/// - "budget-from-window sizing produces a budget that does not evict an in-window block"
+///     -> testBudgetForWindowCount_SizedBudget_DoesNotEvictAFullInWindowBudget
+///     -> testBudgetForWindowCount_PureFunction_MatchesWindowCountTimesCostTimesHeadroom
+///     -> testBudgetForWindowCount_UsesMeasuredDefaultPerBitmapCost
+///     -> testBudgetForWindowCount_NonPositiveInputs_ReturnZero
+///     -> testWindowCountConvenienceInit_ProducesSameBudgetAsStaticHelper
 final class FrozenBitmapStoreTests: XCTestCase {
 
     // MARK: - Fixtures
@@ -341,6 +355,144 @@ final class FrozenBitmapStoreTests: XCTestCase {
         store.handleMemoryPressure()
         XCTAssertNotNil(store.bitmap(for: a), "handleMemoryPressure() must use the window evict(outside:) just declared")
         XCTAssertEqual(store.currentByteTotal, 100)
+    }
+
+    // MARK: - Acceptance (VelocityUI-socg C1): evict(_ keysThatLeft:) delta eviction
+
+    /// Covers the C1 acceptance criterion verbatim: removes exactly the named keys, drops
+    /// `currentByteTotal` by their summed cost, and leaves every other entry AND the tracked
+    /// `window` untouched — `evict(_ keysThatLeft:)` is a pure incremental removal, unlike
+    /// `evict(outside:)` which replaces `window` wholesale with its argument.
+    func testEvictKeysThatLeft_RemovesExactlyNamedKeys_OtherEntriesAndWindowUntouched() {
+        let store = FrozenBitmapStore(byteBudget: 1_000_000)
+        let a = key(0), b = key(1), c = key(2), survivor = key(3)
+
+        store.store(makeFakeCGImage(width: 5, height: 5), size: .zero, cost: 100, for: a)
+        store.store(makeFakeCGImage(width: 5, height: 5), size: .zero, cost: 100, for: b)
+        store.store(makeFakeCGImage(width: 5, height: 5), size: .zero, cost: 100, for: c)
+        store.store(makeFakeCGImage(width: 5, height: 5), size: .zero, cost: 100, for: survivor)
+
+        // Declare a working-range window that includes every key above — evict(_:) must leave
+        // this window completely untouched (unlike evict(outside:), which would replace it).
+        let window: Set<BlockKey> = [a, b, c, survivor]
+        store.admit(window)
+        XCTAssertEqual(store.currentByteTotal, 400)
+
+        store.evict([a, b])
+
+        XCTAssertNil(store.bitmap(for: a), "a must be evicted — it was named in keysThatLeft")
+        XCTAssertNil(store.bitmap(for: b), "b must be evicted — it was named in keysThatLeft")
+        XCTAssertNotNil(store.bitmap(for: c), "c was NOT named — must survive untouched")
+        XCTAssertNotNil(store.bitmap(for: survivor), "survivor was NOT named — must survive untouched")
+        XCTAssertEqual(store.currentByteTotal, 200, "currentByteTotal must drop by exactly the evicted keys' summed cost")
+        XCTAssertTrue(store.debugValidateListInvariants())
+
+        // Window untouched: handleMemoryPressure() (which sweeps everything OUTSIDE the tracked
+        // window) must still treat c and survivor as in-window — proving evict(_:) never called
+        // through to anything that mutates `window`.
+        store.handleMemoryPressure()
+        XCTAssertNotNil(store.bitmap(for: c), "window must be untouched by evict(_:) — memory pressure must still spare c")
+        XCTAssertNotNil(store.bitmap(for: survivor), "window must be untouched by evict(_:) — memory pressure must still spare survivor")
+    }
+
+    func testEvictKeysThatLeft_KeyNotCached_IsSilentlyIgnored() {
+        let store = FrozenBitmapStore(byteBudget: 1_000_000)
+        let cached = key(0)
+        let neverStored = key(99)
+
+        store.store(makeFakeCGImage(width: 5, height: 5), size: .zero, cost: 100, for: cached)
+        XCTAssertEqual(store.currentByteTotal, 100)
+
+        store.evict([neverStored])
+
+        XCTAssertEqual(store.currentByteTotal, 100, "Evicting a key that was never cached must not change currentByteTotal")
+        XCTAssertNotNil(store.bitmap(for: cached), "An unrelated cached key must survive a miss-only evict(_:) call")
+        XCTAssertTrue(store.debugValidateListInvariants())
+    }
+
+    func testEvictKeysThatLeft_EmptySet_IsNoOp() {
+        let store = FrozenBitmapStore(byteBudget: 1_000_000)
+        let a = key(0)
+        store.store(makeFakeCGImage(width: 5, height: 5), size: .zero, cost: 100, for: a)
+
+        store.evict([])
+
+        XCTAssertEqual(store.currentByteTotal, 100)
+        XCTAssertNotNil(store.bitmap(for: a))
+    }
+
+    /// O(k) contract: removing `k` named keys out of a much larger cache must not degrade to an
+    /// O(count) full sweep. This does not assert wall-clock complexity directly (flaky under
+    /// load) — it asserts the OBSERVABLE contract that only the named keys are affected, at any
+    /// cache size, which is the behavior an O(count) implementation could equally satisfy but an
+    /// accidental "scan everything" bug (e.g. iterating `entries` instead of `keysThatLeft`)
+    /// would not: this test's key insight is functional correctness at scale, backed by
+    /// `debugValidateListInvariants()` catching any list corruption an O(count) rewrite might
+    /// introduce.
+    func testEvictKeysThatLeft_LargeCache_OnlyNamedKeysRemoved() {
+        let store = FrozenBitmapStore(byteBudget: 100_000_000)
+        let allKeys = (0..<500).map { key($0) }
+        for k in allKeys {
+            store.store(makeFakeCGImage(width: 2, height: 2), size: .zero, cost: 100, for: k)
+        }
+        XCTAssertEqual(store.currentByteTotal, 500 * 100)
+
+        let leaving = Set(allKeys.prefix(7)) // first 7 keys "left the window"
+        store.evict(leaving)
+
+        XCTAssertEqual(store.currentByteTotal, (500 - 7) * 100)
+        for k in leaving {
+            XCTAssertNil(store.bitmap(for: k))
+        }
+        for k in allKeys.dropFirst(7) {
+            XCTAssertNotNil(store.bitmap(for: k))
+        }
+        XCTAssertTrue(store.debugValidateListInvariants())
+    }
+
+    // MARK: - Acceptance (VelocityUI-socg C1): budget-from-window sizing
+
+    func testBudgetForWindowCount_PureFunction_MatchesWindowCountTimesCostTimesHeadroom() {
+        let budget = FrozenBitmapStore.budget(forWindowCount: 20, perBitmapCost: 500_000, headroom: 1.5)
+        XCTAssertEqual(budget, Int((20.0 * 500_000.0 * 1.5).rounded(.up)))
+    }
+
+    func testBudgetForWindowCount_UsesMeasuredDefaultPerBitmapCost() {
+        let budget = FrozenBitmapStore.budget(forWindowCount: 10)
+        XCTAssertEqual(budget, Int((10.0 * Double(FrozenBitmapStore.defaultPerBitmapCost) * 1.5).rounded(.up)))
+    }
+
+    func testBudgetForWindowCount_NonPositiveInputs_ReturnZero() {
+        XCTAssertEqual(FrozenBitmapStore.budget(forWindowCount: 0), 0)
+        XCTAssertEqual(FrozenBitmapStore.budget(forWindowCount: -5), 0)
+        XCTAssertEqual(FrozenBitmapStore.budget(forWindowCount: 10, perBitmapCost: 0), 0)
+    }
+
+    func testWindowCountConvenienceInit_ProducesSameBudgetAsStaticHelper() {
+        let expected = FrozenBitmapStore.budget(forWindowCount: 16, perBitmapCost: 400_000, headroom: 2.0)
+        let store = FrozenBitmapStore(windowCount: 16, perBitmapCost: 400_000, headroom: 2.0)
+        XCTAssertEqual(store.byteBudget, expected)
+    }
+
+    /// The actual failure mode `budget(forWindowCount:)` exists to prevent: a budget sized
+    /// straight from the working-range window (no headroom) must not evict a block that is
+    /// still inside that same window. Sizes a store's budget from a 20-block window, fills the
+    /// store with exactly those 20 blocks at the assumed per-bitmap cost, and asserts every one
+    /// survives — none were evicted to make room for a later one in the same window.
+    func testBudgetForWindowCount_SizedBudget_DoesNotEvictAFullInWindowBudget() {
+        let windowCount = 20
+        let perBitmapCost = 500_000 // ~0.5 MB, matches the measured default
+        let store = FrozenBitmapStore(windowCount: windowCount, perBitmapCost: perBitmapCost)
+
+        let windowKeys = (0..<windowCount).map { key($0) }
+        for k in windowKeys {
+            store.store(makeFakeCGImage(width: 2, height: 2), size: .zero, cost: perBitmapCost, for: k)
+        }
+
+        for k in windowKeys {
+            XCTAssertNotNil(store.bitmap(for: k), "A budget sized from the real window must not self-evict an in-window block")
+        }
+        XCTAssertEqual(store.currentByteTotal, windowCount * perBitmapCost)
     }
 
     // MARK: - Stress: intrusive-list invariants under randomized interleaving
