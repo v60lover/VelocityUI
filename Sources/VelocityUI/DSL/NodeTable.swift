@@ -32,8 +32,11 @@ public struct VColorDescriptor: Sendable, Hashable {
     }
 }
 
-/// layoutHash / appearanceHash default to 0 for hand-constructed test fixtures.
-/// flatten() always passes the real values from the corresponding DSL node.
+/// flatten() always passes the real layoutHash/appearanceHash from the corresponding DSL
+/// node. There is no defaulted-zero init — hand-built test fixtures that don't care about
+/// the hash value must go through the explicit `.test(...)` factory in the test target
+/// (Tests/VelocityUITests/Support/DescriptorTestFactories.swift) so the sentinel is visible
+/// and greppable at the call site, never silently reachable from production code.
 /// Phase 2+ subtree-level classifier will rely on these — do not remove.
 public struct VStackDescriptor: Sendable {
     public let alignment: Int  // raw HorizontalAlignment
@@ -41,7 +44,7 @@ public struct VStackDescriptor: Sendable {
     public let layoutHash: Int
     public let appearanceHash: Int
 
-    public init(alignment: Int, spacing: CGFloat, layoutHash: Int = 0, appearanceHash: Int = 0) {
+    public init(alignment: Int, spacing: CGFloat, layoutHash: Int, appearanceHash: Int) {
         self.alignment = alignment
         self.spacing = spacing
         self.layoutHash = layoutHash
@@ -55,7 +58,7 @@ public struct HStackDescriptor: Sendable {
     public let layoutHash: Int
     public let appearanceHash: Int
 
-    public init(alignment: Int, spacing: CGFloat, layoutHash: Int = 0, appearanceHash: Int = 0) {
+    public init(alignment: Int, spacing: CGFloat, layoutHash: Int, appearanceHash: Int) {
         self.alignment = alignment
         self.spacing = spacing
         self.layoutHash = layoutHash
@@ -68,7 +71,7 @@ public struct ZStackDescriptor: Sendable {
     public let layoutHash: Int
     public let appearanceHash: Int
 
-    public init(alignment: Int, layoutHash: Int = 0, appearanceHash: Int = 0) {
+    public init(alignment: Int, layoutHash: Int, appearanceHash: Int) {
         self.alignment = alignment
         self.layoutHash = layoutHash
         self.appearanceHash = appearanceHash

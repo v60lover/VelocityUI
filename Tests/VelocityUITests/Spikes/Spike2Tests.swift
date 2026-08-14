@@ -29,7 +29,7 @@ final class Spike2Tests: XCTestCase {
         NodeTable(
             itemID: id,
             nodes: [
-                .vstack(VStackDescriptor(alignment: 0, spacing: 8)),
+                .vstack(VStackDescriptor.test(alignment: 0, spacing: 8)),
                 .text(TextDescriptor(
                     content: "Feed item \(id): some text content goes here.",
                     font: VFontDescriptor(size: 14, weight: 0),

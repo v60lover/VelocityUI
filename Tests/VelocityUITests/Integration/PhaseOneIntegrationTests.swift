@@ -309,7 +309,7 @@ final class PhaseOneIntegrationTests: XCTestCase {
             NodeTable(
                 itemID: i,
                 nodes: [
-                    .vstack(VStackDescriptor(alignment: 0, spacing: 4, layoutHash: i)),
+                    .vstack(VStackDescriptor(alignment: 0, spacing: 4, layoutHash: i, appearanceHash: 0)),
                     .text(TextDescriptor(
                         content: "Integration item \(i): a medium-length caption for layout.",
                         font: VFontDescriptor(size: 14, weight: 0),

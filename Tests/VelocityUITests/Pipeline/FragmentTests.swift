@@ -28,7 +28,7 @@ final class FragmentTests: XCTestCase {
         let table = NodeTable(
             itemID: "t1",
             nodes: [
-                .vstack(VStackDescriptor(alignment: 0, spacing: 0)),
+                .vstack(VStackDescriptor.test(alignment: 0, spacing: 0)),
                 .image(imageDesc(aspectRatio: 2.0, hash: 1)),
                 .text(textDesc("Hello", hash: 2)),
             ],
@@ -66,9 +66,9 @@ final class FragmentTests: XCTestCase {
         let table = NodeTable(
             itemID: "t2",
             nodes: [
-                .vstack(VStackDescriptor(alignment: 0, spacing: 0)),
+                .vstack(VStackDescriptor.test(alignment: 0, spacing: 0)),
                 .image(imageDesc(aspectRatio: 2.0, hash: 10)),
-                .vstack(VStackDescriptor(alignment: 0, spacing: 0)),
+                .vstack(VStackDescriptor.test(alignment: 0, spacing: 0)),
                 .text(textDesc("TextA", hash: 20)),
                 .text(textDesc("TextB", hash: 30)),
             ],
@@ -112,7 +112,7 @@ final class FragmentTests: XCTestCase {
         let table = NodeTable(
             itemID: "t3",
             nodes: [
-                .zstack(ZStackDescriptor(alignment: 4)),
+                .zstack(ZStackDescriptor.test(alignment: 4)),
                 .image(imageDesc(aspectRatio: 1.0, hash: 1)),
                 .text(textDesc("Overlay", hash: 2)),
             ],
@@ -147,7 +147,7 @@ final class FragmentTests: XCTestCase {
         let table = NodeTable(
             itemID: "t4",
             nodes: [
-                .vstack(VStackDescriptor(alignment: 0, spacing: 0)),
+                .vstack(VStackDescriptor.test(alignment: 0, spacing: 0)),
                 .image(imageDesc(aspectRatio: 1.5, hash: 1)),
                 .text(textDesc("Stable", hash: 2)),
             ],
@@ -181,7 +181,7 @@ final class FragmentTests: XCTestCase {
         let table = NodeTable(
             itemID: "t6",
             nodes: [
-                .hstack(HStackDescriptor(alignment: 1, spacing: 8)),
+                .hstack(HStackDescriptor.test(alignment: 1, spacing: 8)),
                 .hosting(HostingDescriptor(size: CGSize(width: 100, height: 100), layoutHash: 1, appearanceHash: 1)),
                 .text(textDesc("right", hash: 2)),
             ],
@@ -217,7 +217,7 @@ final class FragmentTests: XCTestCase {
         let table = NodeTable(
             itemID: "hstack-proportional",
             nodes: [
-                .hstack(HStackDescriptor(alignment: 1, spacing: 8)),
+                .hstack(HStackDescriptor.test(alignment: 1, spacing: 8)),
                 .hosting(HostingDescriptor(size: CGSize(width: 100, height: 100), layoutHash: 1, appearanceHash: 1)),
                 .text(textDesc(longText, hash: 2)),
             ],
@@ -252,7 +252,7 @@ final class FragmentTests: XCTestCase {
         let table = NodeTable(
             itemID: "hstack-bounded",
             nodes: [
-                .hstack(HStackDescriptor(alignment: 1, spacing: 8)),
+                .hstack(HStackDescriptor.test(alignment: 1, spacing: 8)),
                 .hosting(HostingDescriptor(size: CGSize(width: 100, height: 100), layoutHash: 1, appearanceHash: 1)),
                 .text(textDesc("short", hash: 2)),
             ],
@@ -276,7 +276,7 @@ final class FragmentTests: XCTestCase {
         let table = NodeTable(
             itemID: "hstack-spacer",
             nodes: [
-                .hstack(HStackDescriptor(alignment: 1, spacing: 8)),
+                .hstack(HStackDescriptor.test(alignment: 1, spacing: 8)),
                 .spacer(20),
                 .hosting(HostingDescriptor(size: CGSize(width: 50, height: 50), layoutHash: 1, appearanceHash: 1)),
             ],
@@ -303,7 +303,7 @@ final class FragmentTests: XCTestCase {
         let table = NodeTable(
             itemID: "t5",
             nodes: [
-                .vstack(VStackDescriptor(alignment: 0, spacing: 0)),
+                .vstack(VStackDescriptor.test(alignment: 0, spacing: 0)),
                 .image(imageDesc(aspectRatio: 2.0, hash: 1)),
                 .spacer(40),
                 .text(textDesc("Below spacer", hash: 3)),
@@ -417,7 +417,7 @@ final class FragmentTests: XCTestCase {
         let table = NodeTable(
             itemID: "frame-container-vstack",
             nodes: [
-                .vstack(VStackDescriptor(alignment: 1, spacing: 0)),
+                .vstack(VStackDescriptor.test(alignment: 1, spacing: 0)),
                 .hosting(HostingDescriptor(size: CGSize(width: 100, height: 50), layoutHash: 1, appearanceHash: 1)),
             ],
             parentIndices: [-1, 0],
@@ -443,7 +443,7 @@ final class FragmentTests: XCTestCase {
         let table = NodeTable(
             itemID: "frame-extract-leaf",
             nodes: [
-                .vstack(VStackDescriptor(alignment: 1, spacing: 0)),
+                .vstack(VStackDescriptor.test(alignment: 1, spacing: 0)),
                 .hosting(HostingDescriptor(size: CGSize(width: 60, height: 40), layoutHash: 1, appearanceHash: 1)),
                 .hosting(HostingDescriptor(size: CGSize(width: 100, height: 100), layoutHash: 2, appearanceHash: 2)),
             ],
@@ -507,7 +507,7 @@ final class FragmentTests: XCTestCase {
         let table = NodeTable(
             itemID: "hstack-fixed-and-flexible-text",
             nodes: [
-                .hstack(HStackDescriptor(alignment: 1, spacing: 0)),
+                .hstack(HStackDescriptor.test(alignment: 1, spacing: 0)),
                 .text(textDesc("Fixed", hash: 1)),
                 .text(textDesc(longText, hash: 2)),
             ],
@@ -560,7 +560,7 @@ final class FragmentTests: XCTestCase {
         let table = NodeTable(
             itemID: "benchmark-repro",
             nodes: [
-                .hstack(HStackDescriptor(alignment: 1, spacing: 0)),
+                .hstack(HStackDescriptor.test(alignment: 1, spacing: 0)),
                 .image(imageDesc(aspectRatio: 0.5, hash: 1)),  // contentMode defaults to .fit (0)
             ],
             parentIndices: [-1, 0],
@@ -598,7 +598,7 @@ final class FragmentTests: XCTestCase {
         let table = NodeTable(
             itemID: "unframed-control",
             nodes: [
-                .hstack(HStackDescriptor(alignment: 1, spacing: 0)),
+                .hstack(HStackDescriptor.test(alignment: 1, spacing: 0)),
                 .image(imageDesc(aspectRatio: 0.5, hash: 1)),
             ],
             parentIndices: [-1, 0],
@@ -627,7 +627,7 @@ final class FragmentTests: XCTestCase {
         let table = NodeTable(
             itemID: "framed-container-no-spurious-clip",
             nodes: [
-                .vstack(VStackDescriptor(alignment: 1, spacing: 0)),
+                .vstack(VStackDescriptor.test(alignment: 1, spacing: 0)),
                 .hosting(HostingDescriptor(size: CGSize(width: 60, height: 40), layoutHash: 1, appearanceHash: 1)),
             ],
             parentIndices: [-1, 0],

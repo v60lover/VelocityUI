@@ -18,7 +18,7 @@ final class Spike0Tests: XCTestCase {
         let table = NodeTable(
             itemID: "test",
             nodes: [
-                .vstack(VStackDescriptor(alignment: 0, spacing: 8)),
+                .vstack(VStackDescriptor.test(alignment: 0, spacing: 8)),
                 .image(ImageDescriptor(url: nil, aspectRatio: 1.0, contentMode: 0,
                                        cornerRadius: 0, layoutHash: 1, appearanceHash: 1)),
                 .text(TextDescriptor(content: "Hello", font: VFontDescriptor(size: 14, weight: 0),

@@ -19,7 +19,7 @@ final class Spike1Tests: XCTestCase {
     // MARK: - Helpers
 
     private func makeVStackTable(id: Int, textCount: Int) -> NodeTable {
-        var nodes: [NodeKind] = [.vstack(VStackDescriptor(alignment: 0, spacing: 8))]
+        var nodes: [NodeKind] = [.vstack(VStackDescriptor.test(alignment: 0, spacing: 8))]
         var parents: [Int] = [-1]
         for i in 0..<textCount {
             nodes.append(.text(TextDescriptor(
