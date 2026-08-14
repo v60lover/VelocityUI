@@ -207,6 +207,14 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// streaming update must NOT increment this (the `.inPlace` branch keeps the shell); a
     /// different-id item replacement, or genuine scroll-driven eviction, still does.
     private(set) var _returnToPoolCount: Int = 0
+
+    /// VelocityUI-socg C3: counts calls into the in-place block-diff's text measure/rasterize
+    /// primitives (`measureTextSync` / the `rasterize` closure `applyInPlaceBlockDiff` wires
+    /// into `freeze(_:)`). The anti-jank invariant under test is that these counts per streaming
+    /// update stay FLAT (bounded by "the hot tail, plus at most one just-finalized block") as a
+    /// message's block count grows — never O(message length).
+    private(set) var _blockDiffMeasureCallCount: Int = 0
+    private(set) var _blockDiffRasterizeCallCount: Int = 0
     #endif
 
     // MARK: - Init
@@ -359,7 +367,21 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         let needsFullInvalidation = !changeSet.layoutChanged.isEmpty ||
                                     !changeSet.removed.isEmpty ||
                                     !changeSet.added.isEmpty
+
+        // VelocityUI-socg C3: capture the per-block diff inputs for every layout-changed
+        // survivor BEFORE workingRange.invalidateAll() below wipes the ring buffer — the OLD
+        // fragments (with their real, previously-measured per-block heights) are only readable
+        // from WorkingRange right now; once invalidated there is no way to recover them short of
+        // a full re-measure, which is exactly the O(item length) cost this diff exists to avoid.
+        // `changeSet.layoutChanged` already carries the (prev, next) NodeTable pair directly —
+        // no need to re-derive it from `tables`/`nextTables` before/after the reassignment below.
+        var blockDiffInputs: [Int: (previousTable: NodeTable, newTable: NodeTable, previousFragments: [Fragment])] = [:]
         if needsFullInvalidation {
+            for e in changeSet.layoutChanged {
+                guard let wrEntry = workingRange.entry(at: e.prevIdx) else { continue }
+                blockDiffInputs[e.prevIdx] = (e.prev, e.next, wrEntry.fragments)
+            }
+
             workingRange.invalidateAll()
             let pipeline = self.pipeline
             Task { await pipeline.markInvalidated() }
@@ -386,19 +408,16 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
             var keptCells: [Int: RenderCell] = [:]
             keptCells.reserveCapacity(visibleCells.count)
+            // C3: indices the block-diff path below already resolved synchronously (correct
+            // height + repositioned fragments) — excluded from the `_pendingFragmentIndices`
+            // re-enroll so refineKnownFrames doesn't redundantly redo the same work through the
+            // async pipeline once WorkingRange recommits.
+            var blockDiffResolvedIndices: Set<Int> = []
+            let width = lastLayoutWidth > 0 ? lastLayoutWidth : bounds.width
+            let scale = max(1, traitCollection.displayScale)
             for (prevIdx, cell) in visibleCells {
                 if let nextIdx = survivorByPrevIdx[prevIdx], nextIdx < tables.count,
                    reuseDecision(oldID: cell.currentItemID, newID: tables[nextIdx].itemID) == .inPlace {
-                    // C3: the per-block diff (diff(previous:new:) + freeze application) lands
-                    // here — unchanged blocks reused verbatim from FrozenBitmapStore, only the
-                    // hot tail re-measured/re-rasterized. For this bead (C2), the shell is kept
-                    // as-is and re-enrolled into `_pendingFragmentIndices` below, so the EXISTING
-                    // `refineKnownFrames` delivery path (see its `visibleCells[index]` branch)
-                    // re-applies this index's fresh fragments the moment WorkingRange recommits
-                    // it (workingRange.invalidateAll() above forces that recommit through the
-                    // pipeline Task). The cell shows its prior content only as a placeholder for
-                    // the brief window until that commit lands — not indefinitely stale.
-                    //
                     // Detach (do not reposition here): survivor indices can shift relative to
                     // items still to be freshly mounted this pass (e.g. a prepend moves this
                     // cell from index 0 to 1 while a brand-new item takes index 0) — reattaching
@@ -408,6 +427,34 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                     // order without a pool round-trip.
                     cell.layer.removeFromSuperlayer()
                     keptCells[nextIdx] = cell
+
+                    // C3: per-block diff (diff(previous:new:) + freeze application) — unchanged
+                    // blocks reused verbatim from FrozenBitmapStore (zero re-measure/rasterize),
+                    // only the hot tail / newly-appended blocks touched. `applyInPlaceBlockDiff`
+                    // returns nil whenever it cannot GUARANTEE correct content cheaply (non-flat
+                    // item shape, no previous-fragment baseline, or a changed image/geometry
+                    // block Block-level diff has no way to remeasure) — those fall through to
+                    // the pre-existing `_pendingFragmentIndices` full-refresh path below exactly
+                    // as C2 left it, rather than risk painting wrong/stale content.
+                    if let inputs = blockDiffInputs[prevIdx], nextIdx < items.count,
+                       let result = applyInPlaceBlockDiff(
+                           previousTable: inputs.previousTable,
+                           previousFragments: inputs.previousFragments,
+                           newTable: inputs.newTable,
+                           itemID: items[nextIdx].id,
+                           width: width,
+                           scale: scale
+                       ) {
+                        let delta = VerticalLayoutProvider.refineFrames(&resolvedFrames, at: nextIdx, newHeight: result.height)
+                        if delta != 0 { contentSize.height += delta }
+                        estimatedIndices.remove(nextIdx)
+                        cell.layer.frame = resolvedFrames[nextIdx]
+                        let syncMap = buildSyncMap(for: result.fragments)
+                        cell.applyLayout(result.fragments, synchronousContent: syncMap)
+                        spawnMediaFetches(for: cell, fragments: result.fragments, itemID: inputs.newTable.itemID,
+                                          syncMap: syncMap)
+                        blockDiffResolvedIndices.insert(nextIdx)
+                    }
                 } else {
                     cell.layer.removeFromSuperlayer()
                     returnToPool(cell)
@@ -419,8 +466,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             // once the pipeline recommits WorkingRange — must run AFTER removeAll above, or
             // the clear would wipe these entries right back out. Without this, a same-id
             // survivor freezes on its pre-change content until it scrolls out of keep-range
-            // and re-mounts (see VelocityUI-socg review finding).
-            _pendingFragmentIndices.formUnion(keptCells.keys)
+            // and re-mounts (see VelocityUI-socg review finding). Indices the C3 block-diff
+            // path already resolved above are excluded (see `blockDiffResolvedIndices`'s doc).
+            _pendingFragmentIndices.formUnion(keptCells.keys.filter { !blockDiffResolvedIndices.contains($0) })
         } else {
             for e in changeSet.appearanceChanged {
                 guard let cell = visibleCells[e.nextIdx],
@@ -447,6 +495,206 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
         syncContentSize()
         setNeedsLayout()
+    }
+
+    // MARK: - VelocityUI-socg C3: in-place per-block diff
+
+    /// Attempts the C3 per-block diff for one `.inPlace` survivor: builds the previous/new
+    /// `[Block]` lists from each side's `NodeTable` (only for the flat shape `flatBlocks(for:
+    /// width:)` recognizes), diffs them with `diff(previous:new:)`, and for every block that
+    /// changed, re-measures — freezing it into `environment.frozenBitmapStore` when it is TEXT
+    /// and has finished growing (see `flatBlocks`'s and this method's inline docs). Returns the
+    /// item's new total height and its full repositioned `[Fragment]` list (so any image blocks
+    /// after a resized text block still land at the right y-offset), or `nil` when this update
+    /// cannot be optimized SAFELY — the caller falls back to the pre-existing
+    /// `_pendingFragmentIndices` full-refresh path rather than risk stale/wrong content.
+    ///
+    /// `previousFragments` must be the REAL fragments `extractFragments` produced for this item
+    /// the last time it was measured (captured from `WorkingRange` before `invalidateAll()` —
+    /// see the `itemsDidChange` call site) — they are the only source of the OLD content's real
+    /// per-block heights, since `flatBlocks`' synthetic `Fragment`s carry no height of their own.
+    ///
+    /// `itemID` is `Item.ID` (this feed's real, `Hashable & Sendable` id type) rather than
+    /// `NodeTable.itemID` (`AnyHashable`) — `BlockKey`'s generic init requires `Hashable &
+    /// Sendable`, and `AnyHashable` does not conform to `Sendable` in this SDK (see
+    /// `BlockKey`'s own doc comment). `.inPlace` guarantees `previousTable`/`newTable` share the
+    /// same identity, so one `itemID` covers both `flatBlocks` calls below.
+    private func applyInPlaceBlockDiff<ID: Hashable & Sendable>(
+        previousTable: NodeTable,
+        previousFragments: [Fragment],
+        newTable: NodeTable,
+        itemID: ID,
+        width: CGFloat,
+        scale: CGFloat
+    ) -> (height: CGFloat, fragments: [Fragment])? {
+        guard let (previousBlocks, _) = flatBlocks(for: previousTable, itemID: itemID, width: width),
+              let (newBlocks, spacing) = flatBlocks(for: newTable, itemID: itemID, width: width),
+              previousBlocks.count == previousFragments.count,
+              !newBlocks.isEmpty
+        else { return nil }
+
+        let d = diff(previous: previousBlocks, new: newBlocks)
+        let unchangedSet = Set(d.unchanged)
+        let overlap = min(previousBlocks.count, newBlocks.count)
+        let trailingIndex = newBlocks.count - 1
+        let store = environment.frozenBitmapStore
+
+        // Measures (+ rasterizes, + freezes into `store` when `persist`) one TEXT block via the
+        // phase-A `freeze(_:)` primitive. `nil` return means `block` is not text — the caller
+        // must bail the whole optimization (image/geometry reuse lives in ImageActor's decode
+        // cache, never here — see FreezeState.swift's doc). A fresh, function-scoped `cache`
+        // dict is passed on every call so `freeze(_:)` always recomputes here — the PERSISTENT
+        // cache is `store`, consulted separately (below) for the genuinely-unchanged case, so
+        // this always represents real new work, never a stale hit.
+        func measureAndMaybeFreeze(_ block: Block, persist: Bool) -> CGFloat? {
+            guard case .text = block.fragment.content else { return nil }
+            var localCache: [BlockKey: FreezeState] = [:]
+            // `freeze(_:)` always calls `measure` before attempting `rasterize`, but on a
+            // rasterize failure (degenerate size — e.g. a still-empty just-appended block) it
+            // returns bare `.hot` with no associated size. Capture the measured size as a side
+            // effect of the injected `measure` closure so the `.hot` fallback below can reuse it
+            // instead of re-measuring — a second `measureTextSync` call there would double-count
+            // this block's cost for the SAME update (the flat-per-update-cost invariant this
+            // whole path exists for).
+            var measuredSize: CGSize?
+            let state = freeze(
+                block, scale: scale, cache: &localCache,
+                measure: { [self] descriptor, w in
+                    let s = measureTextSync(descriptor, width: w)
+                    measuredSize = s
+                    return s
+                },
+                rasterize: { [self] descriptor, size, s in
+                    #if canImport(XCTest)
+                    _blockDiffRasterizeCallCount += 1
+                    #endif
+                    return rasterizeText(descriptor, size: size, scale: s)
+                }
+            )
+            switch state {
+            case .frozen(let size, let bitmap):
+                if persist {
+                    let pixelW = size.width * scale
+                    let pixelH = size.height * scale
+                    let cost = Int((pixelW * pixelH * 4).rounded(.up))
+                    store.store(bitmap, size: size, cost: cost, for: block.key)
+                }
+                return size.height
+            case .hot:
+                // Rasterization failed on a degenerate size — freeze() intentionally returns
+                // uncached .hot so a later call can retry. `measuredSize` was still captured
+                // above (freeze() measures unconditionally), so this needs no extra work.
+                return measuredSize?.height ?? 0
+            }
+        }
+
+        var heights = [CGFloat](repeating: 0, count: newBlocks.count)
+        for i in 0..<overlap {
+            let block = newBlocks[i]
+            if unchangedSet.contains(i) {
+                if case .text = block.fragment.content {
+                    if let size = store.size(for: block.key) {
+                        _ = store.bitmap(for: block.key)  // bump LRU recency — verbatim reuse
+                        heights[i] = size.height
+                    } else {
+                        // Self-heal: logically unchanged per diff(), but the store has no entry
+                        // yet (first pass through C3 for this block, or it was LRU/pressure-
+                        // evicted) — recompute once and (re-)freeze it, same as a finalized tail.
+                        guard let h = measureAndMaybeFreeze(block, persist: true) else { return nil }
+                        heights[i] = h
+                    }
+                } else {
+                    // Non-text, unchanged: trust the previous real fragment height directly —
+                    // never frozen/measured here (image/geometry reuse lives in ImageActor).
+                    heights[i] = previousFragments[i].frame.height
+                }
+                continue
+            }
+            // Not in `unchanged`: either the trailing block grew (`d.hotTail == i`), or — per
+            // `diff(previous:new:)`'s doc — an EARLY block changed, which the streaming model
+            // does not expect and `diff` intentionally leaves unclassified (VelocityUI-socg
+            // design note #4, "edit-invalidation"). Both cases need the same treatment here:
+            // this block's content changed, so re-measure it and, if it has closed out (it is
+            // not the new trailing block), freeze + store the result — overwriting any stale
+            // entry `store` already held for this key (`store(...)` updates in place; see its
+            // doc — no separate evict-then-store two-step needed for correctness).
+            let persist = i != trailingIndex
+            guard let h = measureAndMaybeFreeze(block, persist: persist) else { return nil }
+            heights[i] = h
+        }
+        for i in overlap..<newBlocks.count {
+            let persist = i != trailingIndex
+            guard let h = measureAndMaybeFreeze(newBlocks[i], persist: persist) else { return nil }
+            heights[i] = h
+        }
+
+        var cursor: CGFloat = 0
+        var fragments: [Fragment] = []
+        fragments.reserveCapacity(newBlocks.count)
+        for (i, block) in newBlocks.enumerated() {
+            let frame = CGRect(x: 0, y: cursor, width: width, height: heights[i])
+            fragments.append(Fragment(id: block.fragment.id, content: block.fragment.content, frame: frame))
+            cursor += heights[i]
+            if i < trailingIndex { cursor += spacing }
+        }
+        return (cursor, fragments)
+    }
+
+    /// Recognizes the one item shape this bind-site diff optimizes: a root `.vstack` whose
+    /// DIRECT children are all leaves (text/image/spacer/hosting/gif/video/customLayer) — no
+    /// nesting, no hstack/zstack — exactly the "VStack of streaming message blocks" shape a chat
+    /// message produces. Returns `nil` for any other shape (nested containers, a non-vstack
+    /// root, a root with `.frame()` applied to it) so the caller falls back to the pre-existing
+    /// full-refresh path instead of a partial, possibly-wrong optimization for a tree this
+    /// block-level diff was not designed to model — flagged in the C3 report as the scoped-down
+    /// "minimal reasonable mapping" decision (see VelocityUI-socg C3 design notes).
+    ///
+    /// Blocks are positioned 0-height placeholders at `width` — real per-block height is filled
+    /// in by the caller (`applyInPlaceBlockDiff`) from measurement/the frozen-bitmap store, never
+    /// read from the `Fragment`s this returns.
+    ///
+    /// `itemID` is the caller's real `Item.ID`, NOT `table.itemID` (`AnyHashable`) — see
+    /// `applyInPlaceBlockDiff`'s doc for why `BlockKey` needs a genuinely `Sendable` id.
+    private func flatBlocks<ID: Hashable & Sendable>(
+        for table: NodeTable, itemID: ID, width: CGFloat
+    ) -> (blocks: [Block], spacing: CGFloat)? {
+        guard !table.nodes.isEmpty, case .vstack(let vstackDescriptor) = table.nodes[0] else { return nil }
+        let childIndices = table.children(of: 0)
+        // Every node beyond the root must be a direct child of it — if any node is NOT (i.e. a
+        // grandchild from a nested container), childIndices.count is strictly less than
+        // nodes.count - 1, catching nesting without walking parentIndices for every node.
+        guard !childIndices.isEmpty, childIndices.count == table.nodes.count - 1 else { return nil }
+
+        var blocks: [Block] = []
+        blocks.reserveCapacity(childIndices.count)
+        for (position, nodeIndex) in childIndices.enumerated() {
+            let content: FragmentContent
+            switch table.nodes[nodeIndex] {
+            case .text(let d): content = .text(d)
+            case .image(let d): content = .image(d)
+            case .spacer, .hosting, .gif, .video, .customLayer: content = .geometry
+            case .vstack, .hstack, .zstack: return nil  // nested container — not flat, bail
+            }
+            let frame = CGRect(x: 0, y: 0, width: width, height: 0)
+            let fragment = Fragment(id: nodeIndex, content: content, frame: frame)
+            let key = BlockKey(itemID: itemID, index: position)
+            blocks.append(Block(key: key, fragment: fragment, layout: ResolvedLayout(totalFrame: frame)))
+        }
+        return (blocks, vstackDescriptor.spacing)
+    }
+
+    /// Synchronous text measurement for the C3 in-place path. The scroll/bind path must never
+    /// `await` (CLAUDE.md invariant), so this cannot go through the pooled, actor-isolated
+    /// `TextMeasurementPool` that the off-main `RenderPipeline` measure path uses. Matches
+    /// `rasterizeText`'s own "fresh TextKit objects per call" pattern (TextRasteriser.swift)
+    /// instead of adding a second, synchronous-checkout text-context pool — the C3 path touches
+    /// at most one or two text blocks per update (the hot tail, and occasionally one finalized
+    /// block), so the allocation is bounded per update, not per block-count.
+    private func measureTextSync(_ descriptor: TextDescriptor, width: CGFloat) -> CGSize {
+        #if canImport(XCTest)
+        _blockDiffMeasureCallCount += 1
+        #endif
+        return TextMeasurementContext().measure(descriptor, width: width)
     }
 
     // MARK: - Frame management
