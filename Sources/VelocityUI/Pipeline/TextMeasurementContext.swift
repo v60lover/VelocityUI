@@ -20,16 +20,11 @@ public final class TextMeasurementContext: @unchecked Sendable {
 
     /// Synchronous measurement — called from within a pool checkout.
     public func measure(_ descriptor: TextDescriptor, width: CGFloat) -> CGSize {
-        // Reconstruct UIFont.Weight from its bit-pattern-encoded Int.
-        let weightRaw = Double(bitPattern: UInt64(bitPattern: Int64(descriptor.font.weight)))
-        let font = UIFont.systemFont(
-            ofSize: descriptor.font.size,
-            weight: UIFont.Weight(rawValue: weightRaw)
-        )
-
-        let attrString = NSAttributedString(string: descriptor.content, attributes: [.font: font])
+        // Built from TextDescriptor.attributedString (TextRasteriser.swift) — the single
+        // attribute-building source shared with rasterizeText, so measured size can never
+        // drift from rendered pixels on font/paragraph/color attributes.
         contentStorage.performEditingTransaction {
-            contentStorage.attributedString = attrString
+            contentStorage.attributedString = descriptor.attributedString
         }
 
         container.size = CGSize(width: width, height: .greatestFiniteMagnitude)

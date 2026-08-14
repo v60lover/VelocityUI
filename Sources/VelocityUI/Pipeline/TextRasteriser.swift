@@ -12,17 +12,30 @@ extension TextDescriptor {
         return UIFont.Weight(rawValue: raw)
     }
 
-    /// NSAttributedString built from this descriptor — same attributes used in
-    /// TextMeasurementContext.measure so rendered output matches measured size.
-    var attributedString: NSAttributedString {
-        let f = UIFont.systemFont(ofSize: font.size, weight: uiFontWeight)
-        var attrs: [NSAttributedString.Key: Any] = [.font: f]
+    /// Single source of truth for the attribute dictionary. Both
+    /// TextMeasurementContext.measure and rasterizeText build their NSAttributedString
+    /// from this — the two paths can no longer diverge on font/paragraph/color attributes.
+    /// VColorDescriptor's components are display-P3 (see NodeTable.swift docstring), so the
+    /// conversion must go through the displayP3 UIColor initializer, not the sRGB one.
+    func makeAttributes() -> [NSAttributedString.Key: Any] {
+        var attrs: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: font.size, weight: uiFontWeight),
+            .foregroundColor: UIColor(
+                displayP3Red: color.red, green: color.green, blue: color.blue, alpha: color.alpha
+            )
+        ]
         if lineLimit != nil {
             let para = NSMutableParagraphStyle()
             para.lineBreakMode = NSLineBreakMode(rawValue: lineBreakMode) ?? .byWordWrapping
             attrs[.paragraphStyle] = para
         }
-        return NSAttributedString(string: content, attributes: attrs)
+        return attrs
+    }
+
+    /// NSAttributedString built from `makeAttributes()` — same attributes used in
+    /// TextMeasurementContext.measure so rendered output matches measured size.
+    var attributedString: NSAttributedString {
+        NSAttributedString(string: content, attributes: makeAttributes())
     }
 }
 
