@@ -12,6 +12,26 @@ extension TextDescriptor {
         return UIFont.Weight(rawValue: raw)
     }
 
+    /// Resolves `font` to a concrete UIFont: the named family if it loads, else the system
+    /// font at the same size/weight — deterministic fallback, never crashes on a missing or
+    /// misspelled family. Symbolic traits (e.g. italic) are then layered on top of whichever
+    /// font was resolved, so italic composes with a custom family too.
+    private var resolvedFont: UIFont {
+        var uiFont: UIFont
+        if let family = font.family, let named = UIFont(name: family, size: font.size) {
+            uiFont = named
+        } else {
+            uiFont = UIFont.systemFont(ofSize: font.size, weight: uiFontWeight)
+        }
+        if font.traits.contains(.italic) {
+            let symbolic = uiFont.fontDescriptor.symbolicTraits.union(.traitItalic)
+            if let descriptor = uiFont.fontDescriptor.withSymbolicTraits(symbolic) {
+                uiFont = UIFont(descriptor: descriptor, size: font.size)
+            }
+        }
+        return uiFont
+    }
+
     /// Single source of truth for the attribute dictionary. Both
     /// TextMeasurementContext.measure and rasterizeText build their NSAttributedString
     /// from this — the two paths can no longer diverge on font/paragraph/color attributes.
@@ -19,14 +39,27 @@ extension TextDescriptor {
     /// conversion must go through the displayP3 UIColor initializer, not the sRGB one.
     func makeAttributes() -> [NSAttributedString.Key: Any] {
         var attrs: [NSAttributedString.Key: Any] = [
-            .font: UIFont.systemFont(ofSize: font.size, weight: uiFontWeight),
+            .font: resolvedFont,
             .foregroundColor: UIColor(
                 displayP3Red: color.red, green: color.green, blue: color.blue, alpha: color.alpha
             )
         ]
-        if lineLimit != nil {
+        // 0 means "no override" — NOT "kerning disabled". Setting .kern explicitly to 0
+        // would turn off the font's own default kerning, regressing every existing caller
+        // that never asked for a kerning override. Only add the attribute for a real value.
+        if kerning != 0 {
+            attrs[.kern] = kerning
+        }
+        if underlineStyle != 0 {
+            attrs[.underlineStyle] = underlineStyle
+        }
+        if strikethroughStyle != 0 {
+            attrs[.strikethroughStyle] = strikethroughStyle
+        }
+        if lineLimit != nil || lineSpacing != 0 {
             let para = NSMutableParagraphStyle()
             para.lineBreakMode = NSLineBreakMode(rawValue: lineBreakMode) ?? .byWordWrapping
+            para.lineSpacing = lineSpacing
             attrs[.paragraphStyle] = para
         }
         return attrs

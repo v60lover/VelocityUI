@@ -35,11 +35,32 @@ public enum VLineBreakMode: Int, Sendable, Hashable {
     case byTruncatingMiddle = 5
 }
 
+/// Mirrors NSUnderlineStyle's raw values exactly — converted to it verbatim in
+/// TextRasteriser.makeAttributes() — so TextDescriptor can carry the raw Int without
+/// importing UIKit into the Layer 1 value-type layer.
+public enum VUnderlineStyle: Int, Sendable, Hashable {
+    case none = 0
+    case single = 1
+    case thick = 2
+    case double = 9
+}
+
 // MARK: - VFontDescriptor convenience
 
 extension VFontDescriptor {
     /// Regular-weight body text (17pt, weight 0 = UIFont.Weight.regular).
     public static let body = VFontDescriptor(size: 17, weight: 0)
+
+    /// Returns a copy using the given custom font family. Falls back to the system font
+    /// deterministically at render time if the family can't be loaded.
+    public func family(_ name: String) -> VFontDescriptor {
+        VFontDescriptor(size: size, weight: weight, family: name, traits: traits)
+    }
+
+    /// Returns a copy with the italic symbolic trait applied.
+    public var italic: VFontDescriptor {
+        VFontDescriptor(size: size, weight: weight, family: family, traits: traits.union(.italic))
+    }
 }
 
 // MARK: - VColorDescriptor convenience
@@ -179,45 +200,107 @@ public struct TextNode: RenderNode {
     public let color: VColorDescriptor
     public let lineLimit: Int?
     public let lineBreakMode: VLineBreakMode
+    public let underlineStyle: VUnderlineStyle
+    public let strikethroughStyle: VUnderlineStyle
+    /// Extra tracking, in points. 0 = the font's own default kerning.
+    public let kerning: CGFloat
+    /// Extra spacing between lines, in points. 0 = no adjustment.
+    public let lineSpacing: CGFloat
 
     public init(
         _ content: String,
         font: VFontDescriptor = .body,
         color: VColorDescriptor = .primary,
         lineLimit: Int? = nil,
-        lineBreakMode: VLineBreakMode = .byWordWrapping
+        lineBreakMode: VLineBreakMode = .byWordWrapping,
+        underlineStyle: VUnderlineStyle = .none,
+        strikethroughStyle: VUnderlineStyle = .none,
+        kerning: CGFloat = 0,
+        lineSpacing: CGFloat = 0
     ) {
         self.content = content
         self.font = font
         self.color = color
         self.lineLimit = lineLimit
         self.lineBreakMode = lineBreakMode
+        self.underlineStyle = underlineStyle
+        self.strikethroughStyle = strikethroughStyle
+        self.kerning = kerning
+        self.lineSpacing = lineSpacing
     }
 
-    /// layoutHash covers all properties that affect geometry: content, font metrics, line limit, line break mode.
+    /// layoutHash covers all properties that affect geometry: content, font metrics
+    /// (size, weight, family, traits), line limit, line break mode, kerning, line spacing.
     public var layoutHash: Int {
         var h = Hasher()
         h.combine(content)
         h.combine(font.size)
         h.combine(font.weight)
+        h.combine(font.family)
+        h.combine(font.traits)
         h.combine(lineLimit)
         h.combine(lineBreakMode)
+        h.combine(kerning)
+        h.combine(lineSpacing)
         return h.finalize()
     }
 
-    /// appearanceHash covers color only — changing color never affects layout.
+    /// appearanceHash covers color and decoration ink (underline/strikethrough) —
+    /// none of these affect glyph advances or line wrapping.
     public var appearanceHash: Int {
         var h = Hasher()
         h.combine(color)
+        h.combine(underlineStyle)
+        h.combine(strikethroughStyle)
         return h.finalize()
     }
 
     public func font(_ newFont: VFontDescriptor) -> TextNode {
-        TextNode(content, font: newFont, color: color, lineLimit: lineLimit, lineBreakMode: lineBreakMode)
+        TextNode(
+            content, font: newFont, color: color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
+            underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
+            kerning: kerning, lineSpacing: lineSpacing
+        )
     }
 
     public func lineLimit(_ limit: Int) -> TextNode {
-        TextNode(content, font: font, color: color, lineLimit: limit, lineBreakMode: lineBreakMode)
+        TextNode(
+            content, font: font, color: color, lineLimit: limit, lineBreakMode: lineBreakMode,
+            underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
+            kerning: kerning, lineSpacing: lineSpacing
+        )
+    }
+
+    public func underline(_ style: VUnderlineStyle = .single) -> TextNode {
+        TextNode(
+            content, font: font, color: color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
+            underlineStyle: style, strikethroughStyle: strikethroughStyle,
+            kerning: kerning, lineSpacing: lineSpacing
+        )
+    }
+
+    public func strikethrough(_ style: VUnderlineStyle = .single) -> TextNode {
+        TextNode(
+            content, font: font, color: color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
+            underlineStyle: underlineStyle, strikethroughStyle: style,
+            kerning: kerning, lineSpacing: lineSpacing
+        )
+    }
+
+    public func kerning(_ value: CGFloat) -> TextNode {
+        TextNode(
+            content, font: font, color: color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
+            underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
+            kerning: value, lineSpacing: lineSpacing
+        )
+    }
+
+    public func lineSpacing(_ value: CGFloat) -> TextNode {
+        TextNode(
+            content, font: font, color: color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
+            underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
+            kerning: kerning, lineSpacing: value
+        )
     }
 }
 

@@ -10,11 +10,31 @@ import CoreGraphics
 public struct VFontDescriptor: Sendable, Hashable {
     public let size: CGFloat
     public let weight: Int  // raw value of UIFont.Weight for Sendable conformance
+    /// Custom font family name, as passed to `UIFont(name:size:)`. nil = system font.
+    /// If the named font can't be loaded, TextRasteriser falls back to the system font
+    /// deterministically — never crashes.
+    public let family: String?
+    /// Symbolic traits (e.g. italic). See VFontTraits.
+    public let traits: VFontTraits
 
-    public init(size: CGFloat, weight: Int) {
+    public init(size: CGFloat, weight: Int, family: String? = nil, traits: VFontTraits = []) {
         self.size = size
         self.weight = weight
+        self.family = family
+        self.traits = traits
     }
+}
+
+/// Sendable substitute for UIFontDescriptor.SymbolicTraits — keeps VFontDescriptor UIKit-free.
+/// Converted to the real UIKit type only inside TextRasteriser.swift.
+public struct VFontTraits: OptionSet, Sendable, Hashable {
+    public let rawValue: Int
+
+    public init(rawValue: Int) {
+        self.rawValue = rawValue
+    }
+
+    public static let italic = VFontTraits(rawValue: 1 << 0)
 }
 
 /// Sendable color descriptor. RGBA components, display-P3 assumed.
@@ -84,8 +104,48 @@ public struct TextDescriptor: Sendable {
     public let color: VColorDescriptor
     public let lineLimit: Int?
     public let lineBreakMode: Int  // raw NSLineBreakMode
+    /// Raw NSUnderlineStyle.rawValue. 0 = no underline.
+    public let underlineStyle: Int
+    /// Raw NSUnderlineStyle.rawValue, applied as strikethrough. 0 = none.
+    public let strikethroughStyle: Int
+    /// Extra tracking added to NSAttributedString.Key.kern, in points. 0 = the font's
+    /// own default kerning (no attribute is set — see TextRasteriser.makeAttributes()).
+    public let kerning: CGFloat
+    /// Extra spacing between lines, in points. 0 = no adjustment.
+    public let lineSpacing: CGFloat
     public let layoutHash: Int
     public let appearanceHash: Int
+
+    /// Public and memberwise on purpose: `rasterizeText(_:size:scale:)` and
+    /// `TextMeasurementContext.measure(_:width:)` are both public entry points that take a
+    /// TextDescriptor as their argument, so callers outside this module need a way to build
+    /// one directly — this init is that contract, not an accident of Sendable-struct synthesis.
+    /// Keep its parameter list in sync with those two entry points' needs.
+    public init(
+        content: String,
+        font: VFontDescriptor,
+        color: VColorDescriptor,
+        lineLimit: Int?,
+        lineBreakMode: Int,
+        underlineStyle: Int = 0,
+        strikethroughStyle: Int = 0,
+        kerning: CGFloat = 0,
+        lineSpacing: CGFloat = 0,
+        layoutHash: Int,
+        appearanceHash: Int
+    ) {
+        self.content = content
+        self.font = font
+        self.color = color
+        self.lineLimit = lineLimit
+        self.lineBreakMode = lineBreakMode
+        self.underlineStyle = underlineStyle
+        self.strikethroughStyle = strikethroughStyle
+        self.kerning = kerning
+        self.lineSpacing = lineSpacing
+        self.layoutHash = layoutHash
+        self.appearanceHash = appearanceHash
+    }
 }
 
 public struct ImageDescriptor: Sendable {

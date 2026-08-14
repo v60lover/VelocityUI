@@ -187,6 +187,27 @@ final class FlattenTests: XCTestCase {
         XCTAssertEqual(d.lineBreakMode, VLineBreakMode.byTruncatingTail.rawValue)
     }
 
+    /// ezo.2.3: the attribute catalog (family, traits, underline, strikethrough, kerning,
+    /// lineSpacing) must round-trip from TextNode through flatten() into TextDescriptor.
+    @MainActor func testFlatten_textNode_mapsAttributeCatalog() {
+        let node = TextNode(
+            "abc",
+            font: VFontDescriptor(size: 20, weight: 0).family("Georgia").italic,
+            underlineStyle: .single,
+            strikethroughStyle: .double,
+            kerning: 2.5,
+            lineSpacing: 4
+        )
+        let table = flatten(VStackNode { node }, itemID: "i")
+        guard case .text(let d) = table.nodes[1] else { XCTFail(); return }
+        XCTAssertEqual(d.font.family, "Georgia")
+        XCTAssertEqual(d.font.traits, .italic)
+        XCTAssertEqual(d.underlineStyle, VUnderlineStyle.single.rawValue)
+        XCTAssertEqual(d.strikethroughStyle, VUnderlineStyle.double.rawValue)
+        XCTAssertEqual(d.kerning, 2.5)
+        XCTAssertEqual(d.lineSpacing, 4)
+    }
+
     @MainActor func testFlatten_vstackDescriptor_mapsAlignmentSpacingAndHashes() {
         let node = VStackNode(alignment: .trailing, spacing: 12) { TextNode("x") }
         let table = flatten(node, itemID: "i")
@@ -255,6 +276,42 @@ final class FlattenTests: XCTestCase {
         XCTAssertEqual(t1.layoutHash, t2.layoutHash,
             "Color-only change must not perturb layoutHash")
         XCTAssertNotEqual(t1.appearanceHash, t2.appearanceHash)
+    }
+
+    // MARK: - ezo.2.3: attribute-catalog hash classification
+
+    /// family, traits, kerning, and lineSpacing all affect glyph metrics or line wrapping —
+    /// they must perturb layoutHash and must NOT perturb appearanceHash.
+    @MainActor func testCacheKey_geometryAffectingAttributes_perturbLayoutHashOnly() {
+        let base = TextNode("caption")
+        let variants: [(String, TextNode)] = [
+            ("family", TextNode("caption", font: VFontDescriptor(size: 17, weight: 0).family("Georgia"))),
+            ("italic", TextNode("caption", font: VFontDescriptor(size: 17, weight: 0).italic)),
+            ("kerning", TextNode("caption", kerning: 2)),
+            ("lineSpacing", TextNode("caption", lineSpacing: 4))
+        ]
+        for (name, variant) in variants {
+            XCTAssertNotEqual(base.layoutHash, variant.layoutHash,
+                "\(name): must perturb layoutHash — it affects glyph metrics or line wrapping")
+            XCTAssertEqual(base.appearanceHash, variant.appearanceHash,
+                "\(name): must not perturb appearanceHash — it never changes rendered pixels' position")
+        }
+    }
+
+    /// underline/strikethrough are decoration ink drawn alongside glyphs — they must perturb
+    /// appearanceHash and must NOT perturb layoutHash.
+    @MainActor func testCacheKey_underlineStrikethrough_perturbAppearanceHashOnly() {
+        let base = TextNode("caption")
+        let variants: [(String, TextNode)] = [
+            ("underline", TextNode("caption", underlineStyle: .single)),
+            ("strikethrough", TextNode("caption", strikethroughStyle: .single))
+        ]
+        for (name, variant) in variants {
+            XCTAssertEqual(base.layoutHash, variant.layoutHash,
+                "\(name): must not perturb layoutHash — decoration ink doesn't move glyph advances")
+            XCTAssertNotEqual(base.appearanceHash, variant.appearanceHash,
+                "\(name): must perturb appearanceHash — it changes rendered pixels")
+        }
     }
 
     @MainActor func testCacheKey_differentChildOrder_differentLayoutHash() {

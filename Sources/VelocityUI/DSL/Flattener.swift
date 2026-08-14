@@ -69,6 +69,8 @@ public func flatten<ID: Hashable & Sendable>(_ root: any RenderNode, itemID: ID)
             nodes.append(.text(TextDescriptor(
                 content: n.content, font: n.font, color: n.color,
                 lineLimit: n.lineLimit, lineBreakMode: n.lineBreakMode.rawValue,
+                underlineStyle: n.underlineStyle.rawValue, strikethroughStyle: n.strikethroughStyle.rawValue,
+                kerning: n.kerning, lineSpacing: n.lineSpacing,
                 layoutHash: n.layoutHash, appearanceHash: n.appearanceHash)))
         case let n as AsyncImageNode:
             nodes.append(.image(ImageDescriptor(
