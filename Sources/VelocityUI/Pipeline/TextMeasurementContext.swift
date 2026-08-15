@@ -29,6 +29,14 @@ public final class TextMeasurementContext: @unchecked Sendable {
 
         container.size = CGSize(width: width, height: .greatestFiniteMagnitude)
         container.maximumNumberOfLines = descriptor.lineLimit ?? 0
+        // Mirrors rasterizeText's container setup (TextRasteriser.swift) for defensive
+        // symmetry between the two NSTextContainer configurations. Has no effect on the
+        // CGSize returned below: line-breaking geometry (wrap points, fragment frames) is
+        // driven by the paragraphStyle.lineBreakMode already carried on descriptor.attributedString
+        // (see TextRasteriser.makeAttributes()), not by this container-level property, which
+        // only selects the truncation glyph (ellipsis vs. clip) rasterizeText draws for the
+        // last line -- a rendering concern measure() never observes since it returns only a size.
+        container.lineBreakMode = NSLineBreakMode(rawValue: descriptor.lineBreakMode) ?? .byWordWrapping
 
         var totalHeight: CGFloat = 0
         var maxWidth: CGFloat = 0

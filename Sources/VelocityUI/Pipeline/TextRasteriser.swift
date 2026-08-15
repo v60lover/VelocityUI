@@ -56,7 +56,13 @@ extension TextDescriptor {
         if strikethroughStyle != 0 {
             attrs[.strikethroughStyle] = strikethroughStyle
         }
-        if lineLimit != nil || lineSpacing != 0 {
+        // A non-default lineBreakMode must reach the paragraph style even standalone --
+        // without this branch a wrapping-mode-only descriptor (no lineLimit, no lineSpacing)
+        // silently falls back to NSMutableParagraphStyle's own default (.byWordWrapping),
+        // dropping the requested mode on both the measure and render paths (they share this
+        // attributedString builder). lineBreakMode == 0 already matches that default, so this
+        // is a no-op for every caller that never set lineBreakMode.
+        if lineBreakMode != NSLineBreakMode.byWordWrapping.rawValue || lineLimit != nil || lineSpacing != 0 {
             let para = NSMutableParagraphStyle()
             para.lineBreakMode = NSLineBreakMode(rawValue: lineBreakMode) ?? .byWordWrapping
             para.lineSpacing = lineSpacing
