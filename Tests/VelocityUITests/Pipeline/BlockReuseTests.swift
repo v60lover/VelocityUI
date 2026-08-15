@@ -359,6 +359,80 @@ final class BlockReuseTests: XCTestCase {
         XCTAssertTrue(checkpointBitmap === finalBitmap, "A frozen block's bitmap must be the SAME instance — never re-rendered (LB4)")
         XCTAssertEqual(checkpointBytes, pixelBytes(of: finalBitmap), "Pixel bytes must be byte-identical across later diffs (LB4)")
     }
+
+    // MARK: - Acceptance 6 (VelocityUI-ezo.2.5): content-size-category change invalidates frozen bitmaps
+
+    /// A content-size-category change re-derives a text node's TextDescriptor with a different
+    /// layoutHash (see FlattenTests' contentSizeCategory coverage for the flatten()-side proof),
+    /// which changes Block.contentHash for that block. This test proves what that hash change
+    /// buys in production: `diff(previous:new:)` no longer classifies the block as `unchanged`,
+    /// so the C3 in-place path (FeedScrollView.applyInPlaceBlockDiff) re-measures + re-rasterizes
+    /// it and `FrozenBitmapStore.store(...)` overwrites the stale entry in place for the SAME
+    /// `BlockKey` — no separate "clear the cache" call needed anywhere. `scaledMeasure` below
+    /// stands in for `UIFontMetrics` scaling: it returns a taller size for the "accessibility"
+    /// descriptor, exactly as `resolvedFont` would after ezo.2.5 (a local closure rather than
+    /// the shared `MeasureRasterizeSpy`, which measures by content length only and would return
+    /// identical sizes for these two same-text descriptors).
+    func testContentSizeCategoryChange_InvalidatesFrozenBitmapAndReFreezes() {
+        let key = BlockKey(itemID: "msg", index: 0)
+
+        func descriptor(category: VContentSizeCategory, layoutHash: Int) -> TextDescriptor {
+            TextDescriptor(
+                content: "caption",
+                font: VFontDescriptor(size: 16, weight: 0),
+                color: VColorDescriptor(red: 0, green: 0, blue: 0, alpha: 1),
+                lineLimit: nil,
+                lineBreakMode: 0,
+                contentSizeCategory: category,
+                layoutHash: layoutHash,
+                appearanceHash: 0
+            )
+        }
+        func block(_ descriptor: TextDescriptor) -> Block {
+            let frame = CGRect(x: 0, y: 0, width: 300, height: 0)
+            let fragment = Fragment(id: 0, content: .text(descriptor), frame: frame)
+            return Block(key: key, fragment: fragment, layout: ResolvedLayout(totalFrame: frame))
+        }
+        func scaledMeasure(_ descriptor: TextDescriptor, width: CGFloat) -> CGSize {
+            let scale: CGFloat = descriptor.contentSizeCategory == .accessibilityExtraExtraExtraLarge ? 3 : 1
+            return CGSize(width: width, height: CGFloat(descriptor.content.count) * scale)
+        }
+        func fakeRasterize(_ descriptor: TextDescriptor, size: CGSize, scale: CGFloat) -> CGImage? {
+            BlockReuseTests.makeFakeCGImage(width: Int(size.width), height: Int(size.height))
+        }
+
+        let store = FrozenBitmapStore()
+
+        // Round 1: freeze + store at .large, mirroring applyInPlaceBlockDiff's
+        // measureAndMaybeFreeze(persist: true) path for a block that just closed out.
+        let smallBlock = block(descriptor(category: .large, layoutHash: 1))
+        var cache1: [BlockKey: FreezeState] = [:]
+        guard case .frozen(let smallSize, let smallBitmap) = freeze(
+            smallBlock, scale: 1, cache: &cache1, measure: scaledMeasure, rasterize: fakeRasterize
+        ) else { return XCTFail("round 1 must freeze") }
+        store.store(smallBitmap, size: smallSize, cost: 1, for: key)
+        XCTAssertEqual(store.size(for: key), smallSize)
+
+        // Round 2: SAME BlockKey, category changed to an accessibility size. contentHash must
+        // differ (proving diff() would reclassify this block as changed, not `unchanged`).
+        let largeBlock = block(descriptor(category: .accessibilityExtraExtraExtraLarge, layoutHash: 2))
+        XCTAssertNotEqual(smallBlock.contentHash, largeBlock.contentHash,
+            "a content-size-category change must perturb Block.contentHash for the SAME BlockKey")
+        let d = diff(previous: [smallBlock], new: [largeBlock])
+        XCTAssertTrue(d.unchanged.isEmpty, "the category-changed block must not classify as unchanged")
+        XCTAssertEqual(d.hotTail, 0, "the sole block differing must be reported as the block to re-measure")
+
+        var cache2: [BlockKey: FreezeState] = [:]
+        guard case .frozen(let largeSize, let largeBitmap) = freeze(
+            largeBlock, scale: 1, cache: &cache2, measure: scaledMeasure, rasterize: fakeRasterize
+        ) else { return XCTFail("round 2 must freeze") }
+        store.store(largeBitmap, size: largeSize, cost: 1, for: key)
+
+        XCTAssertGreaterThan(largeSize.height, smallSize.height,
+            "the accessibility category must measure taller — this is the UIFontMetrics stand-in")
+        XCTAssertEqual(store.size(for: key), largeSize,
+            "FrozenBitmapStore must hold the NEW size for `key` — the stale small-category bitmap was overwritten in place")
+    }
 }
 
 // MARK: - Acceptance 5: anti-jank trend through the REAL measure/rasterize primitives

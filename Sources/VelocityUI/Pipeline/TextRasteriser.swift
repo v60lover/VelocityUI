@@ -3,6 +3,52 @@
 #if canImport(UIKit)
 import UIKit
 
+// MARK: - VContentSizeCategory <-> UIContentSizeCategory
+
+extension VContentSizeCategory {
+    /// The real UIKit category, or `nil` for `.unspecified` — callers must skip
+    /// `UIFontMetrics` entirely on `nil` rather than passing `.unspecified` through (see
+    /// `VContentSizeCategory`'s doc for why that would be a hidden global read).
+    var uiContentSizeCategory: UIContentSizeCategory? {
+        switch self {
+        case .unspecified: return nil
+        case .extraSmall: return .extraSmall
+        case .small: return .small
+        case .medium: return .medium
+        case .large: return .large
+        case .extraLarge: return .extraLarge
+        case .extraExtraLarge: return .extraExtraLarge
+        case .extraExtraExtraLarge: return .extraExtraExtraLarge
+        case .accessibilityMedium: return .accessibilityMedium
+        case .accessibilityLarge: return .accessibilityLarge
+        case .accessibilityExtraLarge: return .accessibilityExtraLarge
+        case .accessibilityExtraExtraLarge: return .accessibilityExtraExtraLarge
+        case .accessibilityExtraExtraExtraLarge: return .accessibilityExtraExtraExtraLarge
+        }
+    }
+
+    /// Reverse mapping — used at the one place a live trait environment is read
+    /// (`FeedScrollView`'s content-size-category observer). `UIContentSizeCategory.unspecified`
+    /// and any future/unrecognized raw value both map to `.unspecified`.
+    init(_ uiCategory: UIContentSizeCategory) {
+        switch uiCategory {
+        case .extraSmall: self = .extraSmall
+        case .small: self = .small
+        case .medium: self = .medium
+        case .large: self = .large
+        case .extraLarge: self = .extraLarge
+        case .extraExtraLarge: self = .extraExtraLarge
+        case .extraExtraExtraLarge: self = .extraExtraExtraLarge
+        case .accessibilityMedium: self = .accessibilityMedium
+        case .accessibilityLarge: self = .accessibilityLarge
+        case .accessibilityExtraLarge: self = .accessibilityExtraLarge
+        case .accessibilityExtraExtraLarge: self = .accessibilityExtraExtraLarge
+        case .accessibilityExtraExtraExtraLarge: self = .accessibilityExtraExtraExtraLarge
+        default: self = .unspecified
+        }
+    }
+}
+
 // MARK: - TextDescriptor helpers
 
 extension TextDescriptor {
@@ -15,7 +61,11 @@ extension TextDescriptor {
     /// Resolves `font` to a concrete UIFont: the named family if it loads, else the system
     /// font at the same size/weight — deterministic fallback, never crashes on a missing or
     /// misspelled family. Symbolic traits (e.g. italic) are then layered on top of whichever
-    /// font was resolved, so italic composes with a custom family too.
+    /// font was resolved, so italic composes with a custom family too. Finally scaled for
+    /// Dynamic Type via `UIFontMetrics` when `contentSizeCategory` isn't `.unspecified`
+    /// (VelocityUI-ezo.2.5) — the `UITraitCollection` fed to `scaledFont` is built entirely
+    /// from `self.contentSizeCategory`, never read from `UIApplication`/`UIScreen`, so this
+    /// stays a pure function of the descriptor (CLAUDE.md §4: no global reads).
     private var resolvedFont: UIFont {
         var uiFont: UIFont
         if let family = font.family, let named = UIFont(name: family, size: font.size) {
@@ -28,6 +78,10 @@ extension TextDescriptor {
             if let descriptor = uiFont.fontDescriptor.withSymbolicTraits(symbolic) {
                 uiFont = UIFont(descriptor: descriptor, size: font.size)
             }
+        }
+        if let uiCategory = contentSizeCategory.uiContentSizeCategory {
+            let traits = UITraitCollection(preferredContentSizeCategory: uiCategory)
+            uiFont = UIFontMetrics.default.scaledFont(for: uiFont, compatibleWith: traits)
         }
         return uiFont
     }

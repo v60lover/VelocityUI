@@ -111,6 +111,14 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     private var hasLaidOutOnce: Bool = false
     private var reachEndFired: Bool = false
 
+    /// Dynamic Type category threaded into every `flatten()` call (VelocityUI-ezo.2.5).
+    /// Initialized from the live trait environment at `init` — mount-time already reflects
+    /// the system's real setting rather than defaulting to `.unspecified` (no scaling) until
+    /// the first `didChangeNotification` fires. Updated only by `handleContentSizeCategoryChange`.
+    private var contentSizeCategory: VContentSizeCategory = .unspecified
+    private let notificationCenter: NotificationCenter
+    private var contentSizeCategoryObserver: NSObjectProtocol?
+
     /// Pre-allocated scratch buffer for the recycle loop — avoids a per-frame Array allocation.
     private var _recycleBuffer: [Int] = []
 
@@ -236,6 +244,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     ///   - estimatedItemHeight: Placeholder height for unmeasured items (pt).
     ///     Affects initial contentSize and visual jump when real layouts land.
     ///   - layoutSpacing: Vertical gap between cells (pt).
+    ///   - notificationCenter: Source of `UIContentSizeCategory.didChangeNotification` for
+    ///     Dynamic Type invalidation (VelocityUI-ezo.2.5). Default `.default` — a system-API
+    ///     singleton allowed only as an injected default per CLAUDE.md's no-singletons rule.
+    ///     Tests inject a private instance and post directly to it for deterministic coverage.
     public init(
         environment: RenderEnvironment,
         frame: CGRect = .zero,
@@ -243,7 +255,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         prefetchBehindCount: Int = 3,
         reachEndThreshold: Int = 3,
         estimatedItemHeight: CGFloat = 300,
-        layoutSpacing: CGFloat = 8
+        layoutSpacing: CGFloat = 8,
+        notificationCenter: NotificationCenter = .default
     ) {
         self.environment = environment
         self.prefetchAheadCount = prefetchAheadCount
@@ -251,6 +264,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         self.reachEndThreshold = reachEndThreshold
         self.estimatedItemHeight = estimatedItemHeight
         self.layoutSpacing = layoutSpacing
+        self.notificationCenter = notificationCenter
         self.pipeline = RenderPipeline(
             textPool: environment.textPool,
             layoutCache: environment.layoutCache,
@@ -265,6 +279,24 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         showsHorizontalScrollIndicator = false
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
         addGestureRecognizer(tap)
+
+        contentSizeCategory = VContentSizeCategory(traitCollection.preferredContentSizeCategory)
+        // queue: nil — the OS always posts this notification on main, and synchronous delivery
+        // on the posting thread keeps this consistent with "scroll path never awaits" (no async
+        // settle window needed in tests, which post directly to an injected NotificationCenter).
+        contentSizeCategoryObserver = notificationCenter.addObserver(
+            forName: UIContentSizeCategory.didChangeNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] note in
+            // Extracted here (nonisolated) rather than inside the MainActor.assumeIsolated
+            // closure below: Swift 6 region isolation rejects sending the non-Sendable-checked
+            // `Notification` itself across the hop. `UIContentSizeCategory?` is a plain Sendable
+            // value, so extracting it first sidesteps the region-isolation error entirely.
+            let uiCategory = note.userInfo?[UIContentSizeCategory.newValueUserInfoKey] as? UIContentSizeCategory
+            guard let self else { return }
+            MainActor.assumeIsolated { self.handleContentSizeCategoryChange(uiCategory: uiCategory) }
+        }
     }
 
     @available(*, unavailable)
@@ -277,7 +309,44 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         // deallocated on the main thread, so deinit always runs there. The assumption is safe.
         MainActor.assumeIsolated {
             for cell in visibleCells.values { cell.cancelPendingMedia() }
+            if let contentSizeCategoryObserver {
+                notificationCenter.removeObserver(contentSizeCategoryObserver)
+            }
         }
+    }
+
+    // MARK: - Dynamic Type
+
+    /// Reads the new category from the notification's payload rather than unconditionally
+    /// re-reading `traitCollection.preferredContentSizeCategory` — the OS always includes
+    /// `UIContentSizeCategory.newValueUserInfoKey`, and reading it directly is what makes this
+    /// testable without needing a real trait-collection override on a bare, windowless view
+    /// (falls back to the live trait only if a caller posts a notification without it).
+    private func handleContentSizeCategoryChange(uiCategory: UIContentSizeCategory?) {
+        let newCategory = VContentSizeCategory(uiCategory ?? traitCollection.preferredContentSizeCategory)
+        guard newCategory != contentSizeCategory else { return }
+        contentSizeCategory = newCategory
+        // itemSignature's cached tables were flattened at the OLD category — their signature
+        // doesn't encode it, so a signature hit here would silently serve stale (wrong-scale)
+        // text. Clearing forces every item back through flatten() with the new category.
+        tableCache.removeAll(keepingCapacity: true)
+        itemsDidChange(from: items)
+    }
+
+    /// `init(frame:)` builds this view before UIKit inserts it under a window/scene, so the
+    /// `traitCollection` read at construction time (line above, in `init`) reflects the process
+    /// default, not the live system setting — traits only propagate once a view is attached to
+    /// its eventual trait environment. A user who launches with an accessibility text size
+    /// enabled would otherwise get `.unspecified` at cold-launch mount and see unscaled text
+    /// until the next `didChangeNotification`, which the OS posts only on a live change, never
+    /// on mount. Re-deriving the category here, once the view is actually attached, catches the
+    /// real category at the first reliable read point. Routed through the existing
+    /// `handleContentSizeCategoryChange` so this stays a no-op re-parent when the category
+    /// hasn't changed (e.g. moving between views in the same window).
+    override public func didMoveToWindow() {
+        super.didMoveToWindow()
+        guard window != nil else { return }
+        handleContentSizeCategoryChange(uiCategory: traitCollection.preferredContentSizeCategory)
     }
 
     // MARK: - Layout
@@ -321,7 +390,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                 if let hit = tableCache[item.id], hit.sig == sig {
                     nextTables.append(hit.table)
                 } else {
-                    let table = flatten(builder(item), itemID: item.id)
+                    let table = flatten(builder(item), itemID: item.id, contentSizeCategory: contentSizeCategory)
                     nextTables.append(table)
                     tableCache[item.id] = (sig, table)
                 }
@@ -333,7 +402,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             }
         } else {
             for item in items {
-                nextTables.append(flatten(builder(item), itemID: item.id))
+                nextTables.append(flatten(builder(item), itemID: item.id, contentSizeCategory: contentSizeCategory))
             }
         }
         let nextSnapshot = LayoutSnapshot(tables: nextTables)

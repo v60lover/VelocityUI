@@ -223,9 +223,9 @@ public struct AsyncFeed<
     /// view's data-loading path. Await the returned `Task` to ensure both caches are
     /// populated before the view hierarchy is built and `layoutSubviews` fires.
     ///
-    /// Contract: `width` and `scale` must match what `FeedScrollView` will use at mount
-    /// time. A mismatch on either dimension produces `CacheKey` misses and silently falls
-    /// back to the standard pipeline path — no crash, just one gray frame.
+    /// Contract: `width`, `scale`, and `contentSizeCategory` must match what `FeedScrollView`
+    /// will use at mount time. A mismatch on any of these produces `CacheKey` misses and
+    /// silently falls back to the standard pipeline path — no crash, just one gray frame.
     /// Pass a bounded head-set (typically the first 10–20 items); warmUp has no internal
     /// fan-out cap and will decode every item's images regardless of list length.
     ///
@@ -245,6 +245,7 @@ public struct AsyncFeed<
         width: CGFloat,
         scale: CGFloat,
         environment: RenderEnvironment,
+        contentSizeCategory: VContentSizeCategory = .unspecified,
         cellBuilder: @escaping @MainActor (Item) -> Cell
     ) -> Task<Void, Never> {
         guard !items.isEmpty else { return Task {} }
@@ -253,7 +254,9 @@ public struct AsyncFeed<
         // scale produces a different ImageCacheKey than the one mount-time uses, so the
         // warmUp hit never lands. Floor to 1 matches the mount-path floor exactly.
         let capturedScale = max(1, scale)
-        let tables = items.map { item in flatten(cellBuilder(item).renderBody, itemID: item.id) }
+        let tables = items.map { item in
+            flatten(cellBuilder(item).renderBody, itemID: item.id, contentSizeCategory: contentSizeCategory)
+        }
         let cache = environment.layoutCache
         let pool = environment.textPool
         let actor = environment.imageActor

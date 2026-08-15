@@ -37,6 +37,32 @@ public struct VFontTraits: OptionSet, Sendable, Hashable {
     public static let italic = VFontTraits(rawValue: 1 << 0)
 }
 
+/// Sendable substitute for UIContentSizeCategory — keeps TextDescriptor UIKit-free at the
+/// value-type layer. Converted to/from the real UIKit type only inside TextRasteriser.swift.
+///
+/// `.unspecified` means "no Dynamic Type scaling requested": `TextRasteriser.resolvedFont`
+/// returns the descriptor's declared point size verbatim, skipping `UIFontMetrics` entirely.
+/// This matters beyond convenience — passing `UIContentSizeCategory.unspecified` itself INTO
+/// `UIFontMetrics` makes it silently fall back to `UIApplication.shared.preferredContentSizeCategory`,
+/// a hidden global read that would violate the "no global reads in nonisolated helpers" rule
+/// (CLAUDE.md §4). `.unspecified` short-circuits before that call is ever made, so every
+/// existing caller that never opts in keeps byte-identical behavior to before this type existed.
+public enum VContentSizeCategory: Sendable, Hashable {
+    case unspecified
+    case extraSmall
+    case small
+    case medium
+    case large
+    case extraLarge
+    case extraExtraLarge
+    case extraExtraExtraLarge
+    case accessibilityMedium
+    case accessibilityLarge
+    case accessibilityExtraLarge
+    case accessibilityExtraExtraLarge
+    case accessibilityExtraExtraExtraLarge
+}
+
 /// Sendable color descriptor. RGBA components, display-P3 assumed.
 public struct VColorDescriptor: Sendable, Hashable {
     public let red: CGFloat
@@ -113,6 +139,13 @@ public struct TextDescriptor: Sendable {
     public let kerning: CGFloat
     /// Extra spacing between lines, in points. 0 = no adjustment.
     public let lineSpacing: CGFloat
+    /// Dynamic Type category `resolvedFont` scales against via `UIFontMetrics`.
+    /// `.unspecified` (the default) skips scaling entirely — see `VContentSizeCategory`'s doc.
+    /// `flatten()` is the only production writer of a non-default value (VelocityUI-ezo.2.5) —
+    /// it also folds this into `layoutHash` so a category change misses `LayoutCache` and
+    /// reclassifies as `.layout`/re-freezes, the same way any other geometry-affecting
+    /// attribute does.
+    public let contentSizeCategory: VContentSizeCategory
     public let layoutHash: Int
     public let appearanceHash: Int
 
@@ -131,6 +164,7 @@ public struct TextDescriptor: Sendable {
         strikethroughStyle: Int = 0,
         kerning: CGFloat = 0,
         lineSpacing: CGFloat = 0,
+        contentSizeCategory: VContentSizeCategory = .unspecified,
         layoutHash: Int,
         appearanceHash: Int
     ) {
@@ -143,6 +177,7 @@ public struct TextDescriptor: Sendable {
         self.strikethroughStyle = strikethroughStyle
         self.kerning = kerning
         self.lineSpacing = lineSpacing
+        self.contentSizeCategory = contentSizeCategory
         self.layoutHash = layoutHash
         self.appearanceHash = appearanceHash
     }

@@ -12,14 +12,31 @@ import CoreGraphics
 /// Adding a new DSL node type requires only adding a case there — nowhere else.
 /// Modifier nodes (padding etc.) should fold into their target descriptor's layout contribution
 /// at measure time rather than becoming NodeKind cases — keeps NodeKind closed and exhaustive.
+///
+/// - Parameter contentSizeCategory: The Dynamic Type category to bake into every `TextDescriptor`
+///   this call produces (VelocityUI-ezo.2.5). `flatten()` is the one `@MainActor` boundary aware
+///   of the live trait environment — `TextNode` itself carries no category, so this is where it
+///   enters the pipeline. Default `.unspecified` (no scaling) preserves exact prior behavior for
+///   every caller that doesn't opt in. Folded into the returned `NodeTable.layoutHash` (and each
+///   `.text` node's own `layoutHash`) ONLY when the tree contains at least one text node — see
+///   `sawText` below for why an unconditional fold would be wrong.
 @MainActor
-public func flatten<ID: Hashable & Sendable>(_ root: any RenderNode, itemID: ID) -> NodeTable {
+public func flatten<ID: Hashable & Sendable>(
+    _ root: any RenderNode,
+    itemID: ID,
+    contentSizeCategory: VContentSizeCategory = .unspecified
+) -> NodeTable {
     var nodes: [NodeKind] = []
     var parentIndices: [Int] = []
     // Sparse — only indices that were actually `.frame()`-wrapped get an entry. Kept empty
     // (not even reserved) in the common unframed case so the final `frames` array collapses
     // to `nil` and NodeTable never allocates a [FrameSpec] for unframed cells.
     var frameByIndex: [Int: FrameSpec] = [:]
+    // Set the first time a TextNode is visited. Gates whether contentSizeCategory folds into
+    // the returned NodeTable's top-level layoutHash (see the call site below for why this
+    // matters: unconditionally folding it in would make classify() misclassify category-blind,
+    // pure-image trees as `.media` instead of `.none` on every Dynamic Type change).
+    var sawText = false
 
     func visit(_ node: any RenderNode, parent: Int) {
         // Unwrap any FrameModifierNode chain BEFORE the unconditional appends below.
@@ -66,12 +83,14 @@ public func flatten<ID: Hashable & Sendable>(_ root: any RenderNode, itemID: ID)
         case let n as SpacerNode:
             nodes.append(.spacer(n.minLength ?? 0))
         case let n as TextNode:
+            sawText = true
             nodes.append(.text(TextDescriptor(
                 content: n.content, font: n.font, color: n.color,
                 lineLimit: n.lineLimit, lineBreakMode: n.lineBreakMode.rawValue,
                 underlineStyle: n.underlineStyle.rawValue, strikethroughStyle: n.strikethroughStyle.rawValue,
                 kerning: n.kerning, lineSpacing: n.lineSpacing,
-                layoutHash: n.layoutHash, appearanceHash: n.appearanceHash)))
+                contentSizeCategory: contentSizeCategory,
+                layoutHash: combineHash(n.layoutHash, contentSizeCategory), appearanceHash: n.appearanceHash)))
         case let n as AsyncImageNode:
             nodes.append(.image(ImageDescriptor(
                 url: n.url, aspectRatio: n.aspectRatio,
@@ -96,12 +115,37 @@ public func flatten<ID: Hashable & Sendable>(_ root: any RenderNode, itemID: ID)
         ? nil
         : (0..<nodes.count).map { frameByIndex[$0] ?? .unspecified }
 
+    // sawText gate: a category-blind (pure-image/spacer/container) tree must keep byte-identical
+    // layoutHash across categories — folding it in unconditionally would make classify()'s
+    // tier-1 fast path miss on every Dynamic Type change even though nothing in the tree
+    // actually depends on the category, and its tier-3 walk would then find no node differing
+    // and misclassify the whole item as `.media` instead of `.none`. See the flatten() doc.
+    let tableLayoutHash = sawText ? combineHash(root.layoutHash, contentSizeCategory) : root.layoutHash
+
     return NodeTable(
         itemID: itemID,
         nodes: nodes,
         parentIndices: parentIndices,
-        layoutHash: root.layoutHash,
+        layoutHash: tableLayoutHash,
         appearanceHash: root.appearanceHash,
         frames: frames
     )
+}
+
+/// Combines a DSL-level layoutHash with the Dynamic Type category flatten() was called with.
+/// Used both for the returned NodeTable's top-level layoutHash (gated by `sawText`) and for
+/// each individual `.text` node's own `TextDescriptor.layoutHash`.
+///
+/// `.unspecified` is a true identity transform (returns `layoutHash` verbatim, not merely an
+/// equal-valued mix) — every existing caller that never opts into Dynamic Type gets EXACTLY
+/// `TextDescriptor.layoutHash == TextNode.layoutHash` / `NodeTable.layoutHash == root.layoutHash`,
+/// matching this file's pre-ezo.2.5 output byte-for-byte (see `testFlatten_textDescriptor_
+/// carriesNodeHashes` / `testFlatten_tableHashes_matchRootNode`, which assert exact equality,
+/// not just cross-call equality).
+private func combineHash(_ layoutHash: Int, _ category: VContentSizeCategory) -> Int {
+    guard category != .unspecified else { return layoutHash }
+    var h = Hasher()
+    h.combine(layoutHash)
+    h.combine(category)
+    return h.finalize()
 }

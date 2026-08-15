@@ -2148,5 +2148,121 @@ final class FeedScrollViewTests: XCTestCase {
 
         await drainFeedWork(feed)
     }
+
+    // MARK: - VelocityUI-ezo.2.5: Dynamic Type content-size-category invalidation
+
+    /// End-to-end proof of the acceptance criterion "changing the category invalidates frozen
+    /// text bitmaps and re-measures": posts `UIContentSizeCategory.didChangeNotification` to an
+    /// injected `NotificationCenter` (never `.default` — this must stay deterministic and not
+    /// touch process-global state) and asserts the visible text row's resolved height actually
+    /// grows once the async measure pipeline re-commits at the new, larger category.
+    func testContentSizeCategoryChangeNotification_ReMeasuresTextAndGrowsHeight() async {
+        let env = makeEnvironment()
+        let testCenter = NotificationCenter()
+        let feed = FeedScrollView<TestItem>(
+            environment: env,
+            frame: CGRect(x: 0, y: 0, width: 375, height: 812),
+            notificationCenter: testCenter
+        )
+        feed.cellBuilder = { _ in
+            TextNode("Dynamic Type integration content long enough to wrap across several lines at this width.")
+        }
+        feed.items = [TestItem(id: 0)]
+        feed.layoutSubviews()
+
+        // Poll until the async pipeline delivers a real (non-placeholder) measured height —
+        // mirrors testSameIDLayoutChange_TakesInPlaceBranch_DoesNotReturnShellToPool's pattern:
+        // Task.yield + wall-clock deadline, never Task.sleep as a coordination primitive.
+        func settledHeight(minimumGrowthOver floor: CGFloat) async -> CGFloat? {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+            while ContinuousClock.now < deadline {
+                await Task.yield()
+                feed.layoutSubviews()
+                if let h = feed._debugResolvedFrame(at: 0)?.height, h > floor { return h }
+            }
+            return nil
+        }
+
+        guard let baseline = await settledHeight(minimumGrowthOver: 0) else {
+            XCTFail("text must measure a real height before any content-size-category change")
+            return
+        }
+
+        testCenter.post(
+            name: UIContentSizeCategory.didChangeNotification,
+            object: nil,
+            userInfo: [UIContentSizeCategory.newValueUserInfoKey: UIContentSizeCategory.accessibilityExtraExtraExtraLarge]
+        )
+        feed.layoutSubviews()
+
+        let scaledHeight = await settledHeight(minimumGrowthOver: baseline)
+        XCTAssertNotNil(scaledHeight,
+            "posting UIContentSizeCategory.didChangeNotification with accessibilityExtraExtraExtraLarge "
+            + "must drive a re-measure that grows the text row's height past its pre-change baseline (\(baseline)pt)")
+
+        await drainFeedWork(feed)
+    }
+
+    /// `init(frame:)` builds the view before UIKit ever attaches it to a window, so the
+    /// `traitCollection` read at construction time reflects the process default, not a live
+    /// system setting — this is the exact cold-launch gap the finding described: a device
+    /// launched with Larger Text enabled would mount unscaled text and never see it correct
+    /// itself, because the OS only posts `didChangeNotification` on a *change*, never on mount.
+    /// This test never posts that notification at all — it proves `didMoveToWindow` alone
+    /// (FeedScrollView.swift) catches the real category once the view is attached to a window
+    /// whose trait environment already carries a non-default `preferredContentSizeCategory`,
+    /// exactly like a cold-launch device where the trait is live before any view exists.
+    func testWindowMount_SeedsLiveContentSizeCategory_WithoutNotification() async {
+        let env = makeEnvironment()
+        let testCenter = NotificationCenter()
+        let feed = FeedScrollView<TestItem>(
+            environment: env,
+            frame: CGRect(x: 0, y: 0, width: 375, height: 812),
+            notificationCenter: testCenter
+        )
+        feed.cellBuilder = { _ in
+            TextNode("Dynamic Type window-mount content long enough to wrap across several lines at this width.")
+        }
+        feed.items = [TestItem(id: 0)]
+        feed.layoutSubviews()
+
+        // Same poll idiom as the notification test above: Task.yield + wall-clock deadline,
+        // never Task.sleep as a coordination primitive.
+        func settledHeight(minimumGrowthOver floor: CGFloat) async -> CGFloat? {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+            while ContinuousClock.now < deadline {
+                await Task.yield()
+                feed.layoutSubviews()
+                if let h = feed._debugResolvedFrame(at: 0)?.height, h > floor { return h }
+            }
+            return nil
+        }
+
+        guard let baseline = await settledHeight(minimumGrowthOver: 0) else {
+            XCTFail("text must measure a real height before the feed is ever attached to a window")
+            return
+        }
+
+        // Install under a real UIWindow whose trait environment overrides
+        // preferredContentSizeCategory to an accessibility size — mirrors a cold-launch device
+        // with Larger Text already enabled system-wide, where the trait is live BEFORE the view
+        // is ever created. `traitOverrides` (UITraitOverrides, iOS 17+ — this package's
+        // deployment target) is the supported way to force a real trait value on a real trait
+        // environment without a UIViewController hop.
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 375, height: 812))
+        window.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
+        window.isHidden = false
+        window.addSubview(feed)
+        feed.layoutSubviews()
+
+        let scaledHeight = await settledHeight(minimumGrowthOver: baseline)
+        XCTAssertNotNil(scaledHeight,
+            "didMoveToWindow must re-seed contentSizeCategory from the live trait and re-measure — "
+            + "attaching to a window overridden to accessibilityExtraExtraExtraLarge must grow the "
+            + "text row's height past its pre-attach baseline (\(baseline)pt), with zero "
+            + "UIContentSizeCategory.didChangeNotification ever posted to testCenter")
+
+        await drainFeedWork(feed)
+    }
 }
 #endif

@@ -494,4 +494,71 @@ final class FlattenTests: XCTestCase {
         XCTAssertEqual(table.frame(at: -1), .unspecified)
         XCTAssertEqual(table.frame(at: 99), .unspecified)
     }
+
+    // MARK: - VelocityUI-ezo.2.5: Dynamic Type content-size-category threading
+
+    @MainActor func testFlatten_textNode_carriesContentSizeCategoryOntoDescriptor() {
+        let table = flatten(TextNode("x"), itemID: "i", contentSizeCategory: .accessibilityLarge)
+        guard case .text(let d) = table.nodes[0] else { XCTFail(); return }
+        XCTAssertEqual(d.contentSizeCategory, .accessibilityLarge)
+    }
+
+    @MainActor func testFlatten_defaultContentSizeCategory_isUnspecified() {
+        let table = flatten(TextNode("x"), itemID: "i")
+        guard case .text(let d) = table.nodes[0] else { XCTFail(); return }
+        XCTAssertEqual(d.contentSizeCategory, .unspecified)
+    }
+
+    /// A category change must perturb the per-node TextDescriptor.layoutHash — this is what
+    /// makes Block.contentHash (Pipeline/Block.swift) differ and drives the FrozenBitmapStore
+    /// re-freeze on a Dynamic Type change (see FrozenBitmapStoreTests for the full mechanism).
+    @MainActor func testFlatten_contentSizeCategory_perturbsTextDescriptorLayoutHash() {
+        let large = flatten(TextNode("caption"), itemID: "i", contentSizeCategory: .large)
+        let accessibility = flatten(TextNode("caption"), itemID: "i", contentSizeCategory: .accessibilityExtraExtraExtraLarge)
+        guard case .text(let d1) = large.nodes[0], case .text(let d2) = accessibility.nodes[0] else { XCTFail(); return }
+        XCTAssertNotEqual(d1.layoutHash, d2.layoutHash,
+            "a content-size-category change must perturb the text node's layoutHash")
+        XCTAssertEqual(d1.appearanceHash, d2.appearanceHash,
+            "content-size-category is geometry, not appearance")
+    }
+
+    /// A category change must perturb NodeTable.layoutHash (the CacheKey/classify() tier-1
+    /// value) for a tree that contains text — otherwise LayoutCache would silently serve a
+    /// stale, wrong-scale entry and classify() would never reclassify the item as `.layout`.
+    @MainActor func testFlatten_contentSizeCategory_perturbsTableLayoutHashWhenTextPresent() {
+        let root = { VStackNode { TextNode("caption") } }
+        let large = flatten(root(), itemID: "i", contentSizeCategory: .large)
+        let accessibility = flatten(root(), itemID: "i", contentSizeCategory: .accessibilityExtraExtraExtraLarge)
+        XCTAssertNotEqual(large.layoutHash, accessibility.layoutHash,
+            "a text-bearing tree's NodeTable.layoutHash must change with content size category")
+    }
+
+    /// A category-blind tree (no text anywhere) must NOT have its NodeTable.layoutHash perturbed
+    /// by a category change — otherwise classify()'s tier-1 fast path would miss on every
+    /// Dynamic Type change even for pure-image items, and its tier-3 walk (finding no node
+    /// actually differing) would misclassify the item as `.media` instead of `.none`.
+    @MainActor func testFlatten_contentSizeCategory_doesNotPerturbTableLayoutHashForTextFreeTree() {
+        let url = URL(string: "https://example.com/img.jpg")!
+        let root = { VStackNode { AsyncImageNode(url: url, aspectRatio: 1.0) } }
+        let large = flatten(root(), itemID: "i", contentSizeCategory: .large)
+        let accessibility = flatten(root(), itemID: "i", contentSizeCategory: .accessibilityExtraExtraExtraLarge)
+        XCTAssertEqual(large.layoutHash, accessibility.layoutHash,
+            "a category-blind (text-free) tree's NodeTable.layoutHash must stay stable across categories")
+    }
+
+    /// `.unspecified` must be a true identity transform — omitting the parameter and passing
+    /// `.unspecified` explicitly must produce byte-identical layoutHash values (not merely
+    /// equal-to-each-other values that both differ from the pre-ezo.2.5 baseline). Locks in
+    /// `testFlatten_textDescriptor_carriesNodeHashes` / `testFlatten_tableHashes_matchRootNode`'s
+    /// exact-equality contract against TextNode.layoutHash / root.layoutHash.
+    @MainActor func testFlatten_unspecifiedCategory_isByteIdenticalToOmittingParameter() {
+        let node = TextNode("caption")
+        let omitted = flatten(node, itemID: "i")
+        let explicit = flatten(node, itemID: "i", contentSizeCategory: .unspecified)
+        guard case .text(let d1) = omitted.nodes[0], case .text(let d2) = explicit.nodes[0] else { XCTFail(); return }
+        XCTAssertEqual(d1.layoutHash, d2.layoutHash)
+        XCTAssertEqual(omitted.layoutHash, explicit.layoutHash)
+        XCTAssertEqual(d1.layoutHash, node.layoutHash,
+            "unspecified must not perturb the text node's layoutHash away from TextNode.layoutHash itself")
+    }
 }
