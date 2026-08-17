@@ -246,6 +246,18 @@ public final class RenderCell {
                     }
                 }
                 mediaFragmentIDs.insert(fragment.id)
+            } else if case .text = fragment.content {
+                // Text has no async delivery path (unlike images, no applyContent/fade-in) —
+                // the rasterized bitmap is either available now via synchronousContent (the
+                // VelocityUI-socg C3 in-place path, which always freezes+rasterizes before
+                // calling applyLayout) or it isn't produced yet (no general first-mount
+                // rasterizer wired — VelocityUI-3z4s). Set unconditionally (nil when absent) so
+                // a sublayer reused across a text->other->text reclassification within the same
+                // item never shows a stale bitmap from a previous fragment at this id.
+                sub.contents = synchronousContent[fragment.id]
+                sub.backgroundColor = nil
+                mediaFragmentIDs.remove(fragment.id)
+                placeholderPaintedFragmentIDs.remove(fragment.id)
             } else {
                 sub.backgroundColor = nil
                 sub.contents = nil  // image→geometry reclassification must not leave stale image visible
@@ -308,6 +320,25 @@ public final class RenderCell {
     /// `RenderEnvironment.contentDeliveryObserver` — either of those only fires on the async
     /// path and misses mount-time synchronous delivery entirely.
     var _debugIsContentRevealed: Bool { allMediaLoaded }
+
+    /// Every fragment id currently painting a `CGImage` (image or text), mapped to that exact
+    /// instance. Test-only — lets tests assert PIXEL identity (the same `CGImage` reference is
+    /// still on screen = zero re-rasterize/re-decode) instead of only frame height, without the
+    /// test needing to know `Fragment.id`'s `NodeTable` nodeIndex mapping ahead of time (VelocityUI
+    /// -socg C3 activation's "re-validate by pixels, not just frame height" checklist item).
+    var _debugPaintedBitmaps: [Int: CGImage] {
+        var result: [Int: CGImage] = [:]
+        for (id, layer) in sublayers {
+            // `contents as? CGImage` always "succeeds" for any CF-bridged Any (compiler warning
+            // treated as an error in the Xcode-project test target) — CFGetTypeID is the correct
+            // way to check a CF type identity before the cast.
+            guard let contents = layer.contents else { continue }
+            let cf = contents as CFTypeRef
+            guard CFGetTypeID(cf) == CGImage.typeID else { continue }
+            result[id] = (cf as! CGImage)
+        }
+        return result
+    }
 
     /// Total count of successful `applyContent` deliveries across all cells. Test-only — no
     /// BenchmarkHost consumer (that instrumentation routes through

@@ -1079,11 +1079,13 @@ final class FeedScrollViewTests: XCTestCase {
 
         counter.value = 0
         feed.items = items
+        feed.layoutSubviews()
         XCTAssertEqual(counter.value, N,
             "nil itemSignature: initial load must call builder for all N items")
 
         counter.value = 0
         feed.items = items  // identical items — nil sig still force-misses every item
+        feed.layoutSubviews()
         XCTAssertEqual(counter.value, N,
             "nil itemSignature: repeat update must call builder N times — no caching on force-miss path")
     }
@@ -1116,6 +1118,7 @@ final class FeedScrollViewTests: XCTestCase {
 
         counter.value = 0
         feed.items = baseItems
+        feed.layoutSubviews()
         XCTAssertEqual(counter.value, N,
             "Initial load must call builder for all N items — no cache entries yet")
 
@@ -1123,6 +1126,7 @@ final class FeedScrollViewTests: XCTestCase {
         baseItems[2] = Item(id: 2, cornerRadius: 8)
         counter.value = 0
         feed.items = baseItems
+        feed.layoutSubviews()
         XCTAssertEqual(counter.value, 1,
             "Only 1 item changed signature — builder must be called exactly once; "
             + "\(N - 1) items must be served from cache")
@@ -1154,17 +1158,20 @@ final class FeedScrollViewTests: XCTestCase {
 
         let baseItems = (0..<N).map { Item(id: $0, cornerRadius: 0) }
         feed.items = baseItems
+        feed.layoutSubviews()
 
         // Change sig for ALL items — must rebuild all.
         let altItems = (0..<N).map { Item(id: $0, cornerRadius: 8) }
         counter.value = 0
         feed.items = altItems
+        feed.layoutSubviews()
         XCTAssertEqual(counter.value, N,
             "All items changed signature — builder must be called N times to refresh NodeTables")
 
         // Restore base — all change again — builder called N times again.
         counter.value = 0
         feed.items = baseItems
+        feed.layoutSubviews()
         XCTAssertEqual(counter.value, N,
             "Signature reverted for all items — builder must still be called N times")
     }
@@ -1185,11 +1192,13 @@ final class FeedScrollViewTests: XCTestCase {
         feed.cellBuilder = { _ in AsyncImageNode(url: nil, aspectRatio: 1.0) }
 
         feed.items = (0..<N).map { Item(id: $0) }
+        feed.layoutSubviews()
         XCTAssertEqual(feed._tableCacheCount, N,
             "Cache must have N entries after initial load")
 
         // Remove 2 items — cache must shed their entries via full-swap eviction.
         feed.items = (0..<(N - 2)).map { Item(id: $0) }
+        feed.layoutSubviews()
         XCTAssertEqual(feed._tableCacheCount, N - 2,
             "Removed IDs must be evicted — tableCache.count must equal items.count after update")
     }
@@ -1218,6 +1227,7 @@ final class FeedScrollViewTests: XCTestCase {
         }
 
         feed.items = (1...N).map { Item(id: $0) }
+        feed.layoutSubviews()
         XCTAssertEqual(feed._tableCacheCount, N,
             "Cache must have N entries after initial load")
 
@@ -1226,6 +1236,7 @@ final class FeedScrollViewTests: XCTestCase {
         // tableCache.count (6) > items.count (5) → eviction removes id=5 → back to N.
         counter.value = 0
         feed.items = (1..<N).map { Item(id: $0) } + [Item(id: 6)]
+        feed.layoutSubviews()
         XCTAssertEqual(feed._tableCacheCount, N,
             "Mixed add+remove: eviction must shed replaced id=5, leaving cache.count == items.count")
         XCTAssertEqual(counter.value, 1,
@@ -1290,14 +1301,22 @@ final class FeedScrollViewTests: XCTestCase {
         let oneAltItems  = [StyleItem(id: 0, cornerRadius: 8)]
             + (1..<N).map { StyleItem(id: $0, cornerRadius: 0) }
 
+        // VelocityUI-socg C4: `items =` no longer diffs/rebuilds synchronously — it defers to the
+        // next `layoutSubviews()` (coalescing a same-frame burst into one pass). Every assignment
+        // below is followed by an explicit `layoutSubviews()` to drain it immediately, preserving
+        // this test's one-assignment-per-iteration semantics; the timed regions now bracket both
+        // calls together since that pair is where the diff+rebuild cost this test measures lives.
         feed.items = baseItems
+        feed.layoutSubviews()
 
         // Warmup: prime branch predictors and dict backing store on the miss path.
         for i in 0..<warmupIters {
             feed.items = i.isMultiple(of: 2) ? allAltItems : baseItems
+            feed.layoutSubviews()
         }
         // Ensure cache is at baseItems (all cornerRadius=0) before loop A.
         feed.items = baseItems
+        feed.layoutSubviews()
 
         var info = mach_timebase_info_data_t()
         mach_timebase_info(&info)
@@ -1312,6 +1331,7 @@ final class FeedScrollViewTests: XCTestCase {
             counter.value = 0
             let t0 = mach_absolute_time()
             feed.items = useAllAlt ? allAltItems : baseItems
+            feed.layoutSubviews()
             let t1 = mach_absolute_time()
             missRaw.append(t1 &- t0)
             missBuilderCallsTotal += counter.value
@@ -1322,8 +1342,10 @@ final class FeedScrollViewTests: XCTestCase {
         // Warmup for hit path.
         for i in 0..<warmupIters {
             feed.items = i.isMultiple(of: 2) ? oneAltItems : baseItems
+            feed.layoutSubviews()
         }
         feed.items = baseItems  // reset cache to all cornerRadius=0
+        feed.layoutSubviews()
 
         // --- Loop B: cache-hit (1 item changes signature per iter) ---
         var hitRaw = [UInt64]()
@@ -1334,6 +1356,7 @@ final class FeedScrollViewTests: XCTestCase {
             counter.value = 0
             let t0 = mach_absolute_time()
             feed.items = useOneAlt ? oneAltItems : baseItems
+            feed.layoutSubviews()
             let t1 = mach_absolute_time()
             hitRaw.append(t1 &- t0)
             hitBuilderCallsTotal += counter.value

@@ -58,9 +58,28 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
     // MARK: - Items
 
+    /// VelocityUI-socg C4: does NOT diff/relayout synchronously on assignment. A burst of `items`
+    /// assignments within one display frame (e.g. token-by-token streaming) coalesces to exactly
+    /// ONE `itemsDidChange` call, drained at the top of the NEXT `layoutSubviews()` — see
+    /// `_pendingItemsDiffBase`. This leverages UIKit's own `setNeedsLayout`/`layoutSubviews`
+    /// coalescing (multiple `setNeedsLayout()` calls before the next display cycle already
+    /// collapse to one `layoutSubviews()`) instead of a hand-rolled CADisplayLink. The established
+    /// test pattern `feed.items = X; feed.layoutSubviews()` is unaffected — one assignment plus
+    /// one manual `layoutSubviews()` call still yields exactly one `itemsDidChange` call.
     public var items: [Item] = [] {
-        didSet { itemsDidChange(from: oldValue) }
+        didSet {
+            if _pendingItemsDiffBase == nil {
+                _pendingItemsDiffBase = oldValue
+            }
+            setNeedsLayout()
+        }
     }
+
+    /// The pre-burst `items` value to diff FROM once `layoutSubviews()` drains the coalesced
+    /// update — captured only on the FIRST assignment of a burst (subsequent assignments before
+    /// the next layout pass must not overwrite it, or the burst would diff against its own
+    /// intermediate state instead of the true pre-burst baseline). `nil` in steady state.
+    private var _pendingItemsDiffBase: [Item]?
 
     // MARK: - Dependencies
 
@@ -121,6 +140,14 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
     /// Pre-allocated scratch buffer for the recycle loop — avoids a per-frame Array allocation.
     private var _recycleBuffer: [Int] = []
+
+    /// Largest `keepRange.count` seen so far — only the driver knows the real working-range
+    /// shape (prefetchBehind + visible + prefetchAhead), and only after first layout, so
+    /// `FrozenBitmapStore`'s byte budget (fixed at the 16 MB default at construction, before
+    /// this feed existed) is resized from this once it grows. Tracked monotonically-up so a
+    /// transient shrink (e.g. rotation narrowing the viewport) never shrinks the live budget
+    /// mid-scroll — a shrink would thrash-evict blocks still inside the window.
+    private var _frozenBudgetWindowCount: Int = 0
 
     /// Pre-allocated scratch buffer for `refineKnownFrames` — avoids a fresh Set.union +
     /// Array.sorted allocation on every call while indices remain unrefined.
@@ -193,6 +220,24 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// instead of an applyContent-only delivery signal.
     func _debugIsContentRevealed(at index: Int) -> Bool {
         visibleCells[index]?._debugIsContentRevealed ?? false
+    }
+
+    /// See `RenderCell._debugPaintedBitmaps`'s doc. Empty dict if the index has no mounted cell.
+    func _debugPaintedBitmaps(at index: Int) -> [Int: CGImage] {
+        visibleCells[index]?._debugPaintedBitmaps ?? [:]
+    }
+
+    /// Re-derives fragments by walking `workingRange.entry(at: index)`'s `layout` through
+    /// `extractFragments`, using the item's CURRENT `NodeTable`. `nil` if there's no committed
+    /// WorkingRange entry or the index is out of range. VelocityUI-socg C4: the fast path patches
+    /// WorkingRange with a SYNTHETIC `ResolvedLayout` (built from block-diff's resolved fragments,
+    /// not a real `measureNode` tree) — this hook lets a test confirm that synthetic layout
+    /// round-trips correctly through the SAME code path a later appearanceChanged/mediaChanged
+    /// classification on this item would use (FeedScrollView.swift's `extractFragments(table:
+    /// layout:)` call sites), rather than only trusting it by inspection.
+    func _debugExtractFragmentsFromWorkingRange(at index: Int) -> [Fragment]? {
+        guard let entry = workingRange.entry(at: index), index < tables.count else { return nil }
+        return extractFragments(table: tables[index], layout: entry.layout)
     }
 
     /// Count of indices still awaiting fragment delivery via refineKnownFrames — i.e. cells
@@ -354,6 +399,15 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     override public func layoutSubviews() {
         super.layoutSubviews()
 
+        // VelocityUI-socg C4: drain any coalesced `items` burst FIRST — `refineKnownFrames`/
+        // `updateVisibleCells` below read `tables`/`resolvedFrames`/`estimatedIndices`, which
+        // only `itemsDidChange` updates. `itemsDidChange` clears `_pendingItemsDiffBase` itself
+        // (as its very first action) so this can't double-drain even if something else already
+        // called it directly this pass (e.g. `handleContentSizeCategoryChange`).
+        if let base = _pendingItemsDiffBase {
+            itemsDidChange(from: base)
+        }
+
         let offsetY = contentOffset.y
         if offsetY != lastScrollOffsetY {
             scrollDirection = offsetY > lastScrollOffsetY ? .down : .up
@@ -380,6 +434,11 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     // MARK: - Items change
 
     private func itemsDidChange(from oldItems: [Item]) {
+        // Cleared unconditionally, regardless of call site (the `items` didSet's deferred drain
+        // in `layoutSubviews`, or a direct call like `handleContentSizeCategoryChange`'s) — any
+        // call fully resyncs `snapshot`/`tables` to the CURRENT `items`, so a pending marker from
+        // before this call is always stale afterward and must not trigger a redundant re-drain.
+        _pendingItemsDiffBase = nil
         guard let builder = cellBuilder else { return }
 
         var nextTables: [NodeTable] = []
@@ -437,6 +496,20 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                                     !changeSet.removed.isEmpty ||
                                     !changeSet.added.isEmpty
 
+        // VelocityUI-socg C4: a pure streaming update (every layoutChanged entry is a same-
+        // position, currently-visible survivor — no add/remove) is a candidate to SKIP the
+        // full-window invalidation below and instead patch WorkingRange directly for just the
+        // block-diff-resolved indices (see the post-loop commit below). Eligibility only —
+        // whether we actually take the fast path depends on every layoutChanged entry's block
+        // diff succeeding, decided after the loop runs. Excluding off-screen layoutChanged
+        // entries here matters: applyInPlaceBlockDiff is only ATTEMPTED for visible cells inside
+        // the loop below, so an off-screen layoutChanged item would never get a WorkingRange
+        // patch under the fast path and would be stranded stale forever.
+        let canDeferInvalidation = needsFullInvalidation
+            && changeSet.removed.isEmpty && changeSet.added.isEmpty
+            && !changeSet.layoutChanged.isEmpty
+            && changeSet.layoutChanged.allSatisfy { $0.prevIdx == $0.nextIdx && visibleCells[$0.prevIdx] != nil }
+
         // VelocityUI-socg C3: capture the per-block diff inputs for every layout-changed
         // survivor BEFORE workingRange.invalidateAll() below wipes the ring buffer — the OLD
         // fragments (with their real, previously-measured per-block heights) are only readable
@@ -444,6 +517,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         // a full re-measure, which is exactly the O(item length) cost this diff exists to avoid.
         // `changeSet.layoutChanged` already carries the (prev, next) NodeTable pair directly —
         // no need to re-derive it from `tables`/`nextTables` before/after the reassignment below.
+        // Reading WorkingRange here is safe under `canDeferInvalidation` too — that path only
+        // SKIPS invalidation, it never reorders this capture relative to it.
         var blockDiffInputs: [Int: (previousTable: NodeTable, newTable: NodeTable, previousFragments: [Fragment])] = [:]
         if needsFullInvalidation {
             for e in changeSet.layoutChanged {
@@ -451,15 +526,22 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                 blockDiffInputs[e.prevIdx] = (e.prev, e.next, wrEntry.fragments)
             }
 
-            workingRange.invalidateAll()
-            let pipeline = self.pipeline
-            Task { await pipeline.markInvalidated() }
+            if !canDeferInvalidation {
+                workingRange.invalidateAll()
+                let pipeline = self.pipeline
+                Task { await pipeline.markInvalidated() }
+            }
         }
 
         snapshot = nextSnapshot
         tables = nextTables
 
         rebuildFrames(oldFrames: oldFrames, survivors: survivors)
+
+        // Set only by the fully-resolved C4 fast path below (every layoutChanged entry patched
+        // WorkingRange directly, no invalidation) — gates the `lastNotifiedLeadingIndex` reset
+        // near the end of this method.
+        var tookInPlaceFastPath = false
 
         if needsFullInvalidation {
             // reuseDecision(oldID:newID:) (Pipeline/ReuseDecision.swift, VelocityUI-0wi) gates
@@ -482,6 +564,17 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             // re-enroll so refineKnownFrames doesn't redundantly redo the same work through the
             // async pipeline once WorkingRange recommits.
             var blockDiffResolvedIndices: Set<Int> = []
+            // C4: WorkingRange patches for the fast path — populated only when
+            // `canDeferInvalidation`, applied after the loop IFF every layoutChanged entry
+            // resolved (see the post-loop decision below). A synthetic ResolvedLayout mirroring
+            // exactly what `extractFragments` would derive: root nodeIndex 0 spanning the item
+            // (flatBlocks guarantees an unframed root vstack — see its doc), one child per
+            // resolved fragment at nodeIndex == fragment.id and totalFrame == fragment.frame
+            // (already item-local coordinates, same space `extractFragments` produces). This
+            // keeps a LATER appearanceChanged/mediaChanged classification on the same item
+            // (which reads `wrEntry.layout` via `extractFragments`, not `wrEntry.fragments`)
+            // correct instead of walking a bogus/empty tree.
+            var blockDiffWorkingRangeCommits: [Int: (layout: ResolvedLayout, fragments: [Fragment])] = [:]
             let width = lastLayoutWidth > 0 ? lastLayoutWidth : bounds.width
             let scale = max(1, traitCollection.displayScale)
             for (prevIdx, cell) in visibleCells {
@@ -518,11 +611,25 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                         if delta != 0 { contentSize.height += delta }
                         estimatedIndices.remove(nextIdx)
                         cell.layer.frame = resolvedFrames[nextIdx]
-                        let syncMap = buildSyncMap(for: result.fragments)
+                        // Merge image cache hits with the block-diff's freshly-resolved text
+                        // bitmaps (VelocityUI-socg C3 activation — this is the missing consumer
+                        // that makes FrozenBitmapStore's cached bitmaps actually paint). Fragment
+                        // ids never collide across content kinds within one item's NodeTable, so
+                        // a plain overwrite-merge is safe — the two maps are disjoint by key.
+                        var syncMap = buildSyncMap(for: result.fragments)
+                        for (id, bitmap) in result.textBitmaps { syncMap[id] = bitmap }
                         cell.applyLayout(result.fragments, synchronousContent: syncMap)
                         spawnMediaFetches(for: cell, fragments: result.fragments, itemID: inputs.newTable.itemID,
                                           syncMap: syncMap)
                         blockDiffResolvedIndices.insert(nextIdx)
+                        if canDeferInvalidation {
+                            let syntheticLayout = ResolvedLayout(
+                                totalFrame: CGRect(x: 0, y: 0, width: width, height: result.height),
+                                children: result.fragments.map { ResolvedLayout(totalFrame: $0.frame, nodeIndex: $0.id) },
+                                nodeIndex: 0
+                            )
+                            blockDiffWorkingRangeCommits[nextIdx] = (syntheticLayout, result.fragments)
+                        }
                     }
                 } else {
                     cell.layer.removeFromSuperlayer()
@@ -530,6 +637,31 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                 }
             }
             visibleCells = keptCells
+
+            // C4: resolve the deferred invalidation decision. `canDeferInvalidation` only
+            // established ELIGIBILITY (no add/remove, every layoutChanged entry visible at a
+            // stable position) — whether every one of them actually resolved via block-diff is
+            // only known now. All-resolved: patch WorkingRange directly for just those indices,
+            // skipping the full-window invalidate + pipeline re-measure entirely (VelocityUI-socg
+            // C4's "suppress the redundant background re-measure" — a streaming token update no
+            // longer forces the ENTIRE prefetch window to re-measure through RenderPipeline).
+            // Partial failure: fall back to EXACTLY today's behavior (full invalidate + markInvalidated),
+            // just decided here instead of upfront — safe because nothing between the original
+            // call site and here reads `workingRange` (verified: `applyInPlaceBlockDiff` only
+            // consumes `blockDiffInputs`, captured before either branch).
+            if canDeferInvalidation {
+                if blockDiffResolvedIndices.count == changeSet.layoutChanged.count {
+                    for (nextIdx, commit) in blockDiffWorkingRangeCommits {
+                        workingRange.commit(commit.layout, commit.fragments, at: nextIdx)
+                    }
+                    tookInPlaceFastPath = true
+                } else {
+                    workingRange.invalidateAll()
+                    let pipeline = self.pipeline
+                    Task { await pipeline.markInvalidated() }
+                }
+            }
+
             _pendingFragmentIndices.removeAll(keepingCapacity: true)
             // Re-enroll every kept .inPlace index so refineKnownFrames refreshes its content
             // once the pipeline recommits WorkingRange — must run AFTER removeAll above, or
@@ -560,7 +692,18 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             reachEndFired = false
         }
 
-        lastNotifiedLeadingIndex = -1
+        // On the fully-resolved fast path, nothing the pipeline needs to re-measure changed —
+        // WorkingRange was patched directly (not invalidated), neighbors are untouched, and the
+        // leading index is whatever it already was. Forcing a re-notify here would only spawn a
+        // `notifyPipelineIfNeeded` Task that immediately early-returns inside `onIndexBoundary`
+        // (the pipeline's own last-notified index was never reset either, since `markInvalidated()`
+        // never ran on this path) — one wasted Task + actor hop per streaming token for nothing.
+        // Leaving the previous value in place is still correct if the leading index genuinely
+        // shifted (e.g. growth pushed the visible range): `notifyPipelineIfNeeded` compares
+        // against it and notifies normally in that case.
+        if !tookInPlaceFastPath {
+            lastNotifiedLeadingIndex = -1
+        }
 
         syncContentSize()
         setNeedsLayout()
@@ -573,10 +716,15 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// width:)` recognizes), diffs them with `diff(previous:new:)`, and for every block that
     /// changed, re-measures — freezing it into `environment.frozenBitmapStore` when it is TEXT
     /// and has finished growing (see `flatBlocks`'s and this method's inline docs). Returns the
-    /// item's new total height and its full repositioned `[Fragment]` list (so any image blocks
-    /// after a resized text block still land at the right y-offset), or `nil` when this update
-    /// cannot be optimized SAFELY — the caller falls back to the pre-existing
-    /// `_pendingFragmentIndices` full-refresh path rather than risk stale/wrong content.
+    /// item's new total height, its full repositioned `[Fragment]` list (so any image blocks
+    /// after a resized text block still land at the right y-offset), and a `fragment.id ->
+    /// CGImage` map of every text block's current bitmap (unchanged blocks' verbatim
+    /// `FrozenBitmapStore` hit, freshly re-rasterized hot-tail/appended/edited blocks alike) —
+    /// the caller merges this into `synchronousContent` so `RenderCell.applyLayout` paints real
+    /// pixels instead of leaving text blank (VelocityUI-socg C3 activation: this is what makes
+    /// the store's cached bitmaps an actual DISPLAY consumer, not just a computed-and-discarded
+    /// cache). `nil` when this update cannot be optimized SAFELY — the caller falls back to the
+    /// pre-existing `_pendingFragmentIndices` full-refresh path rather than risk stale/wrong content.
     ///
     /// `previousFragments` must be the REAL fragments `extractFragments` produced for this item
     /// the last time it was measured (captured from `WorkingRange` before `invalidateAll()` —
@@ -595,7 +743,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         itemID: ID,
         width: CGFloat,
         scale: CGFloat
-    ) -> (height: CGFloat, fragments: [Fragment])? {
+    ) -> (height: CGFloat, fragments: [Fragment], textBitmaps: [Int: CGImage])? {
         guard let (previousBlocks, _) = flatBlocks(for: previousTable, itemID: itemID, width: width),
               let (newBlocks, spacing) = flatBlocks(for: newTable, itemID: itemID, width: width),
               previousBlocks.count == previousFragments.count,
@@ -615,7 +763,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         // dict is passed on every call so `freeze(_:)` always recomputes here — the PERSISTENT
         // cache is `store`, consulted separately (below) for the genuinely-unchanged case, so
         // this always represents real new work, never a stale hit.
-        func measureAndMaybeFreeze(_ block: Block, persist: Bool) -> CGFloat? {
+        func measureAndMaybeFreeze(_ block: Block, persist: Bool) -> (height: CGFloat, bitmap: CGImage?)? {
             guard case .text = block.fragment.content else { return nil }
             var localCache: [BlockKey: FreezeState] = [:]
             // `freeze(_:)` always calls `measure` before attempting `rasterize`, but on a
@@ -648,29 +796,35 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                     let cost = Int((pixelW * pixelH * 4).rounded(.up))
                     store.store(bitmap, size: size, cost: cost, for: block.key)
                 }
-                return size.height
+                return (size.height, bitmap)
             case .hot:
                 // Rasterization failed on a degenerate size — freeze() intentionally returns
                 // uncached .hot so a later call can retry. `measuredSize` was still captured
                 // above (freeze() measures unconditionally), so this needs no extra work.
-                return measuredSize?.height ?? 0
+                // No bitmap: RenderCell paints blank rather than a stale/wrong image for this
+                // fragment id until a later round rasterizes successfully.
+                return (measuredSize?.height ?? 0, nil)
             }
         }
 
         var heights = [CGFloat](repeating: 0, count: newBlocks.count)
+        var textBitmaps: [Int: CGImage] = [:]
         for i in 0..<overlap {
             let block = newBlocks[i]
             if unchangedSet.contains(i) {
                 if case .text = block.fragment.content {
                     if let size = store.size(for: block.key) {
-                        _ = store.bitmap(for: block.key)  // bump LRU recency — verbatim reuse
+                        // bump LRU recency — verbatim reuse — and thread the SAME CGImage
+                        // instance through so the caller paints it without a re-rasterize.
+                        textBitmaps[block.fragment.id] = store.bitmap(for: block.key)
                         heights[i] = size.height
                     } else {
                         // Self-heal: logically unchanged per diff(), but the store has no entry
                         // yet (first pass through C3 for this block, or it was LRU/pressure-
                         // evicted) — recompute once and (re-)freeze it, same as a finalized tail.
-                        guard let h = measureAndMaybeFreeze(block, persist: true) else { return nil }
-                        heights[i] = h
+                        guard let result = measureAndMaybeFreeze(block, persist: true) else { return nil }
+                        heights[i] = result.height
+                        textBitmaps[block.fragment.id] = result.bitmap
                     }
                 } else {
                     // Non-text, unchanged: trust the previous real fragment height directly —
@@ -688,13 +842,15 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             // entry `store` already held for this key (`store(...)` updates in place; see its
             // doc — no separate evict-then-store two-step needed for correctness).
             let persist = i != trailingIndex
-            guard let h = measureAndMaybeFreeze(block, persist: persist) else { return nil }
-            heights[i] = h
+            guard let result = measureAndMaybeFreeze(block, persist: persist) else { return nil }
+            heights[i] = result.height
+            textBitmaps[block.fragment.id] = result.bitmap
         }
         for i in overlap..<newBlocks.count {
             let persist = i != trailingIndex
-            guard let h = measureAndMaybeFreeze(newBlocks[i], persist: persist) else { return nil }
-            heights[i] = h
+            guard let result = measureAndMaybeFreeze(newBlocks[i], persist: persist) else { return nil }
+            heights[i] = result.height
+            textBitmaps[newBlocks[i].fragment.id] = result.bitmap
         }
 
         var cursor: CGFloat = 0
@@ -706,7 +862,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             cursor += heights[i]
             if i < trailingIndex { cursor += spacing }
         }
-        return (cursor, fragments)
+        return (cursor, fragments, textBitmaps)
     }
 
     /// Recognizes the one item shape this bind-site diff optimizes: a root `.vstack` whose
@@ -750,6 +906,43 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             blocks.append(Block(key: key, fragment: fragment, layout: ResolvedLayout(totalFrame: frame)))
         }
         return (blocks, vstackDescriptor.spacing)
+    }
+
+    /// Emits just the BlockKeys for the flat-vstack-of-leaves shape `flatBlocks` recognizes,
+    /// WITHOUT building any `Block`/`Fragment`/`ResolvedLayout` or computing `contentHash` — the
+    /// scroll-path admit/evict window bookkeeping needs only `(itemID, position)` keys, which
+    /// are width-independent, so paying for a `Block`'s hashing/geometry (immediately discarded
+    /// by the `.map(\.key)` this replaces) on every keep-range boundary crossing during a fling
+    /// would be pure waste against the zero-allocation scroll-path invariant. Mirrors
+    /// `flatBlocks`' guards exactly (same bail conditions, same shape recognition) so the two
+    /// never disagree about which items are flat. Returns `true` when it inserted the full flat
+    /// key set into `keys`, `false` on a non-flat shape (nothing inserted) — callers may ignore
+    /// the return value if they only care about the accumulated `keys` set.
+    @discardableResult
+    private func flatBlockKeys<ID: Hashable & Sendable>(
+        for table: NodeTable, itemID: ID, into keys: inout Set<BlockKey>
+    ) -> Bool {
+        guard !table.nodes.isEmpty, case .vstack = table.nodes[0] else { return false }
+        let childIndices = table.children(of: 0)
+        guard !childIndices.isEmpty, childIndices.count == table.nodes.count - 1 else { return false }
+        // Validate the whole shape is flat FIRST, without touching `keys` — a nested container
+        // found partway through must bail without partially mutating the caller's accumulator,
+        // matching `flatBlocks`' all-or-nothing shape recognition (its nil return likewise
+        // discards a half-built `blocks` array). A second, allocation-free pass then inserts
+        // directly into `keys` — no intermediate buffer needed since `childIndices` is already
+        // materialized.
+        for nodeIndex in childIndices {
+            switch table.nodes[nodeIndex] {
+            case .text, .image, .spacer, .hosting, .gif, .video, .customLayer:
+                continue
+            case .vstack, .hstack, .zstack:
+                return false  // nested container — not flat, bail (matches flatBlocks)
+            }
+        }
+        for position in childIndices.indices {
+            keys.insert(BlockKey(itemID: itemID, index: position))
+        }
+        return true
     }
 
     /// Synchronous text measurement for the C3 in-place path. The scroll/bind path must never
@@ -935,12 +1128,39 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         let keepEnd   = min(resolvedFrames.count, visRange.upperBound + prefetchAheadCount)
         let keepRange = keepStart..<keepEnd
 
+        // FrozenBitmapStore is constructed (at RenderEnvironment composition-root time) before
+        // this feed's real working-range shape is known — the driver is the only place that
+        // shape ever becomes available. Size the budget from it here, once it grows, so the
+        // store's LRU ceiling can never fall below the visible window's own bitmap footprint
+        // (a budget that small would evict a still-visible block and force a re-freeze). Purely
+        // a lock-guarded synchronous call — no `await`, safe on the scroll path.
+        if keepRange.count > _frozenBudgetWindowCount {
+            _frozenBudgetWindowCount = keepRange.count
+            environment.frozenBitmapStore.sizeBudget(forWindowCount: keepRange.count)
+        }
+
         // Collect out-of-range indices into the pre-allocated scratch buffer,
         // then remove. Dictionary.keys is a lazy non-allocating view; _recycleBuffer
         // reuses its backing store after warm-up — no per-frame allocations.
         _recycleBuffer.removeAll(keepingCapacity: true)
         for index in visibleCells.keys where !keepRange.contains(index) {
             _recycleBuffer.append(index)
+        }
+        // VelocityUI-socg C4: bound FrozenBitmapStore to the working range — this is the
+        // RecyclerView "you are told what left, you don't scan" model `evict(_ keysThatLeft:)`
+        // was built for (its own doc). Only pays the `flatBlockKeys` cost for items ACTUALLY
+        // leaving this frame (steady state: `_recycleBuffer` is empty, this is a no-op) — never
+        // a full-window scan. `flatBlockKeys` (not `flatBlocks`) — only `BlockKey`s are needed
+        // here, so there is no reason to build the full `Block`s (contentHash, Fragment, layout)
+        // just to immediately discard everything but the key.
+        if !_recycleBuffer.isEmpty {
+            var leavingKeys: Set<BlockKey> = []
+            for index in _recycleBuffer where index < tables.count && index < items.count {
+                flatBlockKeys(for: tables[index], itemID: items[index].id, into: &leavingKeys)
+            }
+            if !leavingKeys.isEmpty {
+                environment.frozenBitmapStore.evict(leavingKeys)
+            }
         }
         for index in _recycleBuffer {
             _pendingFragmentIndices.remove(index)
@@ -955,6 +1175,13 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         // already-mounted cells at later indices (not touched by this loop, since
         // visibleCells[index] == nil gates re-entry) may need repositioning below.
         var didRefineDuringMount = false
+
+        // VelocityUI-socg C4: the entering-window counterpart to the eviction above — declares
+        // freshly-mounted items' blocks as (newly) in-window so FrozenBitmapStore's `window` set
+        // stays accurate for `handleMemoryPressure()`. Only pays `flatBlockKeys`' cost for items
+        // that are ACTUALLY newly mounted this pass (the `if let keptCell` branch below
+        // `continue`s before reaching this), never for already-resident cells.
+        var enteringKeys: Set<BlockKey> = []
 
         // Mount newly visible cells.
         for index in visRange {
@@ -976,6 +1203,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             let frame = resolvedFrames[index]
             let table = tables[index]
             let cell  = dequeue(kind: .standard)
+
+            if index < items.count {
+                flatBlockKeys(for: table, itemID: items[index].id, into: &enteringKeys)
+            }
 
             cell.prepareForReuse(for: table.itemID)
 
@@ -1030,6 +1261,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
             layer.addSublayer(cell.layer)
             visibleCells[index] = cell
+        }
+
+        if !enteringKeys.isEmpty {
+            environment.frozenBitmapStore.admit(enteringKeys)
         }
 
         // A LayoutCache-hit refine above only shifts resolvedFrames for indices AFTER the

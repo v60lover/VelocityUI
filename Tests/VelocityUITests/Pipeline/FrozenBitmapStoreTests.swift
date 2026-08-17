@@ -96,8 +96,8 @@ private struct ReferenceLRU {
 ///
 /// Acceptance-criterion -> test mapping (VelocityUI-socg phase C1):
 /// - "evict(_ keysThatLeft:) removes exactly the named keys in O(k); currentByteTotal drops by
-///    their cost; other entries and the tracked window are untouched"
-///     -> testEvictKeysThatLeft_RemovesExactlyNamedKeys_OtherEntriesAndWindowUntouched
+///    their cost; other entries are untouched"
+///     -> testEvictKeysThatLeft_RemovesExactlyNamedKeys_OtherEntriesUntouched
 ///     -> testEvictKeysThatLeft_KeyNotCached_IsSilentlyIgnored
 ///     -> testEvictKeysThatLeft_EmptySet_IsNoOp
 ///     -> testEvictKeysThatLeft_LargeCache_OnlyNamedKeysRemoved
@@ -107,6 +107,23 @@ private struct ReferenceLRU {
 ///     -> testBudgetForWindowCount_UsesMeasuredDefaultPerBitmapCost
 ///     -> testBudgetForWindowCount_NonPositiveInputs_ReturnZero
 ///     -> testWindowCountConvenienceInit_ProducesSameBudgetAsStaticHelper
+///
+/// Acceptance-criterion -> test mapping (VelocityUI-socg review finding #2 — driver-sized budget,
+/// GROW-ONLY per the follow-up device-regression fix — see `sizeBudget`'s docstring for why item
+/// count underestimates a single streaming message's real block-count footprint):
+/// - "sizeBudget(forWindowCount:) raises byteBudget above the constructed floor when the real
+///    working-range footprint exceeds it"
+///     -> testSizeBudget_SetsByteBudget_MatchesStaticHelper
+///     -> testSizeBudget_GrowingBudget_EvictsNothing
+/// - "sizeBudget(forWindowCount:) never lowers byteBudget below the constructed floor, and never
+///    evicts to reach a smaller budget — a small windowCount is a safe no-op"
+///     -> testSizeBudget_SmallerWindow_IsNoOp_FloorHolds
+///
+/// Acceptance-criterion -> test mapping (VelocityUI-socg review finding #1 — window stays bounded):
+/// - "evict(_ keysThatLeft:) subtracts the departed keys from the tracked window, so admit
+///    (union)/evict (subtract) form a symmetric pair and handleMemoryPressure() can still drop
+///    out-of-window entries after a long scroll — window does not grow unbounded"
+///     -> testEvictKeysThatLeft_RemovesFromWindow_SoMemoryPressureCanDropThem
 final class FrozenBitmapStoreTests: XCTestCase {
 
     // MARK: - Fixtures
@@ -359,11 +376,13 @@ final class FrozenBitmapStoreTests: XCTestCase {
 
     // MARK: - Acceptance (VelocityUI-socg C1): evict(_ keysThatLeft:) delta eviction
 
-    /// Covers the C1 acceptance criterion verbatim: removes exactly the named keys, drops
-    /// `currentByteTotal` by their summed cost, and leaves every other entry AND the tracked
-    /// `window` untouched — `evict(_ keysThatLeft:)` is a pure incremental removal, unlike
-    /// `evict(outside:)` which replaces `window` wholesale with its argument.
-    func testEvictKeysThatLeft_RemovesExactlyNamedKeys_OtherEntriesAndWindowUntouched() {
+    /// Covers the C1 acceptance criterion verbatim: removes exactly the named keys and drops
+    /// `currentByteTotal` by their summed cost, leaving every OTHER entry untouched. Also
+    /// subtracts the named keys from the tracked `window` (see `evict(_:)`'s docstring) — a
+    /// separate test (`testEvictKeysThatLeft_RemovesFromWindow_SoMemoryPressureCanDropThem`)
+    /// exercises that half of the contract directly; this test only asserts on cached
+    /// entries/byte total, which `window` membership does not affect for keys never re-stored.
+    func testEvictKeysThatLeft_RemovesExactlyNamedKeys_OtherEntriesUntouched() {
         let store = FrozenBitmapStore(byteBudget: 1_000_000)
         let a = key(0), b = key(1), c = key(2), survivor = key(3)
 
@@ -372,8 +391,7 @@ final class FrozenBitmapStoreTests: XCTestCase {
         store.store(makeFakeCGImage(width: 5, height: 5), size: .zero, cost: 100, for: c)
         store.store(makeFakeCGImage(width: 5, height: 5), size: .zero, cost: 100, for: survivor)
 
-        // Declare a working-range window that includes every key above — evict(_:) must leave
-        // this window completely untouched (unlike evict(outside:), which would replace it).
+        // Declare a working-range window that includes every key above.
         let window: Set<BlockKey> = [a, b, c, survivor]
         store.admit(window)
         XCTAssertEqual(store.currentByteTotal, 400)
@@ -387,12 +405,12 @@ final class FrozenBitmapStoreTests: XCTestCase {
         XCTAssertEqual(store.currentByteTotal, 200, "currentByteTotal must drop by exactly the evicted keys' summed cost")
         XCTAssertTrue(store.debugValidateListInvariants())
 
-        // Window untouched: handleMemoryPressure() (which sweeps everything OUTSIDE the tracked
-        // window) must still treat c and survivor as in-window — proving evict(_:) never called
-        // through to anything that mutates `window`.
+        // c and survivor were never named in keysThatLeft, so evict(_:)'s window subtraction
+        // (a, b only) leaves them in `window` — handleMemoryPressure() (which sweeps everything
+        // OUTSIDE the tracked window) must still spare both.
         store.handleMemoryPressure()
-        XCTAssertNotNil(store.bitmap(for: c), "window must be untouched by evict(_:) — memory pressure must still spare c")
-        XCTAssertNotNil(store.bitmap(for: survivor), "window must be untouched by evict(_:) — memory pressure must still spare survivor")
+        XCTAssertNotNil(store.bitmap(for: c), "c was never named in keysThatLeft — must still be in window, spared by memory pressure")
+        XCTAssertNotNil(store.bitmap(for: survivor), "survivor was never named in keysThatLeft — must still be in window, spared by memory pressure")
     }
 
     func testEvictKeysThatLeft_KeyNotCached_IsSilentlyIgnored() {
@@ -408,6 +426,42 @@ final class FrozenBitmapStoreTests: XCTestCase {
         XCTAssertEqual(store.currentByteTotal, 100, "Evicting a key that was never cached must not change currentByteTotal")
         XCTAssertNotNil(store.bitmap(for: cached), "An unrelated cached key must survive a miss-only evict(_:) call")
         XCTAssertTrue(store.debugValidateListInvariants())
+    }
+
+    /// Regression guard for review finding #1: without `evict(_:)` subtracting from `window`,
+    /// `admit`(union-only) and `evict(_:)`(never touching window) let `window` grow forever and
+    /// eventually become a superset of every cached key, which makes `handleMemoryPressure()`
+    /// silently drop nothing. Proves the fix by re-admitting a key that left, then WITHOUT
+    /// re-`admit`-ing it, running `handleMemoryPressure()` and observing it gets dropped anyway
+    /// (because `evict(_:)` already removed it from `window`) — the exact failure mode that
+    /// would NOT reproduce if `window` had stayed a stale superset.
+    func testEvictKeysThatLeft_RemovesFromWindow_SoMemoryPressureCanDropThem() {
+        let store = FrozenBitmapStore(byteBudget: 1_000_000)
+        let a = key(0), b = key(1), c = key(2)
+
+        store.store(makeFakeCGImage(width: 5, height: 5), size: .zero, cost: 100, for: a)
+        store.store(makeFakeCGImage(width: 5, height: 5), size: .zero, cost: 100, for: b)
+        store.store(makeFakeCGImage(width: 5, height: 5), size: .zero, cost: 100, for: c)
+        store.admit([a, b, c]) // all three declared in-window
+
+        // a "leaves the working range" — the driver's per-frame evict(_:) call.
+        store.evict([a])
+        XCTAssertNil(store.bitmap(for: a), "Sanity: a's bitmap is gone immediately after evict(_:)")
+
+        // a re-enters the cache (e.g. scrolled back into view briefly and got re-frozen) WITHOUT
+        // a matching admit(_:) call — standing in for the gap between a cache re-store and the
+        // driver's next per-frame admit/evict pass.
+        store.store(makeFakeCGImage(width: 5, height: 5), size: .zero, cost: 100, for: a)
+        XCTAssertNotNil(store.bitmap(for: a), "Sanity: a is cached again before the memory-pressure sweep")
+
+        store.handleMemoryPressure()
+
+        // With the fix, evict([a]) already subtracted a from `window`, so a is NOT in-window —
+        // handleMemoryPressure() (which drops everything outside `window`) drops it. Without the
+        // fix, `window` would still contain a (never subtracted), so a would incorrectly survive.
+        XCTAssertNil(store.bitmap(for: a), "a must be dropped — evict(_:) removed it from window, so memory pressure treats it as out-of-window")
+        XCTAssertNotNil(store.bitmap(for: b), "b was never evicted — must still be in window, spared by memory pressure")
+        XCTAssertNotNil(store.bitmap(for: c), "c was never evicted — must still be in window, spared by memory pressure")
     }
 
     func testEvictKeysThatLeft_EmptySet_IsNoOp() {
@@ -493,6 +547,77 @@ final class FrozenBitmapStoreTests: XCTestCase {
             XCTAssertNotNil(store.bitmap(for: k), "A budget sized from the real window must not self-evict an in-window block")
         }
         XCTAssertEqual(store.currentByteTotal, windowCount * perBitmapCost)
+    }
+
+    // MARK: - Acceptance (VelocityUI-socg C4): sizeBudget(forWindowCount:) driver-triggered resize
+    //
+    // GROW-ONLY (device-regression follow-up): `budget(forWindowCount:)` sizes from `windowCount`
+    // ITEMS, but a single streaming chat message is ONE item holding MANY frozen text BLOCKS — item
+    // count systematically underestimates the real block footprint. Sizing straight from item count
+    // (e.g. `windowCount: 1`) would fall well below what one tall message needs and evict still-live
+    // blocks. `sizeBudget` therefore only ever RAISES `byteBudget` above the constructed floor
+    // (`init(byteBudget:)`'s value, 16 MB by default) — it never lowers it, and never evicts.
+
+    /// `sizeBudget(forWindowCount:)` is the seam `FeedScrollView.updateVisibleCells` calls once
+    /// the real working-range item count is known (the store itself is constructed before the
+    /// feed exists, so it cannot know this at `init`). Constructs with a TINY floor so the
+    /// computed window budget clearly exceeds it, proving the raise actually took effect (not
+    /// just "stayed at the floor," which a no-op implementation could also satisfy).
+    func testSizeBudget_SetsByteBudget_MatchesStaticHelper() {
+        let store = FrozenBitmapStore(byteBudget: 1) // floor far below any real window budget
+
+        store.sizeBudget(forWindowCount: 16, perBitmapCost: 400_000, headroom: 2.0)
+
+        let expected = FrozenBitmapStore.budget(forWindowCount: 16, perBitmapCost: 400_000, headroom: 2.0)
+        XCTAssertEqual(store.byteBudget, expected, "The raise must win over the tiny floor")
+    }
+
+    /// The device-regression this test guards against: a small `windowCount` (e.g. the flagship's
+    /// one-item streaming-message window) computes a budget BELOW the constructed floor. That must
+    /// be a safe no-op — `byteBudget` stays at the floor, and NOTHING already cached is evicted to
+    /// chase a smaller ceiling. Without this floor, `sizeBudget(forWindowCount: 1)` would starve a
+    /// single tall message's frozen blocks as it grows past a couple of them.
+    func testSizeBudget_SmallerWindow_IsNoOp_FloorHolds() {
+        let store = FrozenBitmapStore(byteBudget: 1_000_000) // the floor
+        let a = key(0), b = key(1), c = key(2), d = key(3)
+
+        store.store(makeFakeCGImage(width: 5, height: 5), size: .zero, cost: 100, for: a)
+        store.store(makeFakeCGImage(width: 5, height: 5), size: .zero, cost: 100, for: b)
+        store.store(makeFakeCGImage(width: 5, height: 5), size: .zero, cost: 100, for: c)
+        store.store(makeFakeCGImage(width: 5, height: 5), size: .zero, cost: 100, for: d)
+        XCTAssertEqual(store.currentByteTotal, 400)
+
+        // A small window (e.g. windowCount == 1, mirroring the flagship's one-item streaming
+        // window) computes a budget far below the 1,000,000-byte floor.
+        let smallWindowBudget = FrozenBitmapStore.budget(forWindowCount: 1, perBitmapCost: 100, headroom: 1.0)
+        XCTAssertLessThan(smallWindowBudget, 1_000_000, "Precondition: the small-window budget must actually be below the floor")
+
+        store.sizeBudget(forWindowCount: 1, perBitmapCost: 100, headroom: 1.0)
+
+        XCTAssertEqual(store.byteBudget, 1_000_000, "byteBudget must stay at the constructed floor — a smaller window must never lower it")
+        XCTAssertEqual(store.currentByteTotal, 400, "Nothing must be evicted just because a smaller window was reported")
+        XCTAssertNotNil(store.bitmap(for: a))
+        XCTAssertNotNil(store.bitmap(for: b))
+        XCTAssertNotNil(store.bitmap(for: c))
+        XCTAssertNotNil(store.bitmap(for: d))
+        XCTAssertTrue(store.debugValidateListInvariants())
+    }
+
+    /// Growing the budget (the only direction the live driver ever calls this in — see
+    /// `FeedScrollView._frozenBudgetWindowCount`'s monotonic-up guard) must never evict anything.
+    func testSizeBudget_GrowingBudget_EvictsNothing() {
+        let store = FrozenBitmapStore(windowCount: 2, perBitmapCost: 100, headroom: 1.0) // budget == 200
+        let a = key(0), b = key(1)
+        store.store(makeFakeCGImage(width: 5, height: 5), size: .zero, cost: 100, for: a)
+        store.store(makeFakeCGImage(width: 5, height: 5), size: .zero, cost: 100, for: b)
+        XCTAssertEqual(store.currentByteTotal, 200)
+
+        store.sizeBudget(forWindowCount: 10, perBitmapCost: 100, headroom: 1.0) // budget == 1000
+
+        XCTAssertEqual(store.byteBudget, 1000)
+        XCTAssertNotNil(store.bitmap(for: a))
+        XCTAssertNotNil(store.bitmap(for: b))
+        XCTAssertEqual(store.currentByteTotal, 200, "Growing the budget must not evict — nothing was over it to begin with")
     }
 
     // MARK: - Stress: intrusive-list invariants under randomized interleaving

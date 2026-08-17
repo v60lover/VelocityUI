@@ -71,22 +71,32 @@ public final class FrozenBitmapStore: Sendable {
         /// widened by `admit(_:)`. `handleMemoryPressure()` reads this to decide what survives
         /// a memory-pressure sweep when no explicit window is passed at the call site.
         var window: Set<BlockKey> = []
+        /// Byte budget for the LRU eviction triggered by every `store(...)` call. Lives in
+        /// `State` (not a `let` on the outer type) because only the DRIVER (`FeedScrollView`)
+        /// discovers the real working-range item count, and only after first layout — the
+        /// composition root builds this store before the feed exists, so the initial value is
+        /// necessarily a placeholder that `sizeBudget(forWindowCount:)` replaces once the real
+        /// window is known. Mutating it under the same lock as every other read/write keeps
+        /// `store(...)`'s eviction pass and a driver-triggered resize from racing each other.
+        var byteBudget: Int
     }
 
     private let state: OSAllocatedUnfairLock<State>
 
-    /// Byte budget for the LRU eviction triggered by every `store(...)` call.
+    /// Current byte budget for the LRU eviction triggered by every `store(...)` call.
     ///
     /// Default sized from VelocityUI-6qd LB3 (measured on device): a text-block bitmap at 2x
     /// scale costs ~0.5 MB, and LB5's working-range simulation observed a flat ~6 MB live-bitmap
     /// footprint across a 50->500 message chat. 16 MB (~32 text blocks worth) gives ~2.5x
     /// headroom above that observed footprint while still being a bounded, multi-MB default —
-    /// callers with a tighter or looser memory budget should pass their own.
-    public let byteBudget: Int
+    /// callers with a tighter or looser memory budget should pass their own, or let the driver
+    /// resize it via `sizeBudget(forWindowCount:)` once the real working range is known.
+    public var byteBudget: Int {
+        state.withLock { $0.byteBudget }
+    }
 
     public init(byteBudget: Int = 16 * 1024 * 1024) {
-        self.byteBudget = byteBudget
-        self.state = OSAllocatedUnfairLock(initialState: State())
+        self.state = OSAllocatedUnfairLock(initialState: State(byteBudget: byteBudget))
     }
 
     /// Sizes `byteBudget` from the real working-range footprint (`windowCount` bitmaps at
@@ -123,6 +133,26 @@ public final class FrozenBitmapStore: Sendable {
     public static func budget(forWindowCount windowCount: Int, perBitmapCost: Int = defaultPerBitmapCost, headroom: Double = 1.5) -> Int {
         guard windowCount > 0, perBitmapCost > 0, headroom > 0 else { return 0 }
         return Int((Double(windowCount) * Double(perBitmapCost) * headroom).rounded(.up))
+    }
+
+    /// Re-sizes the byte budget from the real working-range footprint the DRIVER discovers at
+    /// runtime (this store cannot know the window shape at construction — the env is built before
+    /// the feed). GROW-ONLY: the constructed budget (the `init(byteBudget:)` value, 16 MB by
+    /// default) is a FLOOR this method may only raise above, never lower below —
+    /// `budget(forWindowCount:perBitmapCost:headroom:)` sizes from `windowCount` ITEMS, but the
+    /// flagship scenario (one long streaming chat message) is a single item holding MANY frozen
+    /// text BLOCKS, so item count systematically underestimates the real block-count footprint.
+    /// A budget sized straight from a small item count (e.g. `windowCount: 1`) would fall well
+    /// below what one tall message actually needs, evicting still-live blocks mid-stream and
+    /// destroying the flat-per-update-cost invariant this store exists for. Since the budget
+    /// never decreases, `currentByteTotal` is always already within it — no eviction pass is
+    /// needed here. A caller passing a `windowCount` whose computed budget is below the current
+    /// floor is a safe no-op; the floor holds.
+    public func sizeBudget(forWindowCount windowCount: Int, perBitmapCost: Int = defaultPerBitmapCost, headroom: Double = 1.5) {
+        let newBudget = Self.budget(forWindowCount: windowCount, perBitmapCost: perBitmapCost, headroom: headroom)
+        state.withLock { st in
+            st.byteBudget = max(newBudget, st.byteBudget)
+        }
     }
 
     // MARK: - Synchronous read (scroll/bind path)
@@ -181,7 +211,7 @@ public final class FrozenBitmapStore: Sendable {
                 st.currentByteTotal += cost
                 Self.appendAtTail(&st, node)
             }
-            Self.evictLRUUntilWithinBudget(&st, budget: byteBudget, protecting: key)
+            Self.evictLRUUntilWithinBudget(&st, budget: st.byteBudget, protecting: key)
         }
     }
 
@@ -231,18 +261,23 @@ public final class FrozenBitmapStore: Sendable {
     /// precisely which keys fell out of the working range this frame — no need to test every
     /// cached key against a window `Set` to rediscover that.
     ///
-    /// Unlike `evict(outside:)`, this does NOT touch the tracked `window` — it is a pure,
-    /// incremental removal of the named keys, not a declaration of the new authoritative window.
-    /// Pair with `admit(_:)` (which the driver already calls to declare entering keys) to keep
-    /// `window` in sync with what's actually still in-range; call `evict(outside:)` instead of
-    /// this when the caller wants to both replace the window wholesale AND sweep everything
-    /// outside it (e.g. a width change or a full-list invalidation).
+    /// Also subtracts `keysThatLeft` from the tracked `window` — `admit(_:)` (union, entering)
+    /// and this method (subtract, leaving) are a symmetric incremental pair, unlike
+    /// `evict(outside:)` which replaces `window` wholesale with its argument. Without that
+    /// subtraction, a long-scrolling driver that only ever calls `admit`/`evict(_:)` would leave
+    /// `window` growing forever (every key ever admitted, never removed) — an unbounded leak,
+    /// and it would make `handleMemoryPressure()` a no-op once `window` becomes a superset of
+    /// every currently-cached key. Keeping `window` == the true live working set is what lets
+    /// `handleMemoryPressure()` still drop out-of-window entries after a long scroll.
     ///
-    /// A key with no cached entry is silently ignored (nothing to remove). `currentByteTotal`
-    /// drops by exactly the summed cost of the keys that WERE cached among `keysThatLeft`.
+    /// A key with no cached entry is silently ignored (nothing to remove) but is still
+    /// subtracted from `window` — the driver calls this exactly when a key left the working
+    /// range, whether or not it happened to have a live bitmap. `currentByteTotal` drops by
+    /// exactly the summed cost of the keys that WERE cached among `keysThatLeft`.
     public func evict(_ keysThatLeft: Set<BlockKey>) {
         guard !keysThatLeft.isEmpty else { return }
         state.withLock { st in
+            st.window.subtract(keysThatLeft)
             for key in keysThatLeft {
                 Self.remove(&st, key)
             }

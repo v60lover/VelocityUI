@@ -135,6 +135,18 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
         let measureCountAfterRound1 = feed._blockDiffMeasureCallCount
         let rasterizeCountAfterRound1 = feed._blockDiffRasterizeCallCount
 
+        // PIXELS, not just the cache: block0's frozen bitmap must actually be on screen — a
+        // sublayer's .contents must be the EXACT CGImage instance FrozenBitmapStore holds for
+        // key0, not merely a cache entry nothing ever reads (VelocityUI-socg C3 activation).
+        guard let expectedBlock0Bitmap = feed.renderEnvironment.frozenBitmapStore.bitmap(for: key0) else {
+            return XCTFail("block0 must have a cached bitmap once frozen")
+        }
+        let paintedAfterRound1 = feed._debugPaintedBitmaps(at: 0)
+        XCTAssertEqual(paintedAfterRound1.count, 2,
+            "both blocks (frozen block0 + hot block1) must be painting a real bitmap, not left blank")
+        XCTAssertTrue(paintedAfterRound1.values.contains(where: { $0 === expectedBlock0Bitmap }),
+            "block0's FrozenBitmapStore bitmap must be the exact instance painted on its sublayer")
+
         // Rounds 2-4: only the trailing block grows. block0's key is never touched again.
         for round in 0..<3 {
             feed.items = [ChatItem(id: 0, blocks: [
@@ -166,6 +178,257 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
         }
         XCTAssertEqual(sizeAfterFreeze, sizeFinal,
             "A frozen block's cached size must be invariant across later diffs (mirrors LB4)")
+
+        // PIXELS again: after 3 rounds of pure hot-tail growth, exactly ONE of the two painted
+        // fragments (block0, frozen) must still show the EXACT SAME CGImage instance it painted
+        // after round 1 — the other (block1, hot tail) must show a NEW instance reflecting its
+        // growth. Same fragment id set throughout (the item's block COUNT never changes across
+        // rounds 2-4) — this is what "re-validate C3 reuse by pixels, not just frame height"
+        // (the C3-activation checklist) actually means: not just that a cache entry didn't
+        // change, but that the SAME bitmap stayed on screen without ever being re-painted.
+        let paintedFinal = feed._debugPaintedBitmaps(at: 0)
+        XCTAssertEqual(Set(paintedAfterRound1.keys), Set(paintedFinal.keys),
+            "the same two fragment ids must still be painting — pure hot-tail growth must not "
+            + "change which fragments exist")
+        let unchangedInstanceCount = paintedAfterRound1.keys.filter { paintedAfterRound1[$0] === paintedFinal[$0] }.count
+        let changedInstanceCount = paintedAfterRound1.keys.filter { paintedAfterRound1[$0] !== paintedFinal[$0] }.count
+        XCTAssertEqual(unchangedInstanceCount, 1,
+            "exactly one block (the frozen, unchanged block0) must keep painting the IDENTICAL "
+            + "CGImage instance across all 3 growth rounds — pixel proof of zero re-rasterize")
+        XCTAssertEqual(changedInstanceCount, 1,
+            "exactly one block (the hot tail, block1) must show a NEW CGImage instance reflecting "
+            + "its growth each round")
+
+        await drainFeedWork(feed)
+    }
+
+    // MARK: - C4: suppressed redundant background re-measure
+
+    /// Before this bead's C4 fix, `itemsDidChange` called `workingRange.invalidateAll()`
+    /// UNCONDITIONALLY whenever any item's layout changed — even when the C3 in-place block-diff
+    /// already resolved that item's new height/fragments synchronously. That wiped the WorkingRange
+    /// entries for EVERY item in the ring buffer (not just the one that changed), forcing
+    /// `RenderPipeline.onIndexBoundary`'s next boundary crossing to re-`measureNode` the entire
+    /// prefetch window on every single streaming token. Asserts the opposite: after a pure
+    /// same-position streaming update with no add/remove, EVERY item's WorkingRange entry
+    /// (including neighbors that never changed, and the streamed item itself) is still present —
+    /// zero misses — checked IMMEDIATELY after the one `layoutSubviews()` call that applied the
+    /// update, with no poll/wait for the async pipeline to refill anything.
+    func testStreamingUpdate_PatchesWorkingRangeInPlace_NeighborsNeverInvalidated() async {
+        let feed = makeChatFeed()
+        let itemCount = 5
+        feed.items = (0..<itemCount).map { ChatItem(id: $0, blocks: ["seed message \($0)"]) }
+        feed.layoutSubviews()
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < deadline, feed._workingRangeMissCount(from: 0, to: itemCount) > 0 {
+            await Task.yield()
+            feed.layoutSubviews()
+        }
+        XCTAssertEqual(feed._workingRangeMissCount(from: 0, to: itemCount), 0,
+            "Precondition: all items must be warmed up before the streaming update")
+
+        // Stream a token into item 0 only — every other item's NodeTable is byte-identical, so
+        // the differ classifies them `.survived`, and item 0 classifies `.layoutChanged` at a
+        // stable position (prevIdx == nextIdx) while mounted — exactly C4's fast-path shape.
+        var items = feed.items
+        items[0] = ChatItem(id: 0, blocks: ["seed message 0 grew a lot longer just now"])
+        feed.items = items
+        feed.layoutSubviews()
+
+        // NO poll here — this is the point. If the old unconditional invalidateAll() ran, every
+        // index (including the untouched neighbors) would read back as a miss right now, and
+        // item 0 itself would ALSO miss until the async pipeline refills it later.
+        XCTAssertEqual(feed._workingRangeMissCount(from: 0, to: itemCount), 0,
+            "A pure same-position streaming update must not invalidate ANY WorkingRange entry — "
+            + "neighbors were never touched, and the streamed item was patched synchronously by "
+            + "the C3 block-diff path, not left for the async pipeline to refill")
+
+        await drainFeedWork(feed)
+    }
+
+    /// Companion to `testStreamingUpdate_PatchesWorkingRangeInPlace_NeighborsNeverInvalidated`,
+    /// which proves WorkingRange stays intact on the fast path — this proves the DOWNSTREAM
+    /// effect of that: `itemsDidChange` used to reset `lastNotifiedLeadingIndex = -1`
+    /// UNCONDITIONALLY, which forced `notifyPipelineIfNeeded`'s very next call (in the SAME
+    /// `layoutSubviews()` pass) to spawn a pipeline `Task` even though nothing needed
+    /// re-measuring — the fast path never invalidated anything, so that Task would immediately
+    /// early-return inside `onIndexBoundary`. Streams K same-position tokens into one item and
+    /// asserts `_taskSpawnCount` stays flat (no per-token Task), then confirms the slow path
+    /// (an added item) still spawns exactly as before — the fix must not silently swallow a
+    /// genuine notify.
+    func testStreamingFastPath_DoesNotReNotifyPipelinePerToken() async {
+        let feed = makeChatFeed()
+        let itemCount = 5
+        feed.items = (0..<itemCount).map { ChatItem(id: $0, blocks: ["seed message \($0)"]) }
+        feed.layoutSubviews()
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < deadline, feed._workingRangeMissCount(from: 0, to: itemCount) > 0 {
+            await Task.yield()
+            feed.layoutSubviews()
+        }
+        XCTAssertEqual(feed._workingRangeMissCount(from: 0, to: itemCount), 0,
+            "Precondition: all items must be warmed up before the streaming update")
+
+        // One more settled pass so notifyPipelineIfNeeded's guard has already latched the
+        // current leading index BEFORE the snapshot below — otherwise the snapshot could itself
+        // land right before a legitimate first notify and produce a false failure.
+        feed.layoutSubviews()
+        let spawnCountBeforeStream = feed._taskSpawnCount
+
+        // K same-position token updates into item 0 only — each individually assigned + laid
+        // out (not batched into one coalesced burst), so K separate fast-path passes actually run.
+        let k = 5
+        var accumulated = "seed message 0"
+        for i in 0..<k {
+            accumulated += " tok\(i)"
+            var items = feed.items
+            items[0] = ChatItem(id: 0, blocks: [accumulated])
+            feed.items = items
+            feed.layoutSubviews()
+        }
+
+        XCTAssertEqual(feed._taskSpawnCount, spawnCountBeforeStream,
+            "The fully-resolved C4 fast path must not spawn any additional pipeline Task per "
+            + "streaming token — the leading index never changed and WorkingRange was patched "
+            + "directly in place, so there is nothing for notifyPipelineIfNeeded to re-notify")
+
+        // Slow path sanity: an added item takes the full-invalidation branch (not the fast
+        // path), which must still reset lastNotifiedLeadingIndex and trigger a real notify —
+        // the fix must only skip the reset on the fully-resolved fast path, never generally.
+        var itemsWithAppend = feed.items
+        itemsWithAppend.append(ChatItem(id: itemCount, blocks: ["new item"]))
+        feed.items = itemsWithAppend
+        feed.layoutSubviews()
+
+        XCTAssertGreaterThan(feed._taskSpawnCount, spawnCountBeforeStream,
+            "The slow path (an added item) must still trigger a real pipeline notify — the fast-"
+            + "path fix must not suppress notification generally, only on the resolved fast path")
+
+        await drainFeedWork(feed)
+    }
+
+    /// VelocityUI-socg C4: `FrozenBitmapStore.evict(_ keysThatLeft:)` (Phase B/C1) had no caller
+    /// until this bead wired it into `updateVisibleCells`'s per-scroll-step recycle loop. Streams
+    /// a second block into every item (freezing block0 of each into the store), scrolls far
+    /// enough that the early items fall out of the keep-range, and asserts their frozen entries
+    /// are gone — proving the wiring actually fires, not just that the underlying primitive
+    /// (already covered by FrozenBitmapStoreTests) is correct in isolation.
+    func testScrollingPastFrozenBlocks_EvictsThemFromStore() async {
+        let feed = makeChatFeed()
+        let itemCount = 30
+        feed.items = (0..<itemCount).map { ChatItem(id: $0, blocks: ["seed \($0)"]) }
+        feed.layoutSubviews()
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < deadline, feed._workingRangeMissCount(from: 0, to: itemCount) > 0 {
+            await Task.yield()
+            feed.layoutSubviews()
+        }
+
+        // Finalize block0 for every item (append a second block) so it freezes into the store —
+        // first-mount alone never rasterizes text (VelocityUI-3z4s: no general-path rasterizer
+        // yet), only the in-place block-diff path does.
+        feed.items = (0..<itemCount).map { ChatItem(id: $0, blocks: ["seed \($0)", "block one"]) }
+        feed.layoutSubviews()
+
+        let earlyKey = BlockKey(itemID: 0, index: 0)
+        guard feed.renderEnvironment.frozenBitmapStore.size(for: earlyKey) != nil else {
+            return XCTFail("Precondition: item 0's block0 must be frozen before scrolling")
+        }
+
+        // Scroll far enough that item 0 falls outside keepRange (visRange.lowerBound - prefetchBehindCount).
+        feed.contentOffset = CGPoint(x: 0, y: 100_000)
+        feed.layoutSubviews()
+
+        XCTAssertNil(feed.renderEnvironment.frozenBitmapStore.size(for: earlyKey),
+            "Scrolling item 0 out of the keep-range must evict its frozen block via the per-scroll-step "
+            + "evict(_ keysThatLeft:) wiring — the store must not hold on to it forever")
+
+        await drainFeedWork(feed)
+    }
+
+    /// VelocityUI-socg C4's core streaming-coalesce acceptance criterion: "a burst of K token
+    /// appends within one display frame produces exactly ONE relayout / refineFrames pass, not
+    /// K." `items =` no longer diffs synchronously (see its doc comment) — it defers to the next
+    /// `layoutSubviews()`. Counts `cellBuilder` invocations (which `itemsDidChange` calls once
+    /// per item per pass when `itemSignature` is nil, as here) to prove K assignments made BEFORE
+    /// the next `layoutSubviews()` collapse into exactly one pass, not K.
+    func testStreamingBurst_CoalescesToOneRelayoutPerDisplayFrame() async {
+        let env = makeEnvironment()
+        let feed = FeedScrollView<ChatItem>(environment: env, frame: CGRect(x: 0, y: 0, width: 375, height: 812))
+        final class Counter { var value = 0 }
+        let counter = Counter()
+        feed.cellBuilder = { item in
+            counter.value += 1
+            return VStackNode(spacing: 4) {
+                for text in item.blocks { TextNode(text) }
+            }
+        }
+
+        feed.items = [ChatItem(id: 0, blocks: ["seed"])]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+
+        counter.value = 0
+        // Burst: K token appends, no layoutSubviews between them — simulates K tokens arriving
+        // within the same display frame.
+        let k = 5
+        var accumulated = "seed"
+        for i in 0..<k {
+            accumulated += " tok\(i)"
+            feed.items = [ChatItem(id: 0, blocks: [accumulated])]
+        }
+        XCTAssertEqual(counter.value, 0,
+            "burst assignments before the next layoutSubviews() must not process synchronously — "
+            + "that's what 'deferred to next layoutSubviews' means")
+
+        feed.layoutSubviews()
+        XCTAssertEqual(counter.value, 1,
+            "the K-assignment burst must coalesce into exactly ONE itemsDidChange pass (one "
+            + "cellBuilder call), not K — this is C4's anti-jank invariant for a fast token stream")
+
+        // The coalesced pass must reflect the FINAL accumulated state, not an intermediate one —
+        // diffing against the pre-burst baseline, not against whatever the didSet's oldValue was
+        // on some intermediate assignment.
+        let heightAfter = feed._debugResolvedFrame(at: 0)?.height ?? -1
+        XCTAssertGreaterThan(heightAfter, 0, "final coalesced state must resolve to a real height")
+
+        await drainFeedWork(feed)
+    }
+
+    /// VelocityUI-socg design notes, "Open questions/gaps": C4's WorkingRange patch commits a
+    /// SYNTHETIC `ResolvedLayout` (built directly from the block-diff's resolved fragments, never
+    /// run through the real `measureNode` tree walk) so a LATER appearanceChanged/mediaChanged
+    /// classification on the SAME item — which re-derives fragments via `extractFragments(table:
+    /// layout:)`, not by reading `.fragments` directly — still gets correct output instead of
+    /// walking a bogus/empty tree. Confirms that round-trip directly instead of only by inspection.
+    func testWorkingRangePatch_SyntheticLayoutRoundTripsThroughExtractFragments() async {
+        let feed = makeChatFeed()
+        feed.items = [ChatItem(id: 0, blocks: ["block zero content"])]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+
+        feed.items = [ChatItem(id: 0, blocks: ["block zero content", "block one starts"])]
+        feed.layoutSubviews()
+
+        let painted = feed._debugPaintedBitmaps(at: 0)
+        XCTAssertEqual(painted.count, 2, "Precondition: both blocks must be painting")
+
+        guard let rederived = feed._debugExtractFragmentsFromWorkingRange(at: 0) else {
+            return XCTFail("extractFragments must succeed against the synthetic ResolvedLayout "
+                + "C4 committed — a later appearanceChanged/mediaChanged event on this item "
+                + "depends on this exact code path")
+        }
+        XCTAssertEqual(Set(rederived.map(\.id)), Set(painted.keys),
+            "extractFragments walking the synthetic layout must produce the SAME fragment ids "
+            + "that are actually painted on screen")
+
+        let totalHeight = feed._debugResolvedFrame(at: 0)?.height ?? -1
+        let rederivedMaxY = rederived.map { $0.frame.maxY }.max() ?? -1
+        XCTAssertEqual(rederivedMaxY, totalHeight, accuracy: 0.01,
+            "the re-derived fragments' combined extent must match the item's real resolved height")
 
         await drainFeedWork(feed)
     }
@@ -328,6 +591,133 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
 
         let heightAfterEdit = feed._debugResolvedFrame(at: 0)?.height ?? -1
         XCTAssertGreaterThan(heightAfterEdit, 0, "Item height must still resolve correctly after the edit")
+
+        await drainFeedWork(feed)
+    }
+
+    /// Pixel-level counterpart to `testEditInvalidation_EditingFrozenMidMessageBlock_RefreezesNotStale`
+    /// (which only checks the cache's `size(for:)`) — proves the edit-invalidation path re-paints
+    /// real pixels for the edited block while leaving an UNRELATED frozen block's on-screen bitmap
+    /// completely untouched. Uses three blocks so block index 1 is unambiguously a frozen,
+    /// non-trailing MID block (not the trailing hot tail) at the moment it gets edited.
+    func testEditingFrozenMidBlock_ReRasterizes_UnchangedBlocksStillReused() async {
+        let feed = makeChatFeed()
+
+        // Round 1 (mount): single block — trailing/hot, not yet frozen.
+        feed.items = [ChatItem(id: 0, blocks: ["block zero text"])]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+
+        // Round 2: block0 becomes non-trailing as block1 appears -> block0 finalizes/freezes.
+        feed.items = [ChatItem(id: 0, blocks: ["block zero text", "block one text"])]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+
+        // Round 3: block1 becomes non-trailing as block2 appears -> block1 finalizes/freezes.
+        // block2 is now the new hot trailing block (never frozen).
+        feed.items = [ChatItem(id: 0, blocks: ["block zero text", "block one text", "block two text"])]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+
+        let key0 = BlockKey(itemID: 0, index: 0)
+        let key1 = BlockKey(itemID: 0, index: 1)
+        guard let block0BitmapBeforeEdit = feed.renderEnvironment.frozenBitmapStore.bitmap(for: key0) else {
+            return XCTFail("Precondition: block0 must be frozen before the edit")
+        }
+        guard let block1BitmapBeforeEdit = feed.renderEnvironment.frozenBitmapStore.bitmap(for: key1) else {
+            return XCTFail("Precondition: block1 (the mid block about to be edited) must be frozen before the edit")
+        }
+        let paintedBeforeEdit = feed._debugPaintedBitmaps(at: 0)
+        XCTAssertTrue(paintedBeforeEdit.values.contains(where: { $0 === block0BitmapBeforeEdit }),
+            "Precondition: block0's frozen bitmap must actually be on screen before the edit")
+        XCTAssertTrue(paintedBeforeEdit.values.contains(where: { $0 === block1BitmapBeforeEdit }),
+            "Precondition: block1's frozen bitmap must actually be on screen before the edit")
+
+        // EDIT block1 in place — block0 and block2 keep their exact prior text, only block1's
+        // content differs. Not a streaming append: block1 is index 1, not the trailing block
+        // (index 2), so diff() intentionally leaves it out of both `unchanged` and `hotTail`.
+        feed.items = [ChatItem(id: 0, blocks: ["block zero text", "EDITED block one text", "block two text"])]
+        feed.layoutSubviews()
+
+        guard let block1BitmapAfterEdit = feed.renderEnvironment.frozenBitmapStore.bitmap(for: key1) else {
+            return XCTFail("block1 must still have a cached bitmap after the edit (re-frozen, not evicted-and-abandoned)")
+        }
+        XCTAssertFalse(block1BitmapAfterEdit === block1BitmapBeforeEdit,
+            "block1's cached bitmap must be a NEW CGImage instance after the edit — re-rasterized, not stale")
+
+        let paintedAfterEdit = feed._debugPaintedBitmaps(at: 0)
+        XCTAssertTrue(paintedAfterEdit.values.contains(where: { $0 === block0BitmapBeforeEdit }),
+            "block0 (untouched by the edit) must still paint the EXACT SAME CGImage instance — proof "
+            + "an unrelated block's edit does not collaterally re-rasterize blocks that did not change")
+        XCTAssertFalse(paintedAfterEdit.values.contains(where: { $0 === block1BitmapBeforeEdit }),
+            "The STALE pre-edit block1 bitmap must no longer be painted anywhere on screen")
+        XCTAssertTrue(paintedAfterEdit.values.contains(where: { $0 === block1BitmapAfterEdit }),
+            "block1's NEW post-edit bitmap must actually be on screen — pixels, not just the cache entry")
+
+        await drainFeedWork(feed)
+    }
+
+    // MARK: - FrozenBitmapStore budget: driver-sized, GROW-ONLY above the constructed floor
+    //
+    // `updateVisibleCells` sizes the budget from `keepRange.count`, which counts ITEMS. The
+    // flagship scenario is one streaming chat message — ONE item holding many frozen text
+    // BLOCKS — so a small item-count window (e.g. a 3-item test feed) computes a budget far
+    // below the 16 MB constructed default. `FrozenBitmapStore.sizeBudget` is grow-only (see its
+    // docstring) specifically so this never starves a real message's live blocks: the wiring
+    // below must leave a small window's budget AT the floor, and only RAISE a floor that a real
+    // window's computed budget genuinely exceeds.
+
+    /// With the default 16 MB floor, a small (3-item) window's computed budget is far below it —
+    /// `updateVisibleCells`' `sizeBudget` call must be a no-op here. Proves the driver wiring
+    /// never lowers `byteBudget`, which is the device regression this test guards against.
+    func testFirstLayout_SmallWindow_KeepsDefaultBudgetFloor_NeverLowers() async {
+        let feed = makeChatFeed()
+        let defaultBudget = feed.renderEnvironment.frozenBitmapStore.byteBudget
+
+        // Three short items, viewport tall enough (812pt) that all three are visible at once —
+        // so `keepRange.count` is known exactly: 3 (see the analogous comment this test used to
+        // carry, still accurate: `visRange` collapses to `0..<3` regardless of prefetch counts).
+        let knownWindowCount = 3
+        feed.items = (0..<knownWindowCount).map { ChatItem(id: $0, blocks: ["short block \($0)"]) }
+        feed.layoutSubviews()
+
+        XCTAssertEqual(feed.renderEnvironment.frozenBitmapStore.byteBudget, defaultBudget,
+            "A 3-item window's computed budget is far below the 16 MB floor — sizeBudget must "
+            + "leave byteBudget untouched, never lowering it below the constructed default")
+
+        await drainFeedWork(feed)
+    }
+
+    /// Counterpart proving the wiring genuinely RAISES the budget when the real window's
+    /// computed footprint exceeds the floor: constructs the env's store with a deliberately tiny
+    /// 1-byte floor (below which ANY real window's computed budget sits), lays out a known
+    /// window, and asserts `byteBudget` lands at exactly `budget(forWindowCount:)` for that
+    /// window — the raise wins, not a no-op that would leave `byteBudget` stuck at 1.
+    func testFirstLayout_TinyFloor_RaisesBudgetToRealWindowFootprint() async {
+        let dc = DimensionCache()
+        let videoPrep = VideoPreparationActor()
+        let env = RenderEnvironment(
+            textPool: TextMeasurementPool(),
+            layoutCache: LayoutCache(),
+            dimensionCache: dc,
+            imageActor: ImageActor(dimensionCache: dc),
+            gifActor: GIFActor(),
+            videoController: VideoController(videoPreparation: videoPrep),
+            videoPreparation: videoPrep,
+            frozenBitmapStore: FrozenBitmapStore(byteBudget: 1)
+        )
+        let feed = makeChatFeed(environment: env)
+
+        let knownWindowCount = 3
+        feed.items = (0..<knownWindowCount).map { ChatItem(id: $0, blocks: ["short block \($0)"]) }
+        feed.layoutSubviews()
+
+        let sizedBudget = feed.renderEnvironment.frozenBitmapStore.byteBudget
+        let expectedBudget = FrozenBitmapStore.budget(forWindowCount: knownWindowCount)
+
+        XCTAssertEqual(sizedBudget, expectedBudget,
+            "byteBudget must be raised to exactly budget(forWindowCount:) for the real keepRange item count")
+        XCTAssertGreaterThan(sizedBudget, 1, "Sanity: the budget must actually have been raised above the tiny floor")
 
         await drainFeedWork(feed)
     }
