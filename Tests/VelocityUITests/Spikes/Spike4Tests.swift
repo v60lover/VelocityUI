@@ -9,6 +9,16 @@ import UIKit
 /// zero CATextLayer in source tree, concurrent rasterization is race-free,
 /// and rendering is deterministic across two calls.
 /// @MainActor: TextMeasurementContext created on main, rasterizeText is nonisolated.
+///
+/// VelocityUI-ezo.2.9 extends the corpus to the full parity matrix the epic requires:
+/// ZWJ emoji sequences and dynamic-type variants (velocityui-prompt.md's Spike 4 spec),
+/// plus the attribute catalog (ezo.2.3), line-break/truncation modes (ezo.2.4), and
+/// content-size categories (ezo.2.5) — every dependency that landed. RTL base-writing-
+/// direction (ezo.2.6) is intentionally NOT exercised here: that bead is still open, so
+/// this corpus only covers the glyph-level bidi that already worked before it (the
+/// Arabic/Japanese strings below). Test 5 additionally proves parity holds when text is
+/// measured/rendered as part of a mixed text+image tree through the real Phase 1 pipeline,
+/// not just via isolated TextMeasurementContext/rasterizeText calls.
 @MainActor
 final class Spike4Tests: XCTestCase {
 
@@ -20,6 +30,44 @@ final class Spike4Tests: XCTestCase {
     }
 
     // MARK: - Corpus
+
+    /// Content-size categories cycled across the corpus — ezo.2.5 dynamic-type parity.
+    /// `.unspecified` is included so the no-scaling path stays covered alongside scaling.
+    private static let corpusCategories: [VContentSizeCategory] = [
+        .unspecified, .extraSmall, .large, .extraExtraExtraLarge,
+        .accessibilityMedium, .accessibilityExtraExtraExtraLarge,
+    ]
+
+    /// NSLineBreakMode raw values cycled across the corpus — ezo.2.4 line-break parity.
+    private static let corpusLineBreakModes: [Int] = [
+        NSLineBreakMode.byWordWrapping.rawValue, NSLineBreakMode.byCharWrapping.rawValue,
+        NSLineBreakMode.byClipping.rawValue, NSLineBreakMode.byTruncatingHead.rawValue,
+        NSLineBreakMode.byTruncatingTail.rawValue, NSLineBreakMode.byTruncatingMiddle.rawValue,
+    ]
+
+    /// Font/attribute variant cycled across the corpus — ezo.2.3 attribute-catalog parity.
+    /// Returns (font, underlineStyle, strikethroughStyle, kerning, lineSpacing).
+    private func attributeVariant(_ i: Int) -> (VFontDescriptor, Int, Int, CGFloat, CGFloat) {
+        let base = VFontDescriptor(size: 12 + CGFloat((i % 4) * 4), weight: 0)  // 12, 16, 20, 24
+        switch i % 8 {
+        case 0: return (base, 0, 0, 0, 0)
+        case 1: return (base.italic, 0, 0, 0, 0)
+        case 2: return (base.family("Georgia"), 0, 0, 0, 0)
+        case 3: return (base, NSUnderlineStyle.single.rawValue, 0, 0, 0)
+        case 4: return (base, 0, NSUnderlineStyle.single.rawValue, 0, 0)
+        case 5: return (base, 0, 0, 2.5, 0)
+        case 6: return (base, 0, 0, 0, 6)
+        default: return (base.family("Georgia").italic, NSUnderlineStyle.single.rawValue, NSUnderlineStyle.single.rawValue, 2, 6)
+        }
+    }
+
+    private func corpusColor(_ i: Int) -> VColorDescriptor {
+        switch i % 3 {
+        case 0: return .primary
+        case 1: return VColorDescriptor(red: 0.8, green: 0.1, blue: 0.1, alpha: 1)
+        default: return VColorDescriptor(red: 0.1, green: 0.2, blue: 0.8, alpha: 1)
+        }
+    }
 
     private func makeCorpus() -> [TextDescriptor] {
         let contents: [String] = [
@@ -33,19 +81,54 @@ final class Spike4Tests: XCTestCase {
             "Emoji: 🚀🎯🔥💯",
             "UPPERCASE TEXT ONLY",
             "mixed CASE with digits 1234567890",
+            // ZWJ sequences — velocityui-prompt.md Spike 4 spec-required item, previously missing.
+            "Family ZWJ: 👨‍👩‍👧‍👦",
+            "Profession ZWJ: 👩‍💻 🧑‍🚀",
+            "Rainbow flag ZWJ: 🏳️‍🌈",
+            "Couple kiss ZWJ: 👨‍❤️‍💋‍👨",
         ]
         return (0..<100).map { i in
-            let size: CGFloat = 12 + CGFloat((i % 4) * 4)  // 12, 16, 20, 24
+            let (font, underline, strikethrough, kerning, lineSpacing) = attributeVariant(i)
+            let mode = Self.corpusLineBreakModes[i % Self.corpusLineBreakModes.count]
+            let category = Self.corpusCategories[i % Self.corpusCategories.count]
+            // Truncation coverage (ezo.2.4): every 3rd item gets a tight line limit paired
+            // with content long enough to overflow it.
+            let lineLimit: Int? = i % 3 == 0 ? 2 : nil
             return TextDescriptor(
                 content: contents[i % contents.count],
-                font: VFontDescriptor(size: size, weight: 0),
-                color: VColorDescriptor(red: 0, green: 0, blue: 0, alpha: 1),
-                lineLimit: nil,
-                lineBreakMode: 0,
+                font: font,
+                color: corpusColor(i),
+                lineLimit: lineLimit,
+                lineBreakMode: mode,
+                underlineStyle: underline,
+                strikethroughStyle: strikethrough,
+                kerning: kerning,
+                lineSpacing: lineSpacing,
+                contentSizeCategory: category,
                 layoutHash: i,
                 appearanceHash: 0
             )
         }
+    }
+
+    /// Renders a TextDescriptor's key fields into a single line so a failing assertion names
+    /// the exact descriptor — corpus-based tests no longer need to fail with just an index.
+    private func describe(_ d: TextDescriptor, index: Int? = nil) -> String {
+        var parts: [String] = []
+        if let index { parts.append("index=\(index)") }
+        parts.append("content='\(d.content.prefix(24))'")
+        var font = "font=\(d.font.size)pt/w\(d.font.weight)"
+        if let family = d.font.family { font += "/\(family)" }
+        if d.font.traits.contains(.italic) { font += "/italic" }
+        parts.append(font)
+        parts.append("category=\(d.contentSizeCategory)")
+        parts.append("lineBreakMode=\(d.lineBreakMode)")
+        parts.append("lineLimit=\(String(describing: d.lineLimit))")
+        if d.underlineStyle != 0 { parts.append("underline=\(d.underlineStyle)") }
+        if d.strikethroughStyle != 0 { parts.append("strikethrough=\(d.strikethroughStyle)") }
+        if d.kerning != 0 { parts.append("kerning=\(d.kerning)") }
+        if d.lineSpacing != 0 { parts.append("lineSpacing=\(d.lineSpacing)") }
+        return parts.joined(separator: " ")
     }
 
     // MARK: - Helper: pixel-scan ink height
@@ -95,7 +178,7 @@ final class Spike4Tests: XCTestCase {
             // ink must not overflow measured height by more than 1pt (scale=1 → 1px=1pt)
             if inkH > measured.height + 1 {
                 failures += 1
-                XCTFail("Index \(i) '\(descriptor.content.prefix(30))': ink \(inkH)pt > measured \(measured.height)pt + 1")
+                XCTFail("\(describe(descriptor, index: i)): ink \(inkH)pt > measured \(measured.height)pt + 1")
             }
         }
         print("[Spike4] measure≈render: \(corpus.count - failures)/\(corpus.count) passed")
@@ -196,6 +279,98 @@ final class Spike4Tests: XCTestCase {
             XCTFail("Cannot extract pixel data"); return
         }
         XCTAssertEqual(d1, d2, "Two rasterizations of the same descriptor must be pixel-identical")
+    }
+
+    // MARK: - Test 5: Mixed text + image Phase 1 stack (epic acceptance criterion)
+
+    /// VelocityUI-ezo.2's epic acceptance criterion: Spike 4 parity must hold with text and
+    /// image nodes mixed, on the real Phase 1 stack — not just via the isolated
+    /// TextMeasurementContext/rasterizeText calls the tests above use. Builds NodeTables that
+    /// interleave `.image` and `.text` children under a vstack, runs them through the real
+    /// RenderPipeline -> WorkingRange, and reads back CellEntry.fragments — the exact structure
+    /// FeedScrollView's scroll path consumes — rather than recomputing extractFragments itself.
+    /// Each text fragment's pipeline-resolved frame must still satisfy the 1pt ink-height
+    /// contract; each image fragment must have a non-degenerate frame.
+    func testMixedTextAndImageStackMaintainsParity() async {
+        let corpus = makeCorpus()
+        let pipeline = RenderPipeline()
+        let width: CGFloat = 320
+        let tableCount = 30
+
+        func makeMixedTable(id: Int) -> NodeTable {
+            let textA = corpus[id % corpus.count]
+            let textB = corpus[(id + corpus.count / 2) % corpus.count]
+            return NodeTable(
+                itemID: id,
+                nodes: [
+                    .vstack(VStackDescriptor.test(alignment: 0, spacing: 4)),
+                    .image(ImageDescriptor(
+                        url: nil, aspectRatio: 1.5, contentMode: 0,
+                        cornerRadius: 0, layoutHash: id, appearanceHash: 0
+                    )),
+                    .text(textA),
+                    .image(ImageDescriptor(
+                        url: nil, aspectRatio: 0.75, contentMode: 0,
+                        cornerRadius: 0, layoutHash: id + 1, appearanceHash: 0
+                    )),
+                    .text(textB),
+                ],
+                parentIndices: [-1, 0, 0, 0, 0],
+                layoutHash: id,
+                appearanceHash: 0
+            )
+        }
+
+        let tables = (0..<tableCount).map(makeMixedTable)
+        let range = WorkingRange(capacity: tableCount)
+
+        await pipeline.onIndexBoundary(0, workingRange: range, tables: tables, availableWidth: width, scale: 1)
+        await pipeline.waitForCurrentPrefetch()
+
+        var textFragmentCount = 0
+        var imageFragmentCount = 0
+        var failures = 0
+
+        for tableIndex in tables.indices {
+            guard let entry = range.entry(at: tableIndex) else {
+                failures += 1
+                XCTFail("table \(tableIndex): missing CellEntry after pipeline drain")
+                continue
+            }
+            for fragment in entry.fragments {
+                switch fragment.content {
+                case .text(let descriptor):
+                    textFragmentCount += 1
+                    guard fragment.frame.width > 0, fragment.frame.height > 0 else {
+                        failures += 1
+                        XCTFail("table \(tableIndex) fragment \(fragment.id): \(describe(descriptor)) produced an empty frame in the mixed stack")
+                        continue
+                    }
+                    guard let image = rasterizeText(descriptor, size: fragment.frame.size) else {
+                        failures += 1
+                        XCTFail("table \(tableIndex) fragment \(fragment.id): \(describe(descriptor)) rasterizeText returned nil in the mixed stack")
+                        continue
+                    }
+                    let inkHeight = actualContentHeight(in: image)
+                    if inkHeight > fragment.frame.height + 1 {
+                        failures += 1
+                        XCTFail("table \(tableIndex) fragment \(fragment.id): \(describe(descriptor)) ink \(inkHeight)pt > pipeline frame \(fragment.frame.height)pt + 1")
+                    }
+                case .image:
+                    imageFragmentCount += 1
+                    if fragment.frame.width <= 0 || fragment.frame.height <= 0 {
+                        failures += 1
+                        XCTFail("table \(tableIndex) fragment \(fragment.id): image fragment has a degenerate frame \(fragment.frame) in the mixed stack")
+                    }
+                case .geometry:
+                    break
+                }
+            }
+        }
+
+        XCTAssertEqual(textFragmentCount, tableCount * 2, "expected 2 text fragments per mixed table")
+        XCTAssertEqual(imageFragmentCount, tableCount * 2, "expected 2 image fragments per mixed table")
+        print("[Spike4] mixed text+image stack: \(tableCount) tables, \(textFragmentCount) text fragments, \(imageFragmentCount) image fragments, \(failures) failures")
     }
 }
 #endif
