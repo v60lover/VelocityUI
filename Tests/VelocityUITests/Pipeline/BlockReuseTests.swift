@@ -89,7 +89,9 @@ final class BlockReuseTests: XCTestCase {
 
     // MARK: - Spy (no UIKit — proves call-count assertions run without linking it)
 
-    private final class MeasureRasterizeSpy {
+    /// Internal (not `private`) so `IncrementalMarkdownParserTests` can reuse this exact spy for
+    /// its own call-count assertions instead of inventing a parallel one.
+    final class MeasureRasterizeSpy {
         private(set) var measureCallCount = 0
         private(set) var rasterizeCallCount = 0
         private(set) var measuredContents: [String] = []
@@ -185,49 +187,116 @@ final class BlockReuseTests: XCTestCase {
         }
     }
 
-    // MARK: - Acceptance 3: diff
+    // MARK: - Acceptance 3: diff (VelocityUI-k8qe generalized this to split at a `frontier`
+    // argument instead of hard-coding "only previous.count-1 can be hot" — see BlockDiff.swift's
+    // doc. `frontier: new.count - 1` reproduces the original single-hot-tail model exactly.)
 
-    func testDiff_IdenticalBlocks_AllUnchanged() {
+    func testDiff_AllBlocksSealedAndIdentical_AllUnchanged() {
         let previous = [textBlock(index: 0, content: "a"), textBlock(index: 1, content: "b")]
         let new = [textBlock(index: 0, content: "a"), textBlock(index: 1, content: "b")]
-        let d = diff(previous: previous, new: new)
+        let d = diff(previous: previous, new: new, frontier: new.count)
         XCTAssertEqual(d.unchanged, [0, 1])
-        XCTAssertNil(d.hotTail)
-        XCTAssertEqual(d.appended, [])
+        XCTAssertEqual(d.sealedChanged, [])
+        XCTAssertEqual(d.volatile, new.count..<new.count, "frontier == new.count means the volatile range is empty")
     }
 
-    func testDiff_LastBlockGrew_DetectsHotTail() {
+    func testDiff_TrailingBlockAtFrontier_ReportsVolatile() {
         let previous = [textBlock(index: 0, content: "frozen"), textBlock(index: 1, content: "grow")]
         let new = [textBlock(index: 0, content: "frozen"), textBlock(index: 1, content: "growing more")]
-        let d = diff(previous: previous, new: new)
+        let d = diff(previous: previous, new: new, frontier: new.count - 1)
         XCTAssertEqual(d.unchanged, [0])
-        XCTAssertEqual(d.hotTail, 1)
-        XCTAssertEqual(d.appended, [])
+        XCTAssertEqual(d.sealedChanged, [])
+        XCTAssertEqual(d.volatile, 1..<2)
     }
 
-    func testDiff_NewBlockSpawned_DetectsAppended() {
+    func testDiff_NewBlockSpawnedBeforeFrontier_DetectsSealedChanged() {
         let previous = [textBlock(index: 0, content: "frozen"), textBlock(index: 1, content: "final content")]
         let new = [
             textBlock(index: 0, content: "frozen"),
             textBlock(index: 1, content: "final content, now closed out"),
             textBlock(index: 2, content: ""),
         ]
-        let d = diff(previous: previous, new: new)
+        let d = diff(previous: previous, new: new, frontier: new.count - 1)
         XCTAssertEqual(d.unchanged, [0])
-        XCTAssertEqual(d.hotTail, 1)
-        XCTAssertEqual(d.appended, [2])
+        XCTAssertEqual(d.sealedChanged, [1])
+        XCTAssertEqual(d.volatile, 2..<3)
     }
 
-    func testDiff_EarlyBlockChange_ExcludedFromUnchangedAndHotTail() {
-        // Only the LAST previous block may legitimately change under the streaming model. An
-        // early block changing is outside the model; diff must not silently misreport it as
-        // either unchanged or hotTail.
+    func testDiff_SealedBlockChanges_ReportedAsSealedChangedNotUnchanged() {
+        // The sealed prefix [0, frontier) IS still compared against `previous` (unlike the hot
+        // region, which is never compared at all) — an out-of-model edit to already-sealed
+        // content must still be caught, not silently classified as unchanged.
         let previous = [textBlock(index: 0, content: "a"), textBlock(index: 1, content: "b")]
         let new = [textBlock(index: 0, content: "a-EDITED"), textBlock(index: 1, content: "b")]
-        let d = diff(previous: previous, new: new)
-        XCTAssertEqual(d.unchanged, [1], "Index 1 (truly unchanged, and not the tail) must still be reported")
-        XCTAssertNil(d.hotTail, "Index 0 differing is not the trailing index, so it must not be reported as hotTail")
-        XCTAssertFalse(d.unchanged.contains(0))
+        let d = diff(previous: previous, new: new, frontier: new.count)
+        XCTAssertEqual(d.unchanged, [1], "Index 1 (truly unchanged) must still be reported")
+        XCTAssertEqual(d.sealedChanged, [0], "Index 0 differing must be reported, not silently trusted as unchanged")
+    }
+
+    func testDiff_FrontierZero_EverythingVolatileEvenIfIdentical() {
+        // frontier 0 means nothing is sealed yet — the hot region is never compared/trusted for
+        // reuse, so even byte-identical content must stay volatile (always re-rendered), never
+        // frozen. This is the sealed/hot contract itself, not an edge-case bug.
+        let previous = [textBlock(index: 0, content: "a")]
+        let new = [textBlock(index: 0, content: "a")]
+        let d = diff(previous: previous, new: new, frontier: 0)
+        XCTAssertEqual(d.unchanged, [])
+        XCTAssertEqual(d.sealedChanged, [])
+        XCTAssertEqual(d.volatile, 0..<1)
+    }
+
+    // MARK: - T1: volatile region block-COUNT changes across a diff step (grow / shrink)
+
+    /// The volatile region can gain blocks in one step (a paragraph re-segments into a multi-item
+    /// list) — `diff` must still report `volatile == frontier..<new.count` and classify the
+    /// stable sealed prefix correctly, even though `new.count != previous.count`.
+    func testDiff_VolatileRegionGrows_ParagraphToListInOneStep() {
+        let previous = [
+            textBlock(index: 0, content: "sealed zero"),
+            textBlock(index: 1, content: "sealed one"),
+            textBlock(index: 2, content: "a paragraph that will become a list"),
+        ]
+        let new = [
+            textBlock(index: 0, content: "sealed zero"),
+            textBlock(index: 1, content: "sealed one"),
+            textBlock(index: 2, content: "- item one"),
+            textBlock(index: 3, content: "- item two"),
+        ]
+        let frontier = 2
+        let d = diff(previous: previous, new: new, frontier: frontier)
+
+        XCTAssertEqual(d.unchanged, [0, 1], "the stable sealed prefix must be reported unchanged")
+        XCTAssertEqual(d.sealedChanged, [])
+        XCTAssertEqual(d.volatile, frontier..<new.count,
+            "volatile must span the new, LARGER tail — split is by frontier, not by a fixed count")
+        XCTAssertEqual(d.volatile.count, 2, "the volatile region grew from 1 block to 2")
+    }
+
+    /// The volatile region can also lose blocks in one step (a two-row table collapses into a
+    /// single paragraph) — same split-at-frontier contract, shrink direction. Also exercises a
+    /// sealed-prefix block that genuinely changed (`sealedChanged`), alongside one that didn't
+    /// (`unchanged`), to prove the sealed-prefix classification is independent of what happens to
+    /// the volatile region's block count.
+    func testDiff_VolatileRegionShrinks_TableToParagraphInOneStep() {
+        let previous = [
+            textBlock(index: 0, content: "sealed zero"),
+            textBlock(index: 1, content: "sealed one OLD"),
+            textBlock(index: 2, content: "| a | b |"),
+            textBlock(index: 3, content: "| 1 | 2 |"),
+        ]
+        let new = [
+            textBlock(index: 0, content: "sealed zero"),
+            textBlock(index: 1, content: "sealed one NEW"),
+            textBlock(index: 2, content: "actually just a paragraph now"),
+        ]
+        let frontier = 2
+        let d = diff(previous: previous, new: new, frontier: frontier)
+
+        XCTAssertEqual(d.unchanged, [0], "index 0 is genuinely unchanged")
+        XCTAssertEqual(d.sealedChanged, [1], "index 1 differs from previous and must be reported sealedChanged")
+        XCTAssertEqual(d.volatile, frontier..<new.count,
+            "volatile must span the new, SMALLER tail — split is by frontier, not by a fixed count")
+        XCTAssertEqual(d.volatile.count, 1, "the volatile region shrank from 2 blocks to 1")
     }
 
     // MARK: - Acceptance 3 (freeze): measures + rasterizes exactly once, caches under BlockKey
@@ -263,13 +332,14 @@ final class BlockReuseTests: XCTestCase {
         XCTAssertTrue(bitmap1 === bitmap2, "The cached bitmap must be the SAME instance, not a re-render")
     }
 
-    // MARK: - Acceptance 4: diff + freeze integration — zero-recompute, hotTail, appended-once, LB4
+    // MARK: - Acceptance 4: diff + freeze integration — zero-recompute, sealedChanged-once, LB4
 
-    /// Drives `diff`/`freeze` the way a future bind-site driver will: only freeze indices
-    /// strictly before the current trailing index (`new.count - 1`) — the trailing block is
-    /// always still growing and must never be cached prematurely. Mirrors VelocityUI-6qd's
-    /// block-freeze model exactly, now through the production Block/BlockKey/FreezeState/
-    /// diff/freeze types instead of the spike's ad hoc dictionaries.
+    /// Drives `diff`/`freeze` the way the bind site does: freeze exactly `d.sealedChanged`
+    /// (everything in `d.volatile`, including the current trailing block, is never frozen — by
+    /// construction it always lies at/after `frontier`, which the caller below always passes as
+    /// `new.count - 1`, the trailing index). Mirrors VelocityUI-6qd's block-freeze model exactly,
+    /// now through the production Block/BlockKey/FreezeState/diff/freeze types instead of the
+    /// spike's ad hoc dictionaries.
     @discardableResult
     private func applyDiffFreezing(
         diff d: BlockDiff,
@@ -278,33 +348,33 @@ final class BlockReuseTests: XCTestCase {
         cache: inout [BlockKey: FreezeState],
         spy: MeasureRasterizeSpy
     ) -> BlockDiff {
-        let finalizable = (d.hotTail.map { [$0] } ?? []) + d.appended
-        for i in finalizable where i < new.count - 1 {
+        for i in d.sealedChanged {
             freeze(new[i], scale: scale, cache: &cache, measure: spy.measure, rasterize: spy.rasterize)
         }
         return d
     }
 
-    func testDiffFreeze_UnchangedZeroCalls_HotTailRecomputes_AppendedMeasuredOnce() {
+    func testDiffFreeze_UnchangedZeroCalls_SealedChangedRecomputes_VolatileNeverCached() {
         let spy = MeasureRasterizeSpy()
         var cache: [BlockKey: FreezeState] = [:]
 
         // Round 1: block0 completes and block1 spawns — block0 must be frozen this round.
         var previous = [textBlock(index: 0, content: "")]
         var new: [Block] = [textBlock(index: 0, content: "block zero final content"), textBlock(index: 1, content: "")]
-        var d = diff(previous: previous, new: new)
+        var d = diff(previous: previous, new: new, frontier: new.count - 1)
         applyDiffFreezing(diff: d, new: new, scale: 2, cache: &cache, spy: spy)
         XCTAssertEqual(spy.measureCallCount, 1)
         XCTAssertEqual(spy.rasterizeCallCount, 1)
         guard case .frozen = cache[new[0].key] else { return XCTFail("block0 must be frozen after round 1") }
 
-        // Round 2: block0 unchanged (must be ZERO additional calls); block1 grows — it is the
-        // hotTail and recomputes, but it is still trailing so it must NOT be cached.
+        // Round 2: block0 unchanged (must be ZERO additional calls); block1 grows — it is
+        // volatile (at the frontier) and recomputes on the caller's own measurement path, but it
+        // is still trailing so it must NOT be cached by this helper.
         previous = new
         new = [previous[0], textBlock(index: 1, content: "growing")]
-        d = diff(previous: previous, new: new)
+        d = diff(previous: previous, new: new, frontier: new.count - 1)
         XCTAssertEqual(d.unchanged, [0])
-        XCTAssertEqual(d.hotTail, 1)
+        XCTAssertEqual(d.volatile, 1..<2)
         applyDiffFreezing(diff: d, new: new, scale: 2, cache: &cache, spy: spy)
         XCTAssertEqual(spy.measureCallCount, 1, "block0 is unchanged — ZERO additional measure calls")
         XCTAssertEqual(spy.rasterizeCallCount, 1, "block0 is unchanged — ZERO additional rasterize calls")
@@ -314,10 +384,10 @@ final class BlockReuseTests: XCTestCase {
         // freeze call); block0 remains untouched.
         previous = new
         new = [previous[0], textBlock(index: 1, content: "growing, now complete"), textBlock(index: 2, content: "")]
-        d = diff(previous: previous, new: new)
+        d = diff(previous: previous, new: new, frontier: new.count - 1)
         XCTAssertEqual(d.unchanged, [0])
-        XCTAssertEqual(d.hotTail, 1)
-        XCTAssertEqual(d.appended, [2])
+        XCTAssertEqual(d.sealedChanged, [1])
+        XCTAssertEqual(d.volatile, 2..<3)
         applyDiffFreezing(diff: d, new: new, scale: 2, cache: &cache, spy: spy)
         XCTAssertEqual(spy.measureCallCount, 2, "block1 is measured exactly once, on the round it finalizes")
         XCTAssertEqual(spy.rasterizeCallCount, 2)
@@ -331,7 +401,7 @@ final class BlockReuseTests: XCTestCase {
 
         let previous0 = [textBlock(index: 0, content: "")]
         let new: [Block] = [textBlock(index: 0, content: "final"), textBlock(index: 1, content: "")]
-        let d0 = diff(previous: previous0, new: new)
+        let d0 = diff(previous: previous0, new: new, frontier: new.count - 1)
         applyDiffFreezing(diff: d0, new: new, scale: 2, cache: &cache, spy: spy)
 
         guard case .frozen(let checkpointSize, let checkpointBitmap) = cache[new[0].key] else {
@@ -347,7 +417,7 @@ final class BlockReuseTests: XCTestCase {
             var next = previous
             next[tailIndex] = textBlock(index: tailIndex, content: "round \(round) final content")
             next.append(textBlock(index: tailIndex + 1, content: ""))
-            let d = diff(previous: previous, new: next)
+            let d = diff(previous: previous, new: next, frontier: next.count - 1)
             applyDiffFreezing(diff: d, new: next, scale: 2, cache: &cache, spy: spy)
             previous = next
         }
@@ -418,9 +488,9 @@ final class BlockReuseTests: XCTestCase {
         let largeBlock = block(descriptor(category: .accessibilityExtraExtraExtraLarge, layoutHash: 2))
         XCTAssertNotEqual(smallBlock.contentHash, largeBlock.contentHash,
             "a content-size-category change must perturb Block.contentHash for the SAME BlockKey")
-        let d = diff(previous: [smallBlock], new: [largeBlock])
+        let d = diff(previous: [smallBlock], new: [largeBlock], frontier: 1)
         XCTAssertTrue(d.unchanged.isEmpty, "the category-changed block must not classify as unchanged")
-        XCTAssertEqual(d.hotTail, 0, "the sole block differing must be reported as the block to re-measure")
+        XCTAssertEqual(d.sealedChanged, [0], "the sole block differing must be reported as sealedChanged, so it gets re-measured")
 
         var cache2: [BlockKey: FreezeState] = [:]
         guard case .frozen(let largeSize, let largeBitmap) = freeze(
@@ -497,9 +567,8 @@ extension BlockReuseTests {
             }
 
             // ---- FROZEN/DIFF PATH: freeze only finalized blocks (never the trailing one). ----
-            let d = diff(previous: previousBlocks, new: newBlocks)
-            let finalizable = (d.hotTail.map { [$0] } ?? []) + d.appended
-            for i in finalizable where i < newBlocks.count - 1 {
+            let d = diff(previous: previousBlocks, new: newBlocks, frontier: newBlocks.count - 1)
+            for i in d.sealedChanged {
                 let start = Date()
                 freeze(
                     newBlocks[i], scale: scale, cache: &cache,

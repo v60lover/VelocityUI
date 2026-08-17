@@ -750,10 +750,14 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
               !newBlocks.isEmpty
         else { return nil }
 
-        let d = diff(previous: previousBlocks, new: newBlocks)
-        let unchangedSet = Set(d.unchanged)
-        let overlap = min(previousBlocks.count, newBlocks.count)
+        // frontier: new.count - 1 — the pre-split NodeTable path has no incremental-parser
+        // sealed/hot contract of its own, so every block except the trailing one is treated as
+        // sealed, matching the original single-hot-tail model EXCEPT that the trailing block is
+        // no longer eligible for verbatim frozen-store reuse even when it is byte-identical to
+        // `previous` — it always lands in `volatile` and gets re-measured, a safe-direction but
+        // real divergence (BlockDiff.swift's `diff(previous:new:frontier:)` doc explains why).
         let trailingIndex = newBlocks.count - 1
+        let d = diff(previous: previousBlocks, new: newBlocks, frontier: trailingIndex)
         let store = environment.frozenBitmapStore
 
         // Measures (+ rasterizes, + freezes into `store` when `persist`) one TEXT block via the
@@ -809,44 +813,43 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
         var heights = [CGFloat](repeating: 0, count: newBlocks.count)
         var textBitmaps: [Int: CGImage] = [:]
-        for i in 0..<overlap {
+        for i in d.unchanged {
             let block = newBlocks[i]
-            if unchangedSet.contains(i) {
-                if case .text = block.fragment.content {
-                    if let size = store.size(for: block.key) {
-                        // bump LRU recency — verbatim reuse — and thread the SAME CGImage
-                        // instance through so the caller paints it without a re-rasterize.
-                        textBitmaps[block.fragment.id] = store.bitmap(for: block.key)
-                        heights[i] = size.height
-                    } else {
-                        // Self-heal: logically unchanged per diff(), but the store has no entry
-                        // yet (first pass through C3 for this block, or it was LRU/pressure-
-                        // evicted) — recompute once and (re-)freeze it, same as a finalized tail.
-                        guard let result = measureAndMaybeFreeze(block, persist: true) else { return nil }
-                        heights[i] = result.height
-                        textBitmaps[block.fragment.id] = result.bitmap
-                    }
+            if case .text = block.fragment.content {
+                if let size = store.size(for: block.key) {
+                    // bump LRU recency — verbatim reuse — and thread the SAME CGImage
+                    // instance through so the caller paints it without a re-rasterize.
+                    textBitmaps[block.fragment.id] = store.bitmap(for: block.key)
+                    heights[i] = size.height
                 } else {
-                    // Non-text, unchanged: trust the previous real fragment height directly —
-                    // never frozen/measured here (image/geometry reuse lives in ImageActor).
-                    heights[i] = previousFragments[i].frame.height
+                    // Self-heal: logically unchanged per diff(), but the store has no entry
+                    // yet (first pass through C3 for this block, or it was LRU/pressure-
+                    // evicted) — recompute once and (re-)freeze it, same as a finalized tail.
+                    guard let result = measureAndMaybeFreeze(block, persist: true) else { return nil }
+                    heights[i] = result.height
+                    textBitmaps[block.fragment.id] = result.bitmap
                 }
-                continue
+            } else {
+                // Non-text, unchanged: trust the previous real fragment height directly —
+                // never frozen/measured here (image/geometry reuse lives in ImageActor).
+                heights[i] = previousFragments[i].frame.height
             }
-            // Not in `unchanged`: either the trailing block grew (`d.hotTail == i`), or — per
-            // `diff(previous:new:)`'s doc — an EARLY block changed, which the streaming model
-            // does not expect and `diff` intentionally leaves unclassified (VelocityUI-socg
-            // design note #4, "edit-invalidation"). Both cases need the same treatment here:
-            // this block's content changed, so re-measure it and, if it has closed out (it is
-            // not the new trailing block), freeze + store the result — overwriting any stale
-            // entry `store` already held for this key (`store(...)` updates in place; see its
-            // doc — no separate evict-then-store two-step needed for correctness).
-            let persist = i != trailingIndex
-            guard let result = measureAndMaybeFreeze(block, persist: persist) else { return nil }
-            heights[i] = result.height
-            textBitmaps[block.fragment.id] = result.bitmap
         }
-        for i in overlap..<newBlocks.count {
+        // `sealedChanged`: every index here is < frontier (== trailingIndex for this pre-split
+        // caller) by construction, so it always closed out this update — always persist.
+        // `volatile`: the still-growing region; persist only if a later index hasn't yet become
+        // the new trailing block (matches the original "persist = i != trailingIndex" rule
+        // applied uniformly to every non-unchanged index). This matches the original single-
+        // hot-tail persist behavior for every index EXCEPT the trailing block itself: that index
+        // no longer falls into `unchanged`/verbatim-frozen-store reuse even when it happens to
+        // match `previous` byte-for-byte — it always lands in `volatile` and gets re-measured, a
+        // safe-direction (never stale) but real divergence — see BlockDiff.swift's doc.
+        for i in d.sealedChanged {
+            guard let result = measureAndMaybeFreeze(newBlocks[i], persist: true) else { return nil }
+            heights[i] = result.height
+            textBitmaps[newBlocks[i].fragment.id] = result.bitmap
+        }
+        for i in d.volatile {
             let persist = i != trailingIndex
             guard let result = measureAndMaybeFreeze(newBlocks[i], persist: persist) else { return nil }
             heights[i] = result.height
