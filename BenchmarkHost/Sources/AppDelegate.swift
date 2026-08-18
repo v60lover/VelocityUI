@@ -25,7 +25,36 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         }
 
         let rootVC: UIViewController
-        if let runtime = args.runtime, args.liveHUD {
+        if args.scenario == .stream {
+            // VelocityUI-only today (VelocityUI-xxf7) — comparison runtimes are an explicit
+            // follow-up, not this bead's scope. A `--runtime` other than velocityui (or the
+            // `--live` manual-HUD flow, which this scenario doesn't support) is a misuse of the
+            // CLI, not a recoverable state — fail loudly instead of silently ignoring the flag.
+            guard args.runtime == nil || args.runtime == .velocityUI, !args.liveHUD else {
+                FileHandle.standardError.write(Data(
+                    "error: --scenario=stream only supports --runtime velocityui (or omitted), and does not support --live\n".utf8
+                ))
+                exit(1)
+            }
+            harness.runtimeLabel = "velocityui-stream"
+            let orchestrator = BenchmarkOrchestrator(args: args, harness: harness)
+            orchestrator.onComplete = { report in
+                if let data = try? JSONEncoder().encode(report),
+                   let json = String(data: data, encoding: .utf8) {
+                    print("<<<BENCHMARK_REPORT_BEGIN>>>")
+                    print(json)
+                    print("<<<BENCHMARK_REPORT_END>>>")
+                }
+                exit(0)
+            }
+            rootVC = StreamBenchmarkViewController(
+                harness: harness,
+                orchestrator: orchestrator,
+                hotBlockRasterizeEnabled: args.hotBlockRasterizeMode == .on,
+                includeInterleavedBlocks: !args.streamTextOnly,
+                tokensPerSecond: args.streamTokensPerSecond
+            )
+        } else if let runtime = args.runtime, args.liveHUD {
             // Interactive live-HUD mode: open this runtime directly with no orchestrator,
             // so its LiveMetricsHUD attaches for hand-scroll profiling (no measured pass).
             harness.runtimeLabel = runtime.rawValue

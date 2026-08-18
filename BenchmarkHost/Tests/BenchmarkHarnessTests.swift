@@ -110,6 +110,33 @@ final class BenchmarkHarnessTests: XCTestCase {
         XCTAssertEqual(net, 0.0)
     }
 
+    // MARK: - Early/late split (VelocityUI-xxf7 stream scenario ON/OFF comparison)
+
+    func testSummarizeEarlyLateTooFewSamplesReturnsZero() {
+        let (early, late) = AllocationProbe.summarizeEarlyLate(samples: [100, 200])
+        XCTAssertEqual(early, 0.0)
+        XCTAssertEqual(late, 0.0)
+    }
+
+    func testSummarizeEarlyLateFlatRateAgreesInBothHalves() {
+        // Constant +10/sample growth throughout — both halves should read the same rate.
+        let samples = stride(from: 0, through: 1_000, by: 10).map { $0 }
+        let (early, late) = AllocationProbe.summarizeEarlyLate(samples: samples)
+        XCTAssertEqual(early, 10.0, accuracy: 0.5)
+        XCTAssertEqual(late, 10.0, accuracy: 0.5)
+    }
+
+    func testSummarizeEarlyLateDetectsGrowingRate_TheOFFShape() {
+        // Flat for the first half (ON-like), steeply growing in the second (OFF-like) —
+        // this is the shape the stream scenario's toggle is built to distinguish.
+        var samples: [Int] = []
+        for i in 0..<50 { samples.append(i) }           // +1/sample
+        for i in 0..<50 { samples.append(50 + i * 20) }  // +20/sample
+        let (early, late) = AllocationProbe.summarizeEarlyLate(samples: samples)
+        XCTAssertLessThan(early, late, "late-half rate must exceed early-half rate for a growing-cost stream")
+        XCTAssertGreaterThan(late / early, 5.0, "late/early ratio must clearly separate the two regimes")
+    }
+
     // MARK: - Percentile helper
 
     func testPercentileEdgeCases() {

@@ -51,13 +51,17 @@ final class AllocationProbe: @unchecked Sendable {
         source.resume()
     }
 
-    func stop() -> (peakPhysFootprintBytes: Int, avgAllocDeltaPerFrameBytes: Double, netAllocDeltaPerFrameBytes: Double) {
+    /// `samples` is the raw 60 Hz phys_footprint series the whole-run summary was computed
+    /// from — BenchmarkHarness.stopCapture() also feeds it to `summarizeEarlyLate(samples:)`
+    /// for the `stream` scenario's ON/OFF toggle comparison (VelocityUI-xxf7).
+    func stop() -> (peakPhysFootprintBytes: Int, avgAllocDeltaPerFrameBytes: Double, netAllocDeltaPerFrameBytes: Double, samples: [Int]) {
         timerRefLock.withLock {
             $0?.source.cancel()
             $0 = nil
         }
         let samples = samplesLock.withLock { $0 }
-        return AllocationProbe.summarize(samples: samples)
+        let summary = AllocationProbe.summarize(samples: samples)
+        return (summary.peakPhysFootprintBytes, summary.avgAllocDeltaPerFrameBytes, summary.netAllocDeltaPerFrameBytes, samples)
     }
 
     /// - `avgAllocDeltaPerFrameBytes` is the mean size of a positive footprint step —
@@ -82,6 +86,22 @@ final class AllocationProbe: @unchecked Sendable {
             ? Double(samples[samples.count - 1] - samples[0]) / Double(samples.count - 1)
             : 0.0
         return (peak, avg, net)
+    }
+
+    /// Splits `samples` at the midpoint and computes `netAllocDeltaPerFrameBytes` (see
+    /// `summarize`'s doc) separately over each half — the early-vs-late comparison
+    /// BenchmarkHost's `stream` scenario (VelocityUI-xxf7) uses to show whether per-token cost
+    /// stays flat (incremental hot-block rasterize ON, VelocityUI-x4q0) or grows with message
+    /// size (OFF), mirroring spike 6qd's late/early ratio methodology. The midpoint sample is
+    /// shared by both halves (each half needs ≥ 2 samples to form even one delta) so a
+    /// borderline sample count still yields two real deltas rather than one degenerate half.
+    /// Internal for unit tests — pure function over sample array.
+    static func summarizeEarlyLate(samples: [Int]) -> (early: Double, late: Double) {
+        guard samples.count > 2 else { return (0.0, 0.0) }
+        let mid = samples.count / 2
+        let early = summarize(samples: Array(samples[0...mid])).netAllocDeltaPerFrameBytes
+        let late = summarize(samples: Array(samples[mid...])).netAllocDeltaPerFrameBytes
+        return (early, late)
     }
 
     // Internal for unit tests — readable by the probe test that allocates a known buffer.

@@ -29,6 +29,9 @@ PROFILES="slow,medium,max"
 SCENARIOS="cold,warm,replay"
 ITEMS=1000
 DURATION=30
+STREAM_HOT_RASTERIZE="on,off"
+STREAM_RATE=20
+STREAM_TEXT_ONLY=0
 OUTPUT=""
 SKIP_BUILD=0
 SKIP_INSTALL=0
@@ -50,10 +53,26 @@ Matrix overrides:
   --runtimes CSV          Comma-separated runtime keys (default: all 5)
   --modes CSV             idiomatic,raw (default: both)
   --profiles CSV          slow,medium,max (default: all)
-  --scenarios CSV         cold,warm,replay (default: all three; replay is the
-                          Phase 1 contract scenario Q5 gates on — see VelocityUI-ah8.4)
+  --scenarios CSV         cold,warm,replay,stream (default: cold,warm,replay; replay is the
+                          Phase 1 contract scenario Q5 gates on — see VelocityUI-ah8.4; stream
+                          is the streaming-text scenario — see the "stream" section below)
   --items N               Dataset size (default 1000)
   --duration N            Measurement seconds per run (default 30)
+
+Stream scenario (VelocityUI-xxf7) — include "stream" in --scenarios:
+  VelocityUI-only, ignores --runtimes/--modes/--profiles/--items entirely (a single growing
+  message, not a scrolled item list). Driven by its own axis instead:
+    --stream-hot-rasterize CSV   on,off (default: both) — runs the SAME token stream with
+                                 VelocityUI's incremental hot-block rasterizer (VelocityUI-x4q0)
+                                 on vs off, so MemoryStats.lateOverEarlyAllocRatio in the two
+                                 reports can be compared directly (ON should read ~flat, OFF
+                                 should grow — mirrors spike 6qd's late/early ratio).
+    --stream-rate N              tokens/second StreamDriver appends at (default 20)
+    --stream-text-only           No AsyncImageNode/SpacerNode interleaved (no network/decode
+                                 dependency) — the acceptance-criteria run does NOT set this;
+                                 use it for a quick device sanity pass or to isolate pure
+                                 text-rasterizer cost from image-decode noise.
+  Writes stream__hot-<on|off>__<run>.json, independent of the runtime/mode/profile matrix above.
 
 Output:
   --output DIR            Results directory (default: results/<UTC-timestamp>)
@@ -91,6 +110,9 @@ while [[ $# -gt 0 ]]; do
     --scenarios) SCENARIOS="$2"; shift 2 ;;
     --items) ITEMS="$2"; shift 2 ;;
     --duration) DURATION="$2"; shift 2 ;;
+    --stream-hot-rasterize) STREAM_HOT_RASTERIZE="$2"; shift 2 ;;
+    --stream-rate) STREAM_RATE="$2"; shift 2 ;;
+    --stream-text-only) STREAM_TEXT_ONLY=1; shift ;;
     --output) OUTPUT="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     --skip-install) SKIP_INSTALL=1; shift ;;
@@ -214,6 +236,34 @@ install_app() {
 
 # ─── Launch one combo ────────────────────────────────────────────────────────
 
+# Extracts the BenchmarkReport JSON AppDelegate printed between its delimiters out of $raw into
+# $out, and validates it parses. Shared by launch_one and launch_stream_one so the two never
+# drift on what counts as a successful capture. Returns nonzero (leaving $raw for inspection) on
+# either failure.
+extract_report_json() {
+  local raw="$1" out="$2"
+
+  awk '
+    /<<<BENCHMARK_REPORT_BEGIN>>>/ { capture=1; next }
+    /<<<BENCHMARK_REPORT_END>>>/   { capture=0 }
+    capture { print }
+  ' "$raw" > "$out"
+
+  if [[ ! -s "$out" ]]; then
+    echo "  ↳ no JSON captured — raw output at $raw" >&2
+    return 1
+  fi
+
+  # Basic structural validation — orchestrator must never store unparseable JSON.
+  if ! python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$out" 2>/dev/null; then
+    echo "  ↳ JSON parse failed at $out — raw output at $raw" >&2
+    return 1
+  fi
+
+  rm -f "$raw"
+  return 0
+}
+
 # Launches the app with given args and writes the extracted JSON to $OUT.
 # Returns nonzero if the JSON couldn't be extracted (no exit-cleanup on caller).
 launch_one() {
@@ -248,26 +298,47 @@ launch_one() {
       > "$raw" 2>&1 || true
   fi
 
-  # Extract JSON between the delimiters AppDelegate prints.
-  awk '
-    /<<<BENCHMARK_REPORT_BEGIN>>>/ { capture=1; next }
-    /<<<BENCHMARK_REPORT_END>>>/   { capture=0 }
-    capture { print }
-  ' "$raw" > "$out"
+  extract_report_json "$raw" "$out"
+}
 
-  if [[ ! -s "$out" ]]; then
-    echo "  ↳ no JSON captured — raw output at $raw" >&2
-    return 1
+# Launches the `stream` scenario with a given --hot-rasterize mode ("on"/"off") and writes the
+# extracted JSON to $out. Ignores the runtime/mode/profile/items axes entirely — VelocityUI-xxf7
+# is VelocityUI-only, a single growing message, not a scrolled item list. See launch_one for the
+# simctl/devicectl split this mirrors.
+launch_stream_one() {
+  local hot_rasterize="$1" out="$2"
+  local raw="${out}.raw"
+
+  # Array (not a string) so an unset --stream-text-only cleanly contributes zero args — avoids
+  # the classic "" placeholder arg bug when splicing an optional flag into a fixed argv.
+  local extra_args=()
+  [[ $STREAM_TEXT_ONLY -eq 1 ]] && extra_args+=(--stream-text-only)
+
+  if [[ $USE_SIM -eq 1 ]]; then
+    xcrun simctl terminate "$SIM_DEVICE" "$BUNDLE_ID" 2>/dev/null || true
+    xcrun simctl launch --console-pty --terminate-running-process \
+      "$SIM_DEVICE" "$BUNDLE_ID" \
+      --scenario stream \
+      --hot-rasterize "$hot_rasterize" \
+      --stream-rate "$STREAM_RATE" \
+      --duration "$DURATION" \
+      ${extra_args[@]+"${extra_args[@]}"} \
+      > "$raw" 2>&1 || true
+  else
+    xcrun devicectl device process launch \
+      --device "$DEVICE" \
+      --console \
+      --terminate-existing \
+      "$BUNDLE_ID" \
+      --scenario stream \
+      --hot-rasterize "$hot_rasterize" \
+      --stream-rate "$STREAM_RATE" \
+      --duration "$DURATION" \
+      ${extra_args[@]+"${extra_args[@]}"} \
+      > "$raw" 2>&1 || true
   fi
 
-  # Basic structural validation — orchestrator must never store unparseable JSON.
-  if ! python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$out" 2>/dev/null; then
-    echo "  ↳ JSON parse failed at $out — raw output at $raw" >&2
-    return 1
-  fi
-
-  rm -f "$raw"
-  return 0
+  extract_report_json "$raw" "$out"
 }
 
 # ─── Run matrix ──────────────────────────────────────────────────────────────
@@ -277,8 +348,26 @@ IFS=',' read -ra MODE_ARR <<< "$MODES"
 IFS=',' read -ra PROFILE_ARR <<< "$PROFILES"
 IFS=',' read -ra SCENARIO_ARR <<< "$SCENARIOS"
 
-TOTAL=$(( ${#RUNTIME_ARR[@]} * ${#MODE_ARR[@]} * ${#PROFILE_ARR[@]} * ${#SCENARIO_ARR[@]} * RUNS ))
-log "matrix: ${#RUNTIME_ARR[@]} runtimes × ${#MODE_ARR[@]} modes × ${#PROFILE_ARR[@]} profiles × ${#SCENARIO_ARR[@]} scenarios × $RUNS runs = $TOTAL launches"
+# `stream` (VelocityUI-xxf7) doesn't belong in the runtime×mode×profile matrix below — it has its
+# own dedicated axis (--stream-hot-rasterize) and ignores runtime/mode/profile/items entirely.
+# Split it out here so it's not combined nonsensically with those, then run it separately.
+RUN_STREAM=0
+MATRIX_SCENARIO_ARR=()
+for scenario in "${SCENARIO_ARR[@]}"; do
+  if [[ "$scenario" == "stream" ]]; then
+    RUN_STREAM=1
+  else
+    MATRIX_SCENARIO_ARR+=("$scenario")
+  fi
+done
+
+IFS=',' read -ra STREAM_HOT_RASTERIZE_ARR <<< "$STREAM_HOT_RASTERIZE"
+
+MATRIX_TOTAL=$(( ${#RUNTIME_ARR[@]} * ${#MODE_ARR[@]} * ${#PROFILE_ARR[@]} * ${#MATRIX_SCENARIO_ARR[@]} * RUNS ))
+STREAM_TOTAL=$(( RUN_STREAM == 1 ? ${#STREAM_HOT_RASTERIZE_ARR[@]} * RUNS : 0 ))
+TOTAL=$(( MATRIX_TOTAL + STREAM_TOTAL ))
+log "matrix: ${#RUNTIME_ARR[@]} runtimes × ${#MODE_ARR[@]} modes × ${#PROFILE_ARR[@]} profiles × ${#MATRIX_SCENARIO_ARR[@]} scenarios × $RUNS runs"\
+" + stream: $STREAM_TOTAL launches = $TOTAL total"
 
 build_app
 resolve_app_path
@@ -288,33 +377,64 @@ FAIL_COUNT=0
 DONE=0
 START_TS=$(date +%s)
 
-for runtime in "${RUNTIME_ARR[@]}"; do
-  for mode in "${MODE_ARR[@]}"; do
-    for profile in "${PROFILE_ARR[@]}"; do
-      for scenario in "${SCENARIO_ARR[@]}"; do
-        for ((run=1; run<=RUNS; run++)); do
-          DONE=$((DONE + 1))
-          out="$OUTPUT/${runtime}__${mode}__${profile}__${scenario}__${run}.json"
-          log "[$DONE/$TOTAL] $runtime $mode $profile $scenario run=$run"
-          if ! launch_one "$runtime" "$mode" "$profile" "$scenario" "$out"; then
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-          fi
+# macOS's system /bin/bash (3.2) throws "unbound variable" under `set -u` when expanding
+# "${ARR[@]}" on a genuinely empty array — guard explicitly rather than relying on the modern-
+# bash-only empty-array idiom, since MATRIX_SCENARIO_ARR is empty whenever --scenarios is
+# "stream" alone.
+if [[ ${#MATRIX_SCENARIO_ARR[@]} -gt 0 ]]; then
+  for runtime in "${RUNTIME_ARR[@]}"; do
+    for mode in "${MODE_ARR[@]}"; do
+      for profile in "${PROFILE_ARR[@]}"; do
+        for scenario in "${MATRIX_SCENARIO_ARR[@]}"; do
+          for ((run=1; run<=RUNS; run++)); do
+            DONE=$((DONE + 1))
+            out="$OUTPUT/${runtime}__${mode}__${profile}__${scenario}__${run}.json"
+            log "[$DONE/$TOTAL] $runtime $mode $profile $scenario run=$run"
+            if ! launch_one "$runtime" "$mode" "$profile" "$scenario" "$out"; then
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+            fi
+          done
         done
       done
     done
   done
-done
+fi
+
+if [[ $RUN_STREAM -eq 1 ]]; then
+  for hot_rasterize in "${STREAM_HOT_RASTERIZE_ARR[@]}"; do
+    for ((run=1; run<=RUNS; run++)); do
+      DONE=$((DONE + 1))
+      out="$OUTPUT/stream__hot-${hot_rasterize}__${run}.json"
+      log "[$DONE/$TOTAL] stream hot-rasterize=$hot_rasterize run=$run"
+      if ! launch_stream_one "$hot_rasterize" "$out"; then
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+      fi
+    done
+  done
+fi
 
 ELAPSED=$(( $(date +%s) - START_TS ))
 log "matrix done in ${ELAPSED}s — $FAIL_COUNT failures"
 
 # ─── Report ──────────────────────────────────────────────────────────────────
 
-if [[ $SKIP_REPORT -eq 0 ]]; then
+# BenchmarkReporter's filename parser expects the runtime__mode__profile__scenario__run shape
+# launch_one writes (see Loader.swift) — stream__hot-<on|off>__<run>.json doesn't match it and is
+# skipped with a stderr warning, not a crash. Only skip invoking the reporter outright when there
+# are ZERO matrix files for it to find at all (a --scenarios stream-only run) — Loader.load()
+# throws noReports in that case, which would otherwise fail the whole script via `set -e` even
+# though the stream launches above already succeeded.
+if [[ $SKIP_REPORT -eq 0 && $MATRIX_TOTAL -gt 0 ]]; then
   log "generating report…"
   REPORTER_DIR="$SCRIPTS_DIR/BenchmarkReporter"
   swift run -c release --package-path "$REPORTER_DIR" BenchmarkReporter "$OUTPUT"
   log "report at $OUTPUT/report.csv + $OUTPUT/report.md"
+fi
+
+if [[ $RUN_STREAM -eq 1 ]]; then
+  log "stream reports at $OUTPUT/stream__hot-*.json — not aggregated by BenchmarkReporter (VelocityUI-xxf7"\
+" out of scope); compare memoryStats.lateOverEarlyAllocRatio across hot-on vs hot-off files directly"\
+" (ON should read ~1.0, OFF should read well above 1.0 — mirrors spike 6qd's late/early ratio)."
 fi
 
 if [[ $FAIL_COUNT -gt 0 ]]; then

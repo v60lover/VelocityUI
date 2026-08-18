@@ -77,6 +77,40 @@ struct BenchmarkReport: Sendable, Codable {
         /// (samples.last − samples.first) / (samples.count − 1). The true per-frame
         /// allocation rate; may be negative after eviction. See VelocityUI-ah8.4.
         let netAllocDeltaPerFrameBytes: Double
+        /// `netAllocDeltaPerFrameBytes` computed over just the first half of the capture's
+        /// AllocationProbe samples. Always computed (cheap, same shape as
+        /// `netAllocDeltaPerFrameBytes`), but only meaningful for the `stream` scenario
+        /// (VelocityUI-xxf7): a token-driven capture's early half corresponds to early tokens
+        /// (StreamDriver appends at constant cadence), so early-vs-late is directly comparable
+        /// to spike 6qd's late/early ratio. 0 for a capture too short to split (≤ 2 samples).
+        let earlyNetAllocDeltaPerFrameBytes: Double
+        /// `netAllocDeltaPerFrameBytes` computed over the second half of the capture's samples.
+        /// See `earlyNetAllocDeltaPerFrameBytes`'s doc.
+        let lateNetAllocDeltaPerFrameBytes: Double
+        /// `lateNetAllocDeltaPerFrameBytes / earlyNetAllocDeltaPerFrameBytes` — the stream
+        /// scenario's ON/OFF regression signal: ON should read close to 1.0 (flat per-token
+        /// cost as the message grows), OFF should read far above 1.0 (cost grows with message
+        /// size), mirroring spike 6qd's ~1.2x-vs-~16x shape. `nil` when `earlyNetAllocDeltaPerFrameBytes`
+        /// isn't meaningfully positive (≤ 1 byte/frame) — dividing by a near-zero or negative
+        /// baseline produces an unstable ratio, so the two raw numbers above are the source of
+        /// truth in that case.
+        let lateOverEarlyAllocRatio: Double?
+
+        init(
+            peakPhysFootprintBytes: Int,
+            avgAllocDeltaPerFrameBytes: Double,
+            netAllocDeltaPerFrameBytes: Double,
+            earlyNetAllocDeltaPerFrameBytes: Double = 0,
+            lateNetAllocDeltaPerFrameBytes: Double = 0,
+            lateOverEarlyAllocRatio: Double? = nil
+        ) {
+            self.peakPhysFootprintBytes = peakPhysFootprintBytes
+            self.avgAllocDeltaPerFrameBytes = avgAllocDeltaPerFrameBytes
+            self.netAllocDeltaPerFrameBytes = netAllocDeltaPerFrameBytes
+            self.earlyNetAllocDeltaPerFrameBytes = earlyNetAllocDeltaPerFrameBytes
+            self.lateNetAllocDeltaPerFrameBytes = lateNetAllocDeltaPerFrameBytes
+            self.lateOverEarlyAllocRatio = lateOverEarlyAllocRatio
+        }
     }
 
     /// One entry per MXMetricPayload received during the capture window.

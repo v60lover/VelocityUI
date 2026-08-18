@@ -276,6 +276,44 @@ final class BenchmarkOrchestratorTests: XCTestCase {
         driver.stop()
     }
 
+    // MARK: - stream scenario (VelocityUI-xxf7)
+
+    func testStreamReadyStartsCaptureAndEmitsTokensInOrder() {
+        let harness = MockBenchmarkHarness()
+        let orchestrator = BenchmarkOrchestrator(args: LaunchArguments(scenario: .stream), harness: harness)
+        var received: [String] = []
+        orchestrator.streamReady(tokens: ["a", "b", "c"], tokensPerSecond: 1_000) { received.append($0) }
+        XCTAssertEqual(harness.startCaptureCount, 1, "stream: startCapture must fire synchronously on streamReady")
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.2))
+        XCTAssertEqual(received, ["a", "b", "c"])
+        orchestrator.stopCapture()
+    }
+
+    func testStreamReadyIsIdempotent() {
+        let harness = MockBenchmarkHarness()
+        let orchestrator = BenchmarkOrchestrator(args: LaunchArguments(scenario: .stream), harness: harness)
+        orchestrator.streamReady(tokens: ["a"], tokensPerSecond: 1_000) { _ in }
+        orchestrator.streamReady(tokens: ["a"], tokensPerSecond: 1_000) { _ in }
+        XCTAssertEqual(harness.startCaptureCount, 1, "second streamReady must not restart capture")
+        orchestrator.stopCapture()
+    }
+
+    // Regression guard for the didStartStream/didStart split: streamReady must not be blocked by
+    // a prior scrollViewReady call (and vice versa) — the two entry points are independent so a
+    // StreamBenchmarkViewController that only ever calls streamReady can't accidentally be
+    // starved by a `didStart` some other code path already flipped.
+    func testStreamReadyIsIndependentOfScrollViewReadyGuard() {
+        let harness = MockBenchmarkHarness()
+        let orchestrator = BenchmarkOrchestrator(args: LaunchArguments(scenario: .cold), harness: harness)
+        let sv = makeScrollView(contentHeight: 2_000)
+        orchestrator.scrollViewReady(sv)
+        XCTAssertEqual(harness.startCaptureCount, 1)
+        orchestrator.streamReady(tokens: ["a"], tokensPerSecond: 1_000) { _ in }
+        XCTAssertEqual(harness.startCaptureCount, 2,
+            "streamReady must not be blocked by scrollViewReady's separate didStart guard")
+        orchestrator.stopCapture()
+    }
+
     // MARK: - replay scenario (VelocityUI-ah8.4): startCapture must not fire synchronously
 
     // Warm-up must complete (and quiesce-wait pass) before the measured

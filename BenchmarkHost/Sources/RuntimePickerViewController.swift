@@ -15,6 +15,14 @@ final class RuntimePickerViewController: UITableViewController {
         ("Texture ASCollectionNode", .texture),
     ]
 
+    /// VelocityUI-xxf7's `stream` scenario isn't a `LaunchArguments.Runtime` — it's VelocityUI-only
+    /// and isn't driven by scrolling, so it doesn't belong in `runtimes` above (which
+    /// `makeRuntimeVC` treats generically across every library) or in `AppDelegate.makeRuntimeVC`'s
+    /// switch. It gets its own table section instead, pushing `StreamBenchmarkViewController`
+    /// directly.
+    private static let streamSectionTitle = "Scenarios"
+    private static let streamRowTitle = "VelocityUI — Streaming Text"
+
     init(items: [BenchmarkItem], imageSource: any ImageSource, harness: BenchmarkHarness) {
         self.items = items
         self.imageSource = imageSource
@@ -31,19 +39,30 @@ final class RuntimePickerViewController: UITableViewController {
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
     }
 
+    override func numberOfSections(in tableView: UITableView) -> Int { 2 }
+
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        runtimes.count
+        section == 0 ? runtimes.count : 1
+    }
+
+    override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
+        section == 0 ? nil : Self.streamSectionTitle
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath)
-        cell.textLabel?.text = runtimes[indexPath.row].title
+        cell.textLabel?.text = indexPath.section == 0 ? runtimes[indexPath.row].title : Self.streamRowTitle
         cell.accessoryType = .disclosureIndicator
         return cell
     }
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
+        guard indexPath.section == 0 else {
+            let vc = StreamBenchmarkViewController(harness: harness, orchestrator: nil, hotBlockRasterizeEnabled: true)
+            navigationController?.pushViewController(vc, animated: true)
+            return
+        }
         let runtime = runtimes[indexPath.row].runtime
         let vc = makeRuntimeVC(runtime: runtime)
         navigationController?.pushViewController(vc, animated: true)

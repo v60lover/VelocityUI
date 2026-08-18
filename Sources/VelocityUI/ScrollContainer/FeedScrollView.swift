@@ -894,8 +894,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             // through the O(appended) hot-append path instead of a full measure/rasterize.
             // Every other volatile index (today-unreachable, but kept for robustness against a
             // future multi-index `volatile` range) keeps the existing `measureAndMaybeFreeze`
-            // path unchanged.
-            let result = i == trailingIndex
+            // path unchanged. `environment.hotBlockRasterizeEnabled` (VelocityUI-xxf7) exists
+            // solely so BenchmarkHost's `stream` scenario can run the SAME token stream through
+            // this path ON vs OFF — every production caller leaves it at its `true` default.
+            let result = (i == trailingIndex && environment.hotBlockRasterizeEnabled)
                 ? measureAndRasterizeHot(newBlocks[i])
                 : measureAndMaybeFreeze(newBlocks[i], persist: persist)
             guard let result else { return nil }

@@ -103,7 +103,11 @@ final class BenchmarkHarness: NSObject {
         displayLink = nil
         let duration = CFAbsoluteTimeGetCurrent() - captureStartTime
 
-        let (peakFootprint, avgAllocDelta, netAllocDelta) = allocationProbe.stop()
+        let (peakFootprint, avgAllocDelta, netAllocDelta, allocSamples) = allocationProbe.stop()
+        let earlyLate = AllocationProbe.summarizeEarlyLate(samples: allocSamples)
+        // Epsilon guards a near-zero/negative early baseline from producing an unstable ratio —
+        // see MemoryStats.lateOverEarlyAllocRatio's doc.
+        let lateOverEarlyRatio: Double? = earlyLate.early > 1.0 ? earlyLate.late / earlyLate.early : nil
         MXMetricManager.shared.remove(self)
 
         let taskSpawnCount = spawnCounter.withLock { $0 }
@@ -127,7 +131,10 @@ final class BenchmarkHarness: NSObject {
             memoryStats: BenchmarkReport.MemoryStats(
                 peakPhysFootprintBytes: peakFootprint,
                 avgAllocDeltaPerFrameBytes: avgAllocDelta,
-                netAllocDeltaPerFrameBytes: netAllocDelta
+                netAllocDeltaPerFrameBytes: netAllocDelta,
+                earlyNetAllocDeltaPerFrameBytes: earlyLate.early,
+                lateNetAllocDeltaPerFrameBytes: earlyLate.late,
+                lateOverEarlyAllocRatio: lateOverEarlyRatio
             ),
             taskSpawnCount: taskSpawnCount,
             metricKitSnapshots: mkSnapshots,

@@ -32,6 +32,15 @@ public final class RenderEnvironment: Sendable {
     /// scroll-path methods. See `HotBlockRasterizerStore`'s doc for why no lock is needed.
     public let hotBlockRasterizerStore: HotBlockRasterizerStore
 
+    /// Gates the trailing hot block in `FeedScrollView.applyInPlaceBlockDiff` between the
+    /// O(appended) incremental path (`hotBlockRasterizerStore.append`, VelocityUI-x4q0) and the
+    /// pre-x4q0 O(block) fallback (a full `rasterizeText` pass every append, same as any other
+    /// non-trailing block). `true` in every production call site — this exists so
+    /// BenchmarkHost's `stream` scenario (VelocityUI-xxf7) can run the identical token stream
+    /// through both paths and report the ON-vs-OFF cost difference; it is not a runtime feature
+    /// flag consumers are expected to toggle.
+    public let hotBlockRasterizeEnabled: Bool
+
     /// Produces a fragment's first-paint image before its real image has decoded. Defaults
     /// to `DefaultPlaceholderRenderer` (thumbnail/BlurHash, VelocityUI's original behavior) —
     /// inject a different `PlaceholderRenderer` to plug in a custom first-paint strategy. See
@@ -79,6 +88,7 @@ public final class RenderEnvironment: Sendable {
         videoPreparation: VideoPreparationActor,
         frozenBitmapStore: FrozenBitmapStore,
         hotBlockRasterizerStore: HotBlockRasterizerStore,
+        hotBlockRasterizeEnabled: Bool = true,
         placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer(),
         contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil,
         pipelineTaskSpawnObserver: (@Sendable () -> Void)? = nil
@@ -100,6 +110,7 @@ public final class RenderEnvironment: Sendable {
         self.videoPreparation = videoPreparation
         self.frozenBitmapStore = frozenBitmapStore
         self.hotBlockRasterizerStore = hotBlockRasterizerStore
+        self.hotBlockRasterizeEnabled = hotBlockRasterizeEnabled
         self.placeholderRenderer = placeholderRenderer
         self.contentDeliveryObserver = contentDeliveryObserver
         self.pipelineTaskSpawnObserver = pipelineTaskSpawnObserver
@@ -132,6 +143,7 @@ public final class RenderEnvironment: Sendable {
         decodeScaleCeiling: CGFloat = 2.0,
         frozenBitmapStore: FrozenBitmapStore = .init(),
         hotBlockRasterizerStore: HotBlockRasterizerStore = .init(),
+        hotBlockRasterizeEnabled: Bool = true,
         placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer(),
         contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil,
         pipelineTaskSpawnObserver: (@Sendable () -> Void)? = nil
@@ -148,6 +160,7 @@ public final class RenderEnvironment: Sendable {
             videoPreparation: videoPrep,
             frozenBitmapStore: frozenBitmapStore,
             hotBlockRasterizerStore: hotBlockRasterizerStore,
+            hotBlockRasterizeEnabled: hotBlockRasterizeEnabled,
             placeholderRenderer: placeholderRenderer,
             contentDeliveryObserver: contentDeliveryObserver,
             pipelineTaskSpawnObserver: pipelineTaskSpawnObserver

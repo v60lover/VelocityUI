@@ -24,7 +24,7 @@ final class StreamingMarkdownFeedIntegrationTests: XCTestCase {
         var markdownParser: IncrementalMarkdownParser
     }
 
-    private func makeEnvironment() -> RenderEnvironment {
+    private func makeEnvironment(hotBlockRasterizeEnabled: Bool = true) -> RenderEnvironment {
         let dc = DimensionCache()
         let videoPrep = VideoPreparationActor()
         return RenderEnvironment(
@@ -36,7 +36,8 @@ final class StreamingMarkdownFeedIntegrationTests: XCTestCase {
             videoController: VideoController(videoPreparation: videoPrep),
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(),
-            hotBlockRasterizerStore: HotBlockRasterizerStore()
+            hotBlockRasterizerStore: HotBlockRasterizerStore(),
+            hotBlockRasterizeEnabled: hotBlockRasterizeEnabled
         )
     }
 
@@ -136,6 +137,44 @@ final class StreamingMarkdownFeedIntegrationTests: XCTestCase {
         let paintedAfter = feed._debugPaintedBitmaps(at: 0)
         XCTAssertTrue(paintedAfter.values.contains(where: { $0 === expectedBitmap }),
             "the sealed block's bitmap instance must be untouched by the second block's growth")
+
+        await drainFeedWork(feed)
+    }
+
+    // MARK: - hotBlockRasterizeEnabled == false falls back to full rasterizeText per token (VelocityUI-xxf7)
+
+    /// BenchmarkHost's `stream` scenario runs the identical token stream with
+    /// `RenderEnvironment.hotBlockRasterizeEnabled` true (VelocityUI-x4q0's O(appended) path) and
+    /// false (this bead's OFF side — the pre-x4q0 O(block) fallback) to report the win. This is
+    /// the regression guard that OFF genuinely disengages the hot-append path rather than merely
+    /// being ignored: growing the trailing block must route through the SAME
+    /// `measureAndMaybeFreeze`/`rasterizeText` primitives every other volatile/sealed block uses,
+    /// never `hotBlockRasterizerStore.append`.
+    func testHotBlockRasterizeDisabled_TrailingBlockUsesFullRasterizeFallback_NeverHotAppend() async {
+        let env = makeEnvironment(hotBlockRasterizeEnabled: false)
+        let feed = makeStreamingFeed(environment: env)
+        var parser = IncrementalMarkdownParser()
+        parser.append("Hello")
+        feed.items = [StreamingMessage(id: 0, markdownParser: parser)]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+
+        let hotAppendCountBefore = feed._blockDiffHotAppendCallCount
+        let rasterizeCountBefore = feed._blockDiffRasterizeCallCount
+
+        let tokens = [" world", " this", " is", " a", " streaming", " message"]
+        for token in tokens {
+            parser.append(token)
+            feed.items = [StreamingMessage(id: 0, markdownParser: parser)]
+            feed.layoutSubviews()
+        }
+
+        XCTAssertEqual(feed._blockDiffHotAppendCallCount, hotAppendCountBefore,
+            "hotBlockRasterizeEnabled == false must never engage the O(appended) hot-append path")
+        XCTAssertGreaterThan(feed._blockDiffRasterizeCallCount, rasterizeCountBefore,
+            "hotBlockRasterizeEnabled == false must fall back to a full rasterizeText pass per token")
+        XCTAssertNil(env.hotBlockRasterizerStore.finalize(BlockKey(itemID: 0, index: 0), expectedContentHash: 0),
+            "the hot rasterizer store must stay empty for this key — OFF never populates it")
 
         await drainFeedWork(feed)
     }

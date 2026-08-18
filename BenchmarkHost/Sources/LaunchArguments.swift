@@ -33,6 +33,18 @@ struct LaunchArguments {
         /// footprint quiesce, then measure the SAME range a second time — a
         /// cache-hit replay where no decode is expected. This is what Q5 gates on.
         case replay
+        /// ChatGPT-style streaming-text scenario (VelocityUI-xxf7): `StreamDriver` appends a
+        /// canned markdown token stream into a single growing message via the VelocityUI-zuot
+        /// public streaming API, instead of `ScrollDriver` driving `scrollView.contentOffset`.
+        /// VelocityUI-only today — `--runtime` must be `velocityui` (or omitted). `--items` is
+        /// not used (the token stream is a fixed, representative dataset); `--stream-rate` and
+        /// `--hot-rasterize` are the scenario's own knobs (see their docs below). `--duration`
+        /// is still the hard backstop, same role as every other scenario.
+        case stream
+    }
+
+    enum HotBlockRasterizeMode: String {
+        case on, off
     }
 
     var runtime: Runtime?
@@ -56,6 +68,22 @@ struct LaunchArguments {
     /// VelocityUI-hbe item 5. Works in both `--live` and the plain manual/picker
     /// flow, since both attach a LiveMetricsController.
     var touchSpeedMultiplier: Double
+    /// Tokens/second `StreamDriver` appends at (`--stream-rate <N>`). Only read by the `stream`
+    /// scenario. Defaults to 20 — fast enough to finish the canned dataset well inside the
+    /// default `--duration` backstop, slow enough that individual frame costs are still
+    /// resolvable at 60 Hz (not multiple tokens landing in the same displaylink tick).
+    var streamTokensPerSecond: Double
+    /// `--hot-rasterize <on|off>` — threads into `RenderEnvironment.hotBlockRasterizeEnabled`
+    /// for the `stream` scenario's ON/OFF toggle (VelocityUI-xxf7). Defaults to `.on`. Ignored
+    /// by every other scenario.
+    var hotBlockRasterizeMode: HotBlockRasterizeMode
+    /// `--stream-text-only` — when set, `StreamDataset.interleavedRenderNodes` never splices in
+    /// the `AsyncImageNode`/`SpacerNode` blocks, so the stream scenario has no network/decode
+    /// dependency at all (pure text growth). The acceptance-criteria run does NOT set this — the
+    /// interleaved non-text blocks are required there — this exists for a quick device sanity
+    /// pass, or to isolate the text-rasterizer cost from image-decode noise. Ignored by every
+    /// other scenario.
+    var streamTextOnly: Bool
 
     init() {
         let args = ProcessInfo.processInfo.arguments
@@ -68,6 +96,9 @@ struct LaunchArguments {
         prefetchWindow = Self.value(for: "--prefetch-window", in: args).flatMap(Int.init) ?? 10
         liveHUD = args.contains("--live")
         touchSpeedMultiplier = Self.value(for: "--touch-speed", in: args).flatMap(Double.init) ?? 1.0
+        streamTokensPerSecond = Self.value(for: "--stream-rate", in: args).flatMap(Double.init) ?? 20.0
+        hotBlockRasterizeMode = Self.value(for: "--hot-rasterize", in: args).flatMap(HotBlockRasterizeMode.init) ?? .on
+        streamTextOnly = args.contains("--stream-text-only")
     }
 
     /// Explicit-value init for unit tests — does not read from ProcessInfo.
@@ -80,7 +111,10 @@ struct LaunchArguments {
         measurementDuration: TimeInterval = 30,
         prefetchWindow: Int = 10,
         liveHUD: Bool = false,
-        touchSpeedMultiplier: Double = 1.0
+        touchSpeedMultiplier: Double = 1.0,
+        streamTokensPerSecond: Double = 20.0,
+        hotBlockRasterizeMode: HotBlockRasterizeMode = .on,
+        streamTextOnly: Bool = false
     ) {
         self.scenario = scenario
         self.velocityProfile = velocityProfile
@@ -91,6 +125,9 @@ struct LaunchArguments {
         self.prefetchWindow = prefetchWindow
         self.liveHUD = liveHUD
         self.touchSpeedMultiplier = touchSpeedMultiplier
+        self.streamTokensPerSecond = streamTokensPerSecond
+        self.hotBlockRasterizeMode = hotBlockRasterizeMode
+        self.streamTextOnly = streamTextOnly
     }
 
     private static func value(for flag: String, in args: [String]) -> String? {

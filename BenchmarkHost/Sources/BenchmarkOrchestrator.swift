@@ -62,7 +62,14 @@ final class BenchmarkOrchestrator {
     private let args: LaunchArguments
     private let harness: any BenchmarkHarnessProtocol
     private let driver = ScrollDriver()
+    /// `stream` scenario's driver (VelocityUI-xxf7) — sibling of `driver`, unused by every
+    /// other scenario. See `streamReady(tokens:tokensPerSecond:onToken:)`.
+    private let streamDriver = StreamDriver()
     private var didStart = false
+    /// Separate from `didStart` — `streamReady` is `StreamBenchmarkViewController`'s ONLY entry
+    /// point (it never calls `scrollViewReady`, unlike every other runtime VC), so sharing
+    /// `didStart` would create a footgun if a future caller called both.
+    private var didStartStream = false
     private var captureTimer: Timer?
     private var quiesceTimer: Timer?
     private var captureFinished = false
@@ -145,6 +152,33 @@ final class BenchmarkOrchestrator {
             }
         case .replay:
             startReplayWarmup(scrollView: scrollView)
+        case .stream:
+            // `StreamBenchmarkViewController` never calls `scrollViewReady` — it has nothing for
+            // this to drive — and reaches the real entry point via
+            // `streamReady(tokens:tokensPerSecond:onToken:)` instead. This case only exists to
+            // keep the switch exhaustive; it is unreachable in practice.
+            break
+        }
+    }
+
+    /// Entry point for the `stream` scenario (VelocityUI-xxf7) — sibling to `scrollViewReady`,
+    /// driven by `StreamDriver` instead of `ScrollDriver`. Called once from
+    /// `StreamBenchmarkViewController.viewDidAppear`, INSTEAD OF `scrollViewReady` (see
+    /// `didStartStream`'s doc for why the two entry points don't share a guard). `onToken` is the
+    /// caller's own `IncrementalMarkdownParser.append(_:)` + SwiftUI-state-push closure — this
+    /// orchestrator never touches the parser or the feed directly, same separation of concerns as
+    /// `scrollViewReady`/`ScrollDriver` never touching `RenderEnvironment`.
+    func streamReady(tokens: [String], tokensPerSecond: Double, onToken: @escaping (String) -> Void) {
+        guard !didStartStream else { return }
+        didStartStream = true
+        harness.startCapture(discardFirstSeconds: 0)
+        streamDriver.start(tokens: tokens, tokensPerSecond: tokensPerSecond, onToken: onToken) { [weak self] in
+            self?.finishCapture()
+        }
+        // Backstop: terminate after measurementDuration even if the driver stalls, same role as
+        // every other scenario's captureTimer.
+        captureTimer = Timer.scheduledTimer(withTimeInterval: args.measurementDuration, repeats: false) { [weak self] _ in
+            self?.finishCapture()
         }
     }
 
@@ -160,6 +194,7 @@ final class BenchmarkOrchestrator {
         quiesceTimer?.invalidate()
         quiesceTimer = nil
         driver.stop()
+        streamDriver.stop()
         return harness.stopCapture()
     }
 
