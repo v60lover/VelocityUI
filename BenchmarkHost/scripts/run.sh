@@ -432,9 +432,34 @@ if [[ $SKIP_REPORT -eq 0 && $MATRIX_TOTAL -gt 0 ]]; then
 fi
 
 if [[ $RUN_STREAM -eq 1 ]]; then
-  log "stream reports at $OUTPUT/stream__hot-*.json — not aggregated by BenchmarkReporter (VelocityUI-xxf7"\
-" out of scope); compare memoryStats.lateOverEarlyAllocRatio across hot-on vs hot-off files directly"\
-" (ON should read ~1.0, OFF should read well above 1.0 — mirrors spike 6qd's late/early ratio)."
+  # Surface the frame stats the stream capture ALREADY recorded (BenchmarkReport.frameStats).
+  # BenchmarkReporter skips stream__* files, so without this the numbers sit unread inside the
+  # JSON — which is exactly why VelocityUI-zgdg/0tbi closed with "no measured numbers anywhere."
+  # This is the VelocityUI-zgdg / B1 (VelocityUI-80uh) gate: does the incremental hot-block
+  # rasterize fit the frame budget? Headless stream has NO scroll gesture, so this is the
+  # drag-FREE compute proxy — per-token rasterize COST is the same with or without a drag; a drag
+  # only adds frame-budget contention on top. The end-to-end during-drag hitch still needs the
+  # gesture-deferral A/B pass on a hand-dragged device.
+  log "stream frame stats (VelocityUI-zgdg / B1 gate — does incremental rasterize fit the frame budget?):"
+  printf '  %-30s %8s %8s %8s %9s %10s\n' "file" "p50 ms" "p99 ms" "max ms" "hitch/1k" "late/early"
+  for f in "$OUTPUT"/stream__hot-*.json; do
+    [[ -e "$f" ]] || continue
+    python3 - "$f" <<'PY' || true
+import json, os, sys
+d = json.load(open(sys.argv[1]))
+fs = d["frameStats"]
+ratio = d.get("memoryStats", {}).get("lateOverEarlyAllocRatio")
+ratio = "n/a" if ratio is None else f"{ratio:.2f}"
+print("  %-30s %8.2f %8.2f %8.2f %9.2f %10s" % (
+    os.path.basename(sys.argv[1]),
+    fs["p50FrameTimeMs"], fs["p99FrameTimeMs"], fs["maxFrameTimeMs"],
+    fs["hitchesPerThousand"], ratio))
+PY
+  done
+  log "read: hot-ON p99 well under budget (8.3 ms @120Hz / 16.7 ms @60Hz) => incremental rasterize fits;"\
+" compare hot-ON vs hot-OFF p99 to quantify the rasterizer's benefit. Memory side: ON's late/early"\
+" alloc ratio should read ~1.0, OFF well above 1.0 (mirrors spike 6qd). Raw JSON at"\
+" $OUTPUT/stream__hot-*.json."
 fi
 
 if [[ $FAIL_COUNT -gt 0 ]]; then
