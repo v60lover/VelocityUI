@@ -14,6 +14,15 @@ public enum RenderNodeBuilder {
         [expression]
     }
 
+    /// Lets an already-built `[any RenderNode]` value — e.g.
+    /// `IncrementalMarkdownParser.renderNodes` — be spliced directly into a container's builder
+    /// closure. The generic overload above only matches a single `RenderNode`-conforming value;
+    /// `Array` doesn't conform to `RenderNode`, so without this identity overload a statement
+    /// producing `[any RenderNode]` couldn't appear inside `{ }` at all.
+    public static func buildExpression(_ expression: [any RenderNode]) -> [any RenderNode] {
+        expression
+    }
+
     public static func buildBlock(_ components: [any RenderNode]...) -> [any RenderNode] {
         components.flatMap { $0 }
     }

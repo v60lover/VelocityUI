@@ -52,7 +52,7 @@ struct ParsedMDBlock: Equatable {
 /// (`Block` has no table `FragmentContent`); fences do not nest inside list items. What IS
 /// guaranteed, and what this bead's acceptance criteria test: a block once sealed never moves,
 /// `F` never decreases, and a blank line inside an open fence never seals.
-public struct IncrementalMarkdownParser: Sendable {
+public struct IncrementalMarkdownParser: Sendable, Equatable {
 
     /// Finalized, immutable blocks — never touched again once appended here.
     private(set) var sealedBlocks: [ParsedMDBlock] = []
@@ -110,7 +110,27 @@ public struct IncrementalMarkdownParser: Sendable {
         return Block(key: BlockKey(itemID: itemID, index: index), fragment: fragment, layout: ResolvedLayout(totalFrame: frame))
     }
 
-    private static func makeDescriptor(_ parsed: ParsedMDBlock) -> TextDescriptor {
+    /// A block's rendered text plus the font it renders with — the one place block-kind ->
+    /// content-transform/font-size/weight is decided, shared by `makeDescriptor` (Layer 2's
+    /// `TextDescriptor`, via `blockList(itemID:width:)`) and `renderNodes` (Layer 1's `TextNode`,
+    /// in StreamingMarkdownText.swift) so `content` and `font` can never silently diverge between
+    /// the two representations of the same block (CLAUDE.md Section 3: extract the helper before
+    /// two call sites need the same transform, not after).
+    ///
+    /// Scope note: this covers `content` + `font` only. Color/line-break are NOT unified — each
+    /// caller uses its own default (`makeDescriptor` hardcodes opaque black + `lineBreakMode: 0`;
+    /// `renderNodes` takes `TextNode`'s defaults, `.primary` + `.byWordWrapping`, which happen to
+    /// render identically today but are two independent decisions, not one shared source of
+    /// truth). Harmless in practice — the two paths are never rendering the same block
+    /// side-by-side, and `Block.contentHash`/`FrozenBitmapStore` key off geometry-affecting hashes,
+    /// not color — but don't extend the "can never diverge" claim above `content`/`font` without
+    /// also unifying color/line-break into `StyledText`.
+    struct StyledText {
+        var content: String
+        var font: VFontDescriptor
+    }
+
+    static func style(_ parsed: ParsedMDBlock) -> StyledText {
         let size: CGFloat
         let weight: Int
         var content = parsed.text
@@ -150,15 +170,20 @@ public struct IncrementalMarkdownParser: Sendable {
             size = 16
             weight = 4
         }
+        return StyledText(content: content, font: VFontDescriptor(size: size, weight: weight))
+    }
+
+    private static func makeDescriptor(_ parsed: ParsedMDBlock) -> TextDescriptor {
+        let styled = style(parsed)
 
         var hasher = Hasher()
         hasher.combine(parsed.kind)
-        hasher.combine(content)
+        hasher.combine(styled.content)
         let hash = hasher.finalize()
 
         return TextDescriptor(
-            content: content,
-            font: VFontDescriptor(size: size, weight: weight),
+            content: styled.content,
+            font: styled.font,
             color: VColorDescriptor(red: 0, green: 0, blue: 0, alpha: 1),
             lineLimit: nil,
             lineBreakMode: 0,
