@@ -47,6 +47,10 @@ struct LaunchArguments {
         case on, off
     }
 
+    enum GestureGatedDeferralMode: String {
+        case on, off
+    }
+
     var runtime: Runtime?
     var imageMode: ImageMode
     var velocityProfile: VelocityProfile
@@ -84,6 +88,13 @@ struct LaunchArguments {
     /// pass, or to isolate the text-rasterizer cost from image-decode noise. Ignored by every
     /// other scenario.
     var streamTextOnly: Bool
+    /// `--gesture-deferral <on|off>` — threads into `StreamBenchmarkViewController`'s
+    /// gesture-gated-deferral toggle (VelocityUI-0tbi), the fix direction proposed by zgdg's H2
+    /// finding: buffer per-token items updates while a scroll gesture is active, flushing one
+    /// catch-up pass on scroll-idle. Defaults to `.off` (current behavior — unchanged until
+    /// enabled). Only `RuntimePickerViewController`'s manual "stream" rows read this — a live
+    /// touch gesture is required to exercise it, which the headless matrix can't drive.
+    var gestureGatedDeferralMode: GestureGatedDeferralMode
 
     init() {
         let args = ProcessInfo.processInfo.arguments
@@ -99,6 +110,7 @@ struct LaunchArguments {
         streamTokensPerSecond = Self.value(for: "--stream-rate", in: args).flatMap(Double.init) ?? 20.0
         hotBlockRasterizeMode = Self.value(for: "--hot-rasterize", in: args).flatMap(HotBlockRasterizeMode.init) ?? .on
         streamTextOnly = args.contains("--stream-text-only")
+        gestureGatedDeferralMode = Self.value(for: "--gesture-deferral", in: args).flatMap(GestureGatedDeferralMode.init) ?? .off
     }
 
     /// Explicit-value init for unit tests — does not read from ProcessInfo.
@@ -114,7 +126,8 @@ struct LaunchArguments {
         touchSpeedMultiplier: Double = 1.0,
         streamTokensPerSecond: Double = 20.0,
         hotBlockRasterizeMode: HotBlockRasterizeMode = .on,
-        streamTextOnly: Bool = false
+        streamTextOnly: Bool = false,
+        gestureGatedDeferralMode: GestureGatedDeferralMode = .off
     ) {
         self.scenario = scenario
         self.velocityProfile = velocityProfile
@@ -128,6 +141,7 @@ struct LaunchArguments {
         self.streamTokensPerSecond = streamTokensPerSecond
         self.hotBlockRasterizeMode = hotBlockRasterizeMode
         self.streamTextOnly = streamTextOnly
+        self.gestureGatedDeferralMode = gestureGatedDeferralMode
     }
 
     private static func value(for flag: String, in args: [String]) -> String? {

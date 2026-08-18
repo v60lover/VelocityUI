@@ -51,6 +51,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                 harness: harness,
                 orchestrator: orchestrator,
                 hotBlockRasterizeEnabled: args.hotBlockRasterizeMode == .on,
+                gestureGatedDeferralEnabled: args.gestureGatedDeferralMode == .on,
                 includeInterleavedBlocks: !args.streamTextOnly,
                 tokensPerSecond: args.streamTokensPerSecond
             )

@@ -22,6 +22,10 @@ final class RuntimePickerViewController: UITableViewController {
     /// directly.
     private static let streamSectionTitle = "Scenarios"
     private static let streamRowTitle = "VelocityUI — Streaming Text"
+    /// VelocityUI-0tbi: a second "Scenarios" row so the user can flip gesture-gated deferral
+    /// ON/OFF in one on-device session (dragging under each) without relaunching the app.
+    private static let streamDeferralRowTitle = "VelocityUI — Streaming Text (gesture-gated deferral)"
+    private static let streamRowCount = 2
 
     init(items: [BenchmarkItem], imageSource: any ImageSource, harness: BenchmarkHarness) {
         self.items = items
@@ -42,7 +46,7 @@ final class RuntimePickerViewController: UITableViewController {
     override func numberOfSections(in tableView: UITableView) -> Int { 2 }
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        section == 0 ? runtimes.count : 1
+        section == 0 ? runtimes.count : Self.streamRowCount
     }
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
@@ -51,7 +55,11 @@ final class RuntimePickerViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath)
-        cell.textLabel?.text = indexPath.section == 0 ? runtimes[indexPath.row].title : Self.streamRowTitle
+        if indexPath.section == 0 {
+            cell.textLabel?.text = runtimes[indexPath.row].title
+        } else {
+            cell.textLabel?.text = indexPath.row == 0 ? Self.streamRowTitle : Self.streamDeferralRowTitle
+        }
         cell.accessoryType = .disclosureIndicator
         return cell
     }
@@ -59,7 +67,19 @@ final class RuntimePickerViewController: UITableViewController {
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         guard indexPath.section == 0 else {
-            let vc = StreamBenchmarkViewController(harness: harness, orchestrator: nil, hotBlockRasterizeEnabled: true)
+            // VelocityUI-0tbi: hot-rasterize/rate/text-only now read from LaunchArguments (were
+            // hardcoded before this bead) — without this, configs C (--hot-rasterize off) and D
+            // (--stream-rate 5) from the bead's measurement protocol had no manual/on-device path
+            // at all, since the headless matrix can't drive a real gesture for this scenario.
+            let args = LaunchArguments()
+            let vc = StreamBenchmarkViewController(
+                harness: harness,
+                orchestrator: nil,
+                hotBlockRasterizeEnabled: args.hotBlockRasterizeMode == .on,
+                gestureGatedDeferralEnabled: indexPath.row == 1,
+                includeInterleavedBlocks: !args.streamTextOnly,
+                tokensPerSecond: args.streamTokensPerSecond
+            )
             navigationController?.pushViewController(vc, animated: true)
             return
         }
