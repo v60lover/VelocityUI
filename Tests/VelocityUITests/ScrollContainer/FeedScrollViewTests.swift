@@ -45,7 +45,8 @@ final class FeedScrollViewTests: XCTestCase {
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
             videoPreparation: videoPrep,
-            frozenBitmapStore: FrozenBitmapStore()
+            frozenBitmapStore: FrozenBitmapStore(),
+            hotBlockRasterizerStore: HotBlockRasterizerStore()
         )
     }
 
@@ -359,7 +360,8 @@ final class FeedScrollViewTests: XCTestCase {
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
             videoPreparation: videoPrep,
-            frozenBitmapStore: FrozenBitmapStore()
+            frozenBitmapStore: FrozenBitmapStore(),
+            hotBlockRasterizerStore: HotBlockRasterizerStore()
         )
 
         let feed = FeedScrollView<TestItem>(
@@ -430,7 +432,8 @@ final class FeedScrollViewTests: XCTestCase {
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
             videoPreparation: videoPrep,
-            frozenBitmapStore: FrozenBitmapStore()
+            frozenBitmapStore: FrozenBitmapStore(),
+            hotBlockRasterizerStore: HotBlockRasterizerStore()
         )
 
         struct ImageItem: Identifiable, Sendable {
@@ -553,7 +556,8 @@ final class FeedScrollViewTests: XCTestCase {
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
             videoPreparation: videoPrep,
-            frozenBitmapStore: FrozenBitmapStore()
+            frozenBitmapStore: FrozenBitmapStore(),
+            hotBlockRasterizerStore: HotBlockRasterizerStore()
         )
 
         struct ImageItem: Identifiable, Sendable {
@@ -653,7 +657,8 @@ final class FeedScrollViewTests: XCTestCase {
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
             videoPreparation: videoPrep,
-            frozenBitmapStore: FrozenBitmapStore()
+            frozenBitmapStore: FrozenBitmapStore(),
+            hotBlockRasterizerStore: HotBlockRasterizerStore()
         )
 
         let feed = FeedScrollView<URLItem>(
@@ -732,7 +737,8 @@ final class FeedScrollViewTests: XCTestCase {
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
             videoPreparation: videoPrep,
-            frozenBitmapStore: FrozenBitmapStore()
+            frozenBitmapStore: FrozenBitmapStore(),
+            hotBlockRasterizerStore: HotBlockRasterizerStore()
         )
 
         struct URLItem: Identifiable, Sendable {
@@ -849,7 +855,8 @@ final class FeedScrollViewTests: XCTestCase {
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
             videoPreparation: videoPrep,
-            frozenBitmapStore: FrozenBitmapStore()
+            frozenBitmapStore: FrozenBitmapStore(),
+            hotBlockRasterizerStore: HotBlockRasterizerStore()
         )
 
         struct StyleItem: Identifiable, Sendable {
@@ -1435,7 +1442,8 @@ final class FeedScrollViewTests: XCTestCase {
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
             videoPreparation: videoPrep,
-            frozenBitmapStore: FrozenBitmapStore()
+            frozenBitmapStore: FrozenBitmapStore(),
+            hotBlockRasterizerStore: HotBlockRasterizerStore()
         )
 
         struct ImageItem: Identifiable, Sendable {
@@ -1753,6 +1761,7 @@ final class FeedScrollViewTests: XCTestCase {
             videoController: VideoController(videoPreparation: videoPrep),
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(),
+            hotBlockRasterizerStore: HotBlockRasterizerStore(),
             contentDeliveryObserver: { kind in
                 deliveredLock.withLock { $0.append(kind) }
             }
@@ -1810,6 +1819,7 @@ final class FeedScrollViewTests: XCTestCase {
             videoController: VideoController(videoPreparation: videoPrep),
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(),
+            hotBlockRasterizerStore: HotBlockRasterizerStore(),
             pipelineTaskSpawnObserver: {
                 spawnCount.withLock { $0 += 1 }
             }

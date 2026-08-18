@@ -268,6 +268,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// message's block count grows — never O(message length).
     private(set) var _blockDiffMeasureCallCount: Int = 0
     private(set) var _blockDiffRasterizeCallCount: Int = 0
+
+    /// VelocityUI-x4q0: counts calls into the NEW hot-append path
+    /// (`environment.hotBlockRasterizerStore.append`). The old two counters above legitimately
+    /// stop growing for the hot tail once this path is wired in — this is the correct proxy for
+    /// "the incremental rasterizer engaged" now.
+    private(set) var _blockDiffHotAppendCallCount: Int = 0
     #endif
 
     // MARK: - Init
@@ -769,6 +775,22 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         // this always represents real new work, never a stale hit.
         func measureAndMaybeFreeze(_ block: Block, persist: Bool) -> (height: CGFloat, bitmap: CGImage?)? {
             guard case .text = block.fragment.content else { return nil }
+            // VelocityUI-x4q0: on seal (the fence closes / frontier advances over this block),
+            // reuse the composited bitmap the hot-append path already produced instead of a
+            // fresh measure/rasterize — this IS the sealed-block zero-recompute guarantee for a
+            // block that was hot a moment ago. `finalize` ALWAYS tears down the entry (match or
+            // mismatch), so a stale hot rasterizer never lingers past this call. A mismatch means
+            // the block grew further within this same round (self-heal), so this falls through
+            // to the existing freeze(_:)-based body below, completely unchanged.
+            if let sealed = environment.hotBlockRasterizerStore.finalize(block.key, expectedContentHash: block.contentHash) {
+                if persist {
+                    let pixelW = sealed.size.width * scale
+                    let pixelH = sealed.size.height * scale
+                    let cost = Int((pixelW * pixelH * 4).rounded(.up))
+                    store.store(sealed.image, size: sealed.size, cost: cost, for: block.key)
+                }
+                return (sealed.size.height, sealed.image)
+            }
             var localCache: [BlockKey: FreezeState] = [:]
             // `freeze(_:)` always calls `measure` before attempting `rasterize`, but on a
             // rasterize failure (degenerate size — e.g. a still-empty just-appended block) it
@@ -811,6 +833,22 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             }
         }
 
+        // VelocityUI-x4q0: the hot-append path for the trailing volatile block — routes through
+        // `HotBlockRasterizerStore` for O(appended) cost instead of `measureAndMaybeFreeze`'s
+        // O(block size) measure/rasterize. Never calls `store.store(...)` — a still-growing
+        // block is never persisted into `FrozenBitmapStore`, matching today's `persist = false`
+        // for the trailing volatile index.
+        func measureAndRasterizeHot(_ block: Block) -> (height: CGFloat, bitmap: CGImage?)? {
+            guard case .text(let descriptor) = block.fragment.content else { return nil }
+            #if canImport(XCTest)
+            _blockDiffHotAppendCallCount += 1
+            #endif
+            let result = environment.hotBlockRasterizerStore.append(
+                descriptor, width: block.width, scale: scale, contentHash: block.contentHash, for: block.key
+            )
+            return (result.height, result.image)
+        }
+
         var heights = [CGFloat](repeating: 0, count: newBlocks.count)
         var textBitmaps: [Int: CGImage] = [:]
         for i in d.unchanged {
@@ -851,7 +889,16 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         }
         for i in d.volatile {
             let persist = i != trailingIndex
-            guard let result = measureAndMaybeFreeze(newBlocks[i], persist: persist) else { return nil }
+            // VelocityUI-x4q0: the trailing volatile index is always the still-growing hot
+            // block (see this function's `trailingIndex`/`d.volatile` doc above) — route it
+            // through the O(appended) hot-append path instead of a full measure/rasterize.
+            // Every other volatile index (today-unreachable, but kept for robustness against a
+            // future multi-index `volatile` range) keeps the existing `measureAndMaybeFreeze`
+            // path unchanged.
+            let result = i == trailingIndex
+                ? measureAndRasterizeHot(newBlocks[i])
+                : measureAndMaybeFreeze(newBlocks[i], persist: persist)
+            guard let result else { return nil }
             heights[i] = result.height
             textBitmaps[newBlocks[i].fragment.id] = result.bitmap
         }
@@ -1163,6 +1210,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             }
             if !leavingKeys.isEmpty {
                 environment.frozenBitmapStore.evict(leavingKeys)
+                // VelocityUI-x4q0: same `leavingKeys` set — a live hot rasterizer's
+                // `NSTextLayoutManager` must not leak when its cell recycles away.
+                environment.hotBlockRasterizerStore.evict(leavingKeys)
             }
         }
         for index in _recycleBuffer {

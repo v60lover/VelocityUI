@@ -34,7 +34,8 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
             videoPreparation: videoPrep,
-            frozenBitmapStore: FrozenBitmapStore()
+            frozenBitmapStore: FrozenBitmapStore(),
+            hotBlockRasterizerStore: HotBlockRasterizerStore()
         )
     }
 
@@ -134,6 +135,7 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
 
         let measureCountAfterRound1 = feed._blockDiffMeasureCallCount
         let rasterizeCountAfterRound1 = feed._blockDiffRasterizeCallCount
+        let hotAppendCountAfterRound1 = feed._blockDiffHotAppendCallCount
 
         // PIXELS, not just the cache: block0's frozen bitmap must actually be on screen — a
         // sublayer's .contents must be the EXACT CGImage instance FrozenBitmapStore holds for
@@ -157,21 +159,37 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
             await waitForWorkingRangeCommit(feed, index: 0)
         }
 
-        // Upper bound, not exact equality: under full-suite system load, `waitForWorkingRangeCommit`'s
-        // poll can (rarely) observe a stale WorkingRange commit from a still-in-flight prior round
-        // and return early, causing THAT round's applyInPlaceBlockDiff to safely bail to the
-        // pre-existing fallback (contributing 0, never extra, to these counts) rather than engage
+        // VelocityUI-x4q0: pure hot-tail growth (rounds 2-4) now routes ENTIRELY through
+        // `HotBlockRasterizerStore.append` — the OLD `_blockDiffMeasureCallCount`/
+        // `_blockDiffRasterizeCallCount` counters are no longer touched by this path at all, so
+        // their deltas must be EXACTLY zero (a strictly stronger assertion than the old `<=3`
+        // bound — it proves the O(block) measure/rasterize path is fully bypassed for pure
+        // hot-tail growth, not merely bounded, which is the actual point of this bead). The new
+        // `_blockDiffHotAppendCallCount` counter is the correct proxy for "C3's hot-tail path
+        // engaged" that the old counters used to (indirectly, and now incorrectly) serve as.
+        //
+        // Upper bound, not exact equality, for the NEW counter: under full-suite system load,
+        // `waitForWorkingRangeCommit`'s poll can (rarely) observe a stale WorkingRange commit
+        // from a still-in-flight prior round and return early, causing THAT round's
+        // applyInPlaceBlockDiff to safely bail to the pre-existing fallback rather than engage
         // the optimized path — a timing artifact, not a correctness regression (mirrors the
-        // documented HybridReuseSpikeTests wall-clock flake). The invariant that actually matters —
-        // "block0 (unchanged) never adds a call, no round exceeds 1" — is what these bounds assert.
+        // documented HybridReuseSpikeTests wall-clock flake). The invariant that actually
+        // matters — "the hot tail engages at least once, no round contributes more than 1 call,
+        // and block0 (unchanged) never adds a call to ANY of these counters" — is what these
+        // assertions verify.
         let measureDelta = feed._blockDiffMeasureCallCount - measureCountAfterRound1
         let rasterizeDelta = feed._blockDiffRasterizeCallCount - rasterizeCountAfterRound1
-        XCTAssertLessThanOrEqual(measureDelta, 3,
-            "Only the hot tail may be re-measured across the 3 follow-up rounds — block0 (unchanged) "
-            + "must add ZERO additional measure calls (at most 1 per round, for the hot tail only); got \(measureDelta)")
-        XCTAssertGreaterThan(measureDelta, 0, "Precondition: at least one round must have exercised the C3 path")
-        XCTAssertLessThanOrEqual(rasterizeDelta, 3,
-            "Only the hot tail may be re-rasterized across the 3 follow-up rounds; got \(rasterizeDelta)")
+        let hotAppendDelta = feed._blockDiffHotAppendCallCount - hotAppendCountAfterRound1
+        XCTAssertEqual(measureDelta, 0,
+            "Pure hot-tail growth must route entirely through HotBlockRasterizerStore.append, "
+            + "adding ZERO calls to the old full-measure path (block0, unchanged, was already "
+            + "excluded from this path even before this bead); got \(measureDelta)")
+        XCTAssertEqual(rasterizeDelta, 0,
+            "Pure hot-tail growth must route entirely through HotBlockRasterizerStore.append, "
+            + "adding ZERO calls to the old full-rasterize path; got \(rasterizeDelta)")
+        XCTAssertGreaterThan(hotAppendDelta, 0, "Precondition: at least one round must have exercised the new hot-append path")
+        XCTAssertLessThanOrEqual(hotAppendDelta, 3,
+            "Only the hot tail may be re-appended across the 3 follow-up rounds — at most 1 per round; got \(hotAppendDelta)")
 
         guard let sizeFinal = feed.renderEnvironment.frozenBitmapStore.size(for: key0) else {
             return XCTFail("block0's frozen entry must still exist")
@@ -704,7 +722,8 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
             videoPreparation: videoPrep,
-            frozenBitmapStore: FrozenBitmapStore(byteBudget: 1)
+            frozenBitmapStore: FrozenBitmapStore(byteBudget: 1),
+            hotBlockRasterizerStore: HotBlockRasterizerStore()
         )
         let feed = makeChatFeed(environment: env)
 

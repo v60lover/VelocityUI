@@ -26,6 +26,12 @@ public final class RenderEnvironment: Sendable {
     /// the MainActor bind/scroll path reads it synchronously, with zero `await`.
     public let frozenBitmapStore: FrozenBitmapStore
 
+    /// Per-`BlockKey` lifecycle owner for the incremental hot-tail text rasterizer
+    /// (VelocityUI-x4q0). `@MainActor final class`, not `Sendable` — mirrors `videoController`'s
+    /// treatment, since it is touched only from `FeedScrollView`'s synchronous MainActor
+    /// scroll-path methods. See `HotBlockRasterizerStore`'s doc for why no lock is needed.
+    public let hotBlockRasterizerStore: HotBlockRasterizerStore
+
     /// Produces a fragment's first-paint image before its real image has decoded. Defaults
     /// to `DefaultPlaceholderRenderer` (thumbnail/BlurHash, VelocityUI's original behavior) —
     /// inject a different `PlaceholderRenderer` to plug in a custom first-paint strategy. See
@@ -72,6 +78,7 @@ public final class RenderEnvironment: Sendable {
         videoController: VideoController,
         videoPreparation: VideoPreparationActor,
         frozenBitmapStore: FrozenBitmapStore,
+        hotBlockRasterizerStore: HotBlockRasterizerStore,
         placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer(),
         contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil,
         pipelineTaskSpawnObserver: (@Sendable () -> Void)? = nil
@@ -92,6 +99,7 @@ public final class RenderEnvironment: Sendable {
         self.videoController = videoController
         self.videoPreparation = videoPreparation
         self.frozenBitmapStore = frozenBitmapStore
+        self.hotBlockRasterizerStore = hotBlockRasterizerStore
         self.placeholderRenderer = placeholderRenderer
         self.contentDeliveryObserver = contentDeliveryObserver
         self.pipelineTaskSpawnObserver = pipelineTaskSpawnObserver
@@ -112,6 +120,8 @@ public final class RenderEnvironment: Sendable {
     ///   docstring for why 2.0 is the default (VelocityUI-zgs).
     /// - A fresh `FrozenBitmapStore` at its own default byte budget — pass `frozenBitmapStore`
     ///   to inject a store with a custom budget or to share one across a caller-managed graph.
+    /// - A fresh `HotBlockRasterizerStore` — pass `hotBlockRasterizerStore` to share one across
+    ///   a caller-managed graph (mirrors `videoController`'s always-constructed-here treatment).
     @MainActor
     public convenience init(
         textPool: TextMeasurementPool = .init(),
@@ -121,6 +131,7 @@ public final class RenderEnvironment: Sendable {
         maxAttached: Int = 3,
         decodeScaleCeiling: CGFloat = 2.0,
         frozenBitmapStore: FrozenBitmapStore = .init(),
+        hotBlockRasterizerStore: HotBlockRasterizerStore = .init(),
         placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer(),
         contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil,
         pipelineTaskSpawnObserver: (@Sendable () -> Void)? = nil
@@ -136,6 +147,7 @@ public final class RenderEnvironment: Sendable {
             videoController: VideoController(videoPreparation: videoPrep, maxAttached: maxAttached),
             videoPreparation: videoPrep,
             frozenBitmapStore: frozenBitmapStore,
+            hotBlockRasterizerStore: hotBlockRasterizerStore,
             placeholderRenderer: placeholderRenderer,
             contentDeliveryObserver: contentDeliveryObserver,
             pipelineTaskSpawnObserver: pipelineTaskSpawnObserver

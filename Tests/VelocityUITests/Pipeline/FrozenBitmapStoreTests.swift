@@ -765,7 +765,8 @@ extension FrozenBitmapStoreTests {
             gifActor: GIFActor(),
             videoController: VideoController(videoPreparation: videoPrep),
             videoPreparation: videoPrep,
-            frozenBitmapStore: store
+            frozenBitmapStore: store,
+            hotBlockRasterizerStore: HotBlockRasterizerStore()
         )
     }
 

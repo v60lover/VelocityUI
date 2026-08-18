@@ -78,7 +78,12 @@ final class HotBlockMeasurer {
     }
 
     private let contentStorage = NSTextContentStorage()
-    private let layoutManager = NSTextLayoutManager()
+    /// `internal` (not `private`): `HotBlockRasterizer` (VelocityUI-x4q0) reads this to enumerate
+    /// ensured fragments for its tail-strip composite after each `measure(_:width:)` call, so it
+    /// can reuse THIS persistent layout manager instead of standing up a second, duplicate one per
+    /// hot block. Read-only in practice — no type outside this file may mutate layout manager
+    /// state directly; every edit must still go through `measure(_:width:)`.
+    let layoutManager = NSTextLayoutManager()
     private let container: NSTextContainer
     /// The legacy `NSTextStorage` bridge every edit (append AND full-replace alike) goes
     /// through. Captured ONCE, right after `addTextLayoutManager`, and never reassigned
