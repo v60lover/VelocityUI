@@ -28,6 +28,7 @@ public func flatten<ID: Hashable & Sendable>(
     // (not even reserved) in the common unframed case so the final `frames` array collapses
     // to `nil` and NodeTable never allocates a [FrameSpec] for unframed cells.
     var frameByIndex: [Int: FrameSpec] = [:]
+    var blockIDByIndex: [Int: BlockID] = [:]
     // Set the first time a TextNode is visited. Gates whether contentSizeCategory folds into
     // the returned NodeTable's top-level layoutHash (see the call site below for why this
     // matters: unconditionally folding it in would make classify() misclassify category-blind,
@@ -47,14 +48,23 @@ public func flatten<ID: Hashable & Sendable>(
         // frame win instead — do not swap this back.
         var node = node
         var spec = FrameSpec.unspecified
-        while let f = node as? FrameModifierNode {
-            spec = FrameSpec.merge(inner: f.spec, outer: spec)
-            node = f.content
+        var blockID: BlockID?
+        while true {
+            if let f = node as? FrameModifierNode {
+                spec = FrameSpec.merge(inner: f.spec, outer: spec)
+                node = f.content
+            } else if let modifier = node as? RenderIDModifierNode {
+                blockID = blockID ?? modifier.blockID
+                node = modifier.content
+            } else {
+                break
+            }
         }
 
         let myIndex = nodes.count
         parentIndices.append(parent)
         if spec.isSpecified { frameByIndex[myIndex] = spec }
+        if let blockID { blockIDByIndex[myIndex] = blockID }
         switch node {
         case let n as VStackNode:
             nodes.append(.vstack(VStackDescriptor(
@@ -75,6 +85,7 @@ public func flatten<ID: Hashable & Sendable>(
             nodes.append(.spacer(n.minLength ?? 0))
         case let n as TextNode:
             sawText = true
+            blockID = blockID ?? n.blockID
             nodes.append(.text(TextDescriptor(
                 content: n.content, font: n.font, color: n.color,
                 lineLimit: n.lineLimit, lineBreakMode: n.lineBreakMode.rawValue,
@@ -105,6 +116,7 @@ public func flatten<ID: Hashable & Sendable>(
     let frames: [FrameSpec]? = frameByIndex.isEmpty
         ? nil
         : (0..<nodes.count).map { frameByIndex[$0] ?? .unspecified }
+    let blockIDs = (0..<nodes.count).map { blockIDByIndex[$0] }
 
     // sawText gate: a category-blind (pure-image/spacer/container) tree must keep byte-identical
     // layoutHash across categories — folding it in unconditionally would make classify()'s
@@ -119,7 +131,8 @@ public func flatten<ID: Hashable & Sendable>(
         parentIndices: parentIndices,
         layoutHash: tableLayoutHash,
         appearanceHash: root.appearanceHash,
-        frames: frames
+        frames: frames,
+        blockIDs: blockIDs
     )
 }
 

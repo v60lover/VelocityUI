@@ -306,6 +306,8 @@ public struct NodeTable: Sendable {
     public let parentIndices: [Int]  // parentIndices[i] = parent of node i; -1 for root
     public let layoutHash: Int
     public let appearanceHash: Int
+    /// Optional stable identity for each flattened node, indexed identically to `nodes`.
+    public let blockIDs: [BlockID?]
 
     /// Parallel array of per-node `.frame()` specs, indexed identically to `nodes`.
     /// `nil` (not an all-`.unspecified` array) whenever no node in the tree was framed —
@@ -332,7 +334,8 @@ public struct NodeTable: Sendable {
         parentIndices: [Int],
         layoutHash: Int,
         appearanceHash: Int,
-        frames: [FrameSpec]? = nil
+        frames: [FrameSpec]? = nil,
+        blockIDs: [BlockID?]? = nil
     ) {
         self._itemID = AnyHashable(itemID)
         self.nodes = nodes
@@ -340,6 +343,7 @@ public struct NodeTable: Sendable {
         self.layoutHash = layoutHash
         self.appearanceHash = appearanceHash
         self.frames = frames
+        self.blockIDs = NodeTable.sanitizedBlockIDs(blockIDs, nodeCount: nodes.count)
         (childRanges, childIndices) = NodeTable.buildChildIndex(parentIndices: parentIndices)
     }
 
@@ -357,6 +361,11 @@ public struct NodeTable: Sendable {
     public func frame(at i: Int) -> FrameSpec {
         guard let frames, i >= 0, i < frames.count else { return .unspecified }
         return frames[i]
+    }
+
+    public func blockID(at i: Int) -> BlockID? {
+        guard i >= 0, i < blockIDs.count else { return nil }
+        return blockIDs[i]
     }
 
     // MARK: - Private
@@ -381,5 +390,22 @@ public struct NodeTable: Sendable {
 
         let ranges = (0..<n).map { i in starts[i]..<(starts[i] + childCount[i]) }
         return (ranges, idx)
+    }
+
+    private static func sanitizedBlockIDs(_ proposed: [BlockID?]?, nodeCount: Int) -> [BlockID?] {
+        guard var proposed, proposed.count == nodeCount else {
+            return [BlockID?](repeating: nil, count: nodeCount)
+        }
+        var counts: [BlockID: Int] = [:]
+        for case let id? in proposed { counts[id, default: 0] += 1 }
+        let duplicates = counts.filter { $0.value > 1 }.map(\.key)
+        if !duplicates.isEmpty {
+            assertionFailure("Duplicate render IDs in one NodeTable")
+            let duplicateSet = Set(duplicates)
+            for index in proposed.indices where proposed[index].map(duplicateSet.contains) == true {
+                proposed[index] = nil
+            }
+        }
+        return proposed
     }
 }

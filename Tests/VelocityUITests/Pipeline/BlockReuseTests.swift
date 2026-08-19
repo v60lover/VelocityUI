@@ -156,6 +156,14 @@ final class BlockReuseTests: XCTestCase {
         XCTAssertNotEqual(a.contentHash, b.contentHash, "...but contentHash still tracks the content change")
     }
 
+    func testBlockKey_ExplicitIDSurvivesSiblingInsertionAndContentChanges() {
+        let stable = BlockID("paragraph")
+        let before = BlockKey(itemID: "msg", blockID: stable)
+        let after = BlockKey(itemID: "msg", blockID: stable)
+        XCTAssertEqual(before, after)
+        XCTAssertNotEqual(before, BlockKey(itemID: "msg", index: 3))
+    }
+
     // MARK: - Acceptance 2: reuseDecision
 
     func testReuseDecision_SameID_ReturnsInPlace() {

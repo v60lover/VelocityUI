@@ -174,6 +174,18 @@ final class IncrementalMarkdownParserTests: XCTestCase {
         XCTAssertGreaterThan(parser.frontier, 1, "later content must still go on sealing further blocks")
     }
 
+    func testBlockList_ParserIDsPersistFromHotCreationThroughSealing() {
+        var parser = IncrementalMarkdownParser()
+        parser.append("Growing")
+        let hotID = parser.blockList(itemID: "msg", width: 300).first?.key.blockID
+        XCTAssertNotNil(hotID)
+
+        parser.append(" paragraph\n\n")
+        let sealed = parser.blockList(itemID: "msg", width: 300)
+        XCTAssertEqual(sealed.first?.key.blockID, hotID)
+        XCTAssertEqual(sealed.first?.fragment.blockID, hotID)
+    }
+
     // MARK: - List/blockquote backoff: trailing open container is not sealed across a blank line
 
     func testListBackoff_BlankLineInsideOpenList_DoesNotSealUntilContainerCloses() {

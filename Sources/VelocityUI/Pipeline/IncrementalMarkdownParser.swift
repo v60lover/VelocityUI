@@ -51,6 +51,7 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
 
     /// Finalized, immutable blocks — never touched again once appended here.
     private(set) var sealedBlocks: [ParsedMDBlock] = []
+    private(set) var sealedBlockIDs: [BlockID] = []
 
     /// The unsealed tail of the source since the last seal — re-scanned in full on every
     /// `append(_:)` (bounded in size except during an open fence; see the spike's bounded-reach
@@ -60,6 +61,8 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
     /// The hot region's current parse, kept alongside `hotTail` so `blocks(itemID:width:)`
     /// doesn't need to re-run the scanner.
     private(set) var hotBlocksState: [ParsedMDBlock] = []
+    private(set) var hotBlockIDs: [BlockID] = []
+    private var nextBlockID = 0
 
     public init() {}
 
@@ -75,11 +78,16 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         guard !text.isEmpty else { return }
         hotTail += text
         let result = Self.parseTail(hotTail)
+        let sealedIDs = reconciledIDs(existing: hotBlockIDs, count: result.sealed.count)
         if !result.sealed.isEmpty {
             sealedBlocks.append(contentsOf: result.sealed)
+            sealedBlockIDs.append(contentsOf: sealedIDs)
             hotTail = String(hotTail[result.cutIndex...])
         }
         hotBlocksState = result.hot
+        hotBlockIDs = reconciledIDs(
+            existing: Array(hotBlockIDs.dropFirst(result.sealed.count)), count: result.hot.count
+        )
     }
 
     /// Builds the `[Block]` list a caller feeds into `diff(previous:new:frontier:)` —
@@ -88,8 +96,8 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
     public func blockList<ID: Hashable & Sendable>(itemID: ID, width: CGFloat) -> [Block] {
         var blocks: [Block] = []
         blocks.reserveCapacity(sealedBlocks.count + hotBlocksState.count)
-        for (index, parsed) in (sealedBlocks + hotBlocksState).enumerated() {
-            blocks.append(Self.makeBlock(parsed, itemID: itemID, index: index, width: width))
+        for (index, pair) in zip(sealedBlocks + hotBlocksState, sealedBlockIDs + hotBlockIDs).enumerated() {
+            blocks.append(Self.makeBlock(pair.0, itemID: itemID, index: index, blockID: pair.1, width: width))
         }
         return blocks
     }
@@ -97,12 +105,21 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
     // MARK: - Block construction
 
     private static func makeBlock<ID: Hashable & Sendable>(
-        _ parsed: ParsedMDBlock, itemID: ID, index: Int, width: CGFloat
+        _ parsed: ParsedMDBlock, itemID: ID, index: Int, blockID: BlockID, width: CGFloat
     ) -> Block {
         let descriptor = makeDescriptor(parsed)
         let frame = CGRect(x: 0, y: 0, width: width, height: 0)
-        let fragment = Fragment(id: index, content: .text(descriptor), frame: frame)
-        return Block(key: BlockKey(itemID: itemID, index: index), fragment: fragment, layout: ResolvedLayout(totalFrame: frame))
+        let fragment = Fragment(id: index, blockID: blockID, content: .text(descriptor), frame: frame)
+        return Block(key: BlockKey(itemID: itemID, blockID: blockID), fragment: fragment, layout: ResolvedLayout(totalFrame: frame))
+    }
+
+    private mutating func reconciledIDs(existing: [BlockID], count: Int) -> [BlockID] {
+        var ids = Array(existing.prefix(count))
+        while ids.count < count {
+            ids.append(BlockID(nextBlockID))
+            nextBlockID += 1
+        }
+        return ids
     }
 
     /// A block's rendered text plus the font it renders with — the one place block-kind →

@@ -5,6 +5,18 @@ import CoreGraphics
 
 // MARK: - BlockKey
 
+/// Stable, caller-supplied identity for a render block.
+///
+/// `BlockID` is separate from node indices: indices continue routing layout and layers, while
+/// this value lets a block retain its cache identity when siblings move.
+public struct BlockID: Hashable, Sendable {
+    nonisolated(unsafe) public let rawValue: AnyHashable
+
+    public init<ID: Hashable & Sendable>(_ rawValue: ID) {
+        self.rawValue = AnyHashable(rawValue)
+    }
+}
+
 /// Stable identity for one block within one item's ordered block list — item id + position.
 ///
 /// `itemID` is `AnyHashable` behind `nonisolated(unsafe)` (mirrors `NodeTable.itemID`): not
@@ -18,10 +30,40 @@ public struct BlockKey: Hashable, Sendable {
     // See struct-level doc for the nonisolated(unsafe) rationale — identical to NodeTable's.
     nonisolated(unsafe) public let itemID: AnyHashable
     public let index: Int
+    public let blockID: BlockID?
 
     public init<ID: Hashable & Sendable>(itemID: ID, index: Int) {
         self.itemID = AnyHashable(itemID)
         self.index = index
+        self.blockID = nil
+    }
+
+    /// Uses an explicit stable identity while retaining the positional initializer above for
+    /// existing callers. Equal stable IDs within the same item intentionally share a key.
+    public init<ID: Hashable & Sendable>(itemID: ID, blockID: BlockID) {
+        self.itemID = AnyHashable(itemID)
+        self.index = 0
+        self.blockID = blockID
+    }
+
+    public static func == (lhs: BlockKey, rhs: BlockKey) -> Bool {
+        guard lhs.itemID == rhs.itemID else { return false }
+        switch (lhs.blockID, rhs.blockID) {
+        case let (.some(lhs), .some(rhs)): return lhs == rhs
+        case (.none, .none): return lhs.index == rhs.index
+        case (.some, .none), (.none, .some): return false
+        }
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(itemID)
+        if let blockID {
+            hasher.combine(1)
+            hasher.combine(blockID)
+        } else {
+            hasher.combine(0)
+            hasher.combine(index)
+        }
     }
 }
 
@@ -32,6 +74,7 @@ public struct BlockKey: Hashable, Sendable {
 /// last is complete and frozen, and the last (`hot`) block may still grow.
 public struct Block: Sendable {
     public let key: BlockKey
+    public let blockID: BlockID?
     public let fragment: Fragment
     public let layout: ResolvedLayout
 
@@ -46,6 +89,7 @@ public struct Block: Sendable {
 
     public init(key: BlockKey, fragment: Fragment, layout: ResolvedLayout) {
         self.key = key
+        self.blockID = fragment.blockID
         self.fragment = fragment
         self.layout = layout
         switch fragment.content {

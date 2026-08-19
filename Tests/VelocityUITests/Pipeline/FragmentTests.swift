@@ -171,6 +171,18 @@ final class FragmentTests: XCTestCase {
         }
     }
 
+    func testExtractFragments_PropagatesStableBlockID() async throws {
+        let table = NodeTable(
+            itemID: "stable-fragment",
+            nodes: [.text(textDesc("Stable"))], parentIndices: [-1],
+            layoutHash: 1, appearanceHash: 1, blockIDs: [BlockID("stable")]
+        )
+        let layout = await measureNode(table, nodeIndex: 0, width: 200, textPool: TextMeasurementPool(capacity: 1))
+        let fragment = try XCTUnwrap(extractFragments(table: table, layout: layout).first)
+        XCTAssertEqual(fragment.id, 0, "layout routing continues to use the node index")
+        XCTAssertEqual(fragment.blockID, BlockID("stable"))
+    }
+
     // MARK: - Test 5: HStack spacing is correctly applied to absolute x-origins
 
     func testHStackSpacingAppliedToAbsoluteFrames() async throws {

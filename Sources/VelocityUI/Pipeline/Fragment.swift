@@ -21,9 +21,18 @@ public enum FragmentContent: Sendable {
 /// Array order = z-order (back to front), matching ZStack semantics.
 public struct Fragment: Sendable {
     public let id: Int
+    /// Optional stable identity propagated from a `.renderID(...)` modifier.
+    public let blockID: BlockID?
     public let content: FragmentContent
     /// Absolute frame in cell coordinates (origin relative to the cell's top-left corner).
     public let frame: CGRect
+
+    public init(id: Int, blockID: BlockID? = nil, content: FragmentContent, frame: CGRect) {
+        self.id = id
+        self.blockID = blockID
+        self.content = content
+        self.frame = frame
+    }
 }
 
 // MARK: - Post-pass extraction
@@ -87,7 +96,7 @@ private nonisolated func collectFragments(
         var frame = drawFrame
         if let clip { frame = frame.intersection(clip) }
         guard !frame.isNull, !frame.isEmpty else { return }
-        result.append(Fragment(id: nodeIndex, content: content, frame: frame))
+        result.append(Fragment(id: nodeIndex, blockID: table.blockID(at: nodeIndex), content: content, frame: frame))
     }
 
     switch table.nodes[nodeIndex] {

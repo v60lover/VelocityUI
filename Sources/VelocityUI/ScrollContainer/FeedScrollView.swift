@@ -930,8 +930,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             case .vstack, .hstack, .zstack: return nil  // nested container — not flat, bail
             }
             let frame = CGRect(x: 0, y: 0, width: width, height: 0)
-            let fragment = Fragment(id: nodeIndex, content: content, frame: frame)
-            let key = BlockKey(itemID: itemID, index: position)
+            let blockID = table.blockID(at: nodeIndex)
+            let fragment = Fragment(id: nodeIndex, blockID: blockID, content: content, frame: frame)
+            let key = blockID.map { BlockKey(itemID: itemID, blockID: $0) }
+                ?? BlockKey(itemID: itemID, index: position)
             blocks.append(Block(key: key, fragment: fragment, layout: ResolvedLayout(totalFrame: frame)))
         }
         return (blocks, vstackDescriptor.spacing)
@@ -966,8 +968,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                 return false  // nested container — not flat, bail (matches flatBlocks)
             }
         }
-        for position in childIndices.indices {
-            keys.insert(BlockKey(itemID: itemID, index: position))
+        for (position, nodeIndex) in childIndices.enumerated() {
+            let key = table.blockID(at: nodeIndex).map { BlockKey(itemID: itemID, blockID: $0) }
+                ?? BlockKey(itemID: itemID, index: position)
+            keys.insert(key)
         }
         return true
     }

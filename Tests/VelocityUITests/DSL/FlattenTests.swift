@@ -116,6 +116,19 @@ final class FlattenTests: XCTestCase {
         }
     }
 
+    @MainActor func testRenderID_PropagatesThroughNestedModifiers() {
+        let root = VStackNode {
+            TextNode("text").renderID("text").frame(width: 100)
+            AsyncImageNode(url: nil).frame(height: 30).renderID("image")
+            SpacerNode().renderID("geometry")
+        }
+        let table = flatten(root, itemID: "item")
+
+        XCTAssertEqual(table.blockID(at: 1), BlockID("text"))
+        XCTAssertEqual(table.blockID(at: 2), BlockID("image"))
+        XCTAssertEqual(table.blockID(at: 3), BlockID("geometry"))
+    }
+
     // MARK: - Descriptor mapping
 
     @MainActor func testFlatten_asyncImageNode_mapsAllFields() {
