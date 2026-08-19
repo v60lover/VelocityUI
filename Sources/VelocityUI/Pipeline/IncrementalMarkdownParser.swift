@@ -31,27 +31,22 @@ struct ParsedMDBlock: Equatable {
 // MARK: - IncrementalMarkdownParser
 
 /// Consumes an appended token/markdown stream and emits blocks split into two tiers at a
-/// monotonically non-decreasing frontier `F`: **sealed** blocks (`source[0..<F)`), whose
-/// boundary/type/content are guaranteed never to change under any future append, and **hot**
-/// blocks (the open right spine — the still-open leaf block plus any open fence/container),
-/// which may still be retroactively re-typed or absorb more lines.
+/// monotonically non-decreasing frontier `F`: **sealed** blocks (`source[0..<F)`), guaranteed
+/// never to change, and **hot** blocks (the open right spine), which may still be retyped or
+/// absorb more lines. This is the contract VelocityUI-qc7.1's spike proved sufficient to keep
+/// `freeze()` valid under real streaming markdown (`INCREMENTAL_PARSER_STABILITY_SPIKE.md`) — a
+/// caller may `freeze()` sealed blocks, never the hot region. `frontier` (== `sealedBlocks.count`)
+/// is exactly `diff(previous:new:frontier:)`'s `frontier:` argument.
 ///
-/// This is the two-tier contract VelocityUI-qc7.1's spike proved sufficient to keep `freeze()`
-/// valid under real streaming markdown (`INCREMENTAL_PARSER_STABILITY_SPIKE.md`): a caller may
-/// `freeze()` sealed blocks; it must never freeze the hot region. `frontier` (== `sealedBlocks
-/// .count`) is exactly the `frontier:` argument `diff(previous:new:frontier:)` expects.
+/// **Not a RenderEnvironment collaborator** — per-item streaming state, one instance per
+/// in-flight message, owned by whatever holds that message's accumulated source (same lifetime
+/// as `previousFragments`/`NodeTable`), not a composition-root collaborator.
 ///
-/// **Not a RenderEnvironment collaborator.** This is per-item streaming state — one instance per
-/// in-flight streaming message, owned by whatever holds that message's accumulated source (the
-/// same lifetime class as `previousFragments`/`NodeTable` already have in the C3 bind-site path)
-/// — not a shared, long-lived cache/actor/pool that belongs in the composition root.
-///
-/// **Scope note (deliberately simplified subset of CommonMark, not full compliance):** list/
-/// blockquote continuation detection is line-shape-based (marker/indent heuristics), not a full
-/// lazy-continuation implementation; GFM tables render each row as one pipe-joined text line
-/// (`Block` has no table `FragmentContent`); fences do not nest inside list items. What IS
-/// guaranteed, and what this bead's acceptance criteria test: a block once sealed never moves,
-/// `F` never decreases, and a blank line inside an open fence never seals.
+/// **Deliberately simplified CommonMark subset, not full compliance:** list/blockquote
+/// continuation is line-shape heuristics, not full lazy-continuation; GFM tables render each row
+/// as one pipe-joined text line; fences don't nest inside list items. Guaranteed (tested by this
+/// bead's acceptance criteria): a sealed block never moves, `F` never decreases, a blank line
+/// inside an open fence never seals.
 public struct IncrementalMarkdownParser: Sendable, Equatable {
 
     /// Finalized, immutable blocks — never touched again once appended here.
@@ -110,21 +105,17 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         return Block(key: BlockKey(itemID: itemID, index: index), fragment: fragment, layout: ResolvedLayout(totalFrame: frame))
     }
 
-    /// A block's rendered text plus the font it renders with — the one place block-kind ->
+    /// A block's rendered text plus the font it renders with — the one place block-kind →
     /// content-transform/font-size/weight is decided, shared by `makeDescriptor` (Layer 2's
-    /// `TextDescriptor`, via `blockList(itemID:width:)`) and `renderNodes` (Layer 1's `TextNode`,
-    /// in StreamingMarkdownText.swift) so `content` and `font` can never silently diverge between
-    /// the two representations of the same block (CLAUDE.md Section 3: extract the helper before
-    /// two call sites need the same transform, not after).
+    /// `TextDescriptor`) and `renderNodes` (Layer 1's `TextNode`) so `content`/`font` can never
+    /// silently diverge between the two representations.
     ///
-    /// Scope note: this covers `content` + `font` only. Color/line-break are NOT unified — each
-    /// caller uses its own default (`makeDescriptor` hardcodes opaque black + `lineBreakMode: 0`;
-    /// `renderNodes` takes `TextNode`'s defaults, `.primary` + `.byWordWrapping`, which happen to
-    /// render identically today but are two independent decisions, not one shared source of
-    /// truth). Harmless in practice — the two paths are never rendering the same block
-    /// side-by-side, and `Block.contentHash`/`FrozenBitmapStore` key off geometry-affecting hashes,
-    /// not color — but don't extend the "can never diverge" claim above `content`/`font` without
-    /// also unifying color/line-break into `StyledText`.
+    /// Covers `content` + `font` only — color/line-break are each caller's own default
+    /// (`makeDescriptor`: opaque black + `lineBreakMode: 0`; `renderNodes`: `TextNode`'s
+    /// `.primary` + `.byWordWrapping`). Independent decisions that render identically today but
+    /// aren't a shared source of truth — harmless since the two paths never render the same
+    /// block side-by-side. Don't extend the "can never diverge" claim past `content`/`font`
+    /// without also unifying those.
     struct StyledText {
         var content: String
         var font: VFontDescriptor
@@ -139,7 +130,7 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             size = CGFloat(max(15, 28 - (level - 1) * 3))
             weight = 7  // bold
         case .codeFence:
-            size = 14
+            size = 20
             weight = 4
             // Strip the fence marker lines — they are syntax, not renderable content. The
             // opening marker line always exists (a codeFence block can't be classified without
@@ -157,17 +148,17 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             }
             content = lines.joined(separator: "\n")
         case .tableRow:
-            size = 15
+            size = 20
             weight = 4
         case .listItem:
-            size = 16
+            size = 20
             weight = 4
             content = "• " + Self.stripListMarker(content)
         case .blockquote:
-            size = 16
+            size = 20
             weight = 4
         case .paragraph:
-            size = 16
+            size = 20
             weight = 4
         }
         return StyledText(content: content, font: VFontDescriptor(size: size, weight: weight))

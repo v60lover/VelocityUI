@@ -6,13 +6,14 @@ import CoreGraphics
 @testable import VelocityUI
 
 /// Covers VelocityUI-0wi (hybrid reuse Phase A): the pure block model, freeze state, per-block
-/// diff, and reuseDecision. The pure sections below (Block/BlockKey/reuseDecision/diff/freeze
-/// via an injected spy) compile and run WITHOUT UIKit — `measure`/`rasterize` are injected
-/// closures, never the concrete `TextMeasurementContext`/`rasterizeText`, so call-count
-/// assertions run on plain `swift test`. The trailing `#if canImport(UIKit)` section reproduces
-/// VelocityUI-6qd's anti-jank trend through the REAL measure+rasterize primitives, routed
-/// through the production Block/diff/freeze types instead of the spike's ad hoc dictionaries —
-/// it only compiles/runs on a UIKit host (DeviceTestHost).
+/// diff, and reuseDecision.
+///
+/// - Pure sections (Block/BlockKey/reuseDecision/diff/freeze via an injected spy) run WITHOUT
+///   UIKit — `measure`/`rasterize` are injected closures, never the real
+///   `TextMeasurementContext`/`rasterizeText`, so call-count assertions run on plain `swift test`.
+/// - The trailing `#if canImport(UIKit)` section reproduces VelocityUI-6qd's anti-jank trend
+///   through the real production types (not the spike's ad hoc dictionaries) — only
+///   compiles/runs on a UIKit host (DeviceTestHost).
 final class BlockReuseTests: XCTestCase {
 
     // MARK: - Fixture builders
@@ -432,17 +433,14 @@ final class BlockReuseTests: XCTestCase {
 
     // MARK: - Acceptance 6 (VelocityUI-ezo.2.5): content-size-category change invalidates frozen bitmaps
 
-    /// A content-size-category change re-derives a text node's TextDescriptor with a different
-    /// layoutHash (see FlattenTests' contentSizeCategory coverage for the flatten()-side proof),
-    /// which changes Block.contentHash for that block. This test proves what that hash change
-    /// buys in production: `diff(previous:new:)` no longer classifies the block as `unchanged`,
-    /// so the C3 in-place path (FeedScrollView.applyInPlaceBlockDiff) re-measures + re-rasterizes
-    /// it and `FrozenBitmapStore.store(...)` overwrites the stale entry in place for the SAME
-    /// `BlockKey` — no separate "clear the cache" call needed anywhere. `scaledMeasure` below
-    /// stands in for `UIFontMetrics` scaling: it returns a taller size for the "accessibility"
-    /// descriptor, exactly as `resolvedFont` would after ezo.2.5 (a local closure rather than
-    /// the shared `MeasureRasterizeSpy`, which measures by content length only and would return
-    /// identical sizes for these two same-text descriptors).
+    /// A content-size-category change re-derives a TextDescriptor with a different layoutHash
+    /// (see FlattenTests' contentSizeCategory coverage), changing Block.contentHash. This proves
+    /// what that buys in production: `diff(previous:new:)` no longer classifies the block as
+    /// `unchanged`, so the C3 in-place path (FeedScrollView.applyInPlaceBlockDiff) re-measures +
+    /// re-rasterizes and `FrozenBitmapStore.store(...)` overwrites the stale entry for the SAME
+    /// `BlockKey` — no separate cache-clear call anywhere. `scaledMeasure` stands in for
+    /// `UIFontMetrics` scaling (a local closure, not `MeasureRasterizeSpy`, which measures by
+    /// content length only and would return identical sizes for same-text descriptors).
     func testContentSizeCategoryChange_InvalidatesFrozenBitmapAndReFreezes() {
         let key = BlockKey(itemID: "msg", index: 0)
 
@@ -524,13 +522,12 @@ extension BlockReuseTests {
         let naiveSeconds: TimeInterval
     }
 
-    /// Streams `totalTokens` tokens through the PRODUCTION Block/BlockKey/FreezeState/diff/
-    /// freeze types using the REAL `TextMeasurementContext.measure` and `rasterizeText` — the
-    /// "through the real types" counterpart to VelocityUI-6qd's spike harness (which used ad
-    /// hoc dictionaries). Same token/block-quota model as HybridReuseSpikeTests.simulateStreaming
-    /// so the resulting trend is directly comparable. Separate contexts per arm for the same
-    /// reason the spike uses them (VelocityUI-6qd's design notes): TextMeasurementContext
-    /// mutates shared internal TextKit 2 state, and interleaving the naive arm's ever-growing
+    /// Streams `totalTokens` through the PRODUCTION Block/BlockKey/FreezeState/diff/freeze
+    /// types using the REAL `TextMeasurementContext.measure`/`rasterizeText` — the "through the
+    /// real types" counterpart to VelocityUI-6qd's spike harness (ad hoc dictionaries). Same
+    /// token/block-quota model as `HybridReuseSpikeTests.simulateStreaming` for a directly
+    /// comparable trend. Separate contexts per arm (per VelocityUI-6qd's design notes):
+    /// `TextMeasurementContext` mutates shared TextKit 2 state, so interleaving the naive arm's
     /// calls through the frozen arm's context would leak overhead into its reading.
     private func simulateBlockStreaming(
         totalTokens: Int,

@@ -126,16 +126,15 @@ final class RenderCellTests: XCTestCase {
 
     // MARK: - Animation test helpers (window-connected layers only)
 
-    /// Creates a cell whose layer is attached to a (non-key) UIWindow so CA
-    /// actually runs its animation system. Without a display connection, all
-    /// animation(forKey:) / animationKeys() calls return nil/empty in the test runner.
+    /// Creates a cell whose layer is attached to a (non-key) UIWindow so CA actually runs its
+    /// animation system — without a display connection, `animation(forKey:)`/`animationKeys()`
+    /// return nil/empty in the test runner.
     ///
-    /// CATransaction.flush() is required after triggering the animation before inspecting keys.
-    /// Layer speed is set to 0 so animations are frozen in place (don't complete between flush
-    /// and the assertion).
-    /// Window-connected cell with speed=0: explicit animations (CATransition via add(_:forKey:))
-    /// appear in animationKeys() after flush. Does NOT work for implicit animations (property
-    /// changes in transactions) — CA skips implicit animation creation for speed=0 layers.
+    /// `CATransaction.flush()` is required after triggering the animation before inspecting keys.
+    /// Layer speed is set to 0 so animations freeze in place instead of completing between flush and
+    /// the assertion. Works for explicit animations (CATransition via `add(_:forKey:)`) — does NOT
+    /// work for implicit animations (property changes in transactions), since CA skips implicit
+    /// animation creation for speed=0 layers.
     private func makeCellInWindow(size: CGSize = CGSize(width: 320, height: 400))
         -> (cell: RenderCell, window: UIWindow) {
         let window = UIWindow(frame: CGRect(origin: .zero, size: size))
@@ -320,20 +319,17 @@ final class RenderCellTests: XCTestCase {
 
     // MARK: - Test 7b: Cross-item recycle with a DIFFERENT fragment id set does not orphan sublayers
 
-    /// Regression for a latent bug in VelocityUI-ksh's secondary fix (retain-and-clear cross-item
-    /// recycle): `applyLayout`'s prune only ran the id-diff when `sublayers.count > fragments.count`
-    /// (RenderCell.swift). `fragment.id` is POSITIONAL (== nodeIndex — see Fragment.swift), so a
-    /// cross-item recycle into a cell shape with an EQUAL-OR-LARGER, but DIFFERENT, id set never
-    /// triggered that count-based guard — e.g. recycling an image-only cell (ids {0}) into a
-    /// VStack{image,text} cell (ids {1,2}): count 1→2, so `1 > 2` is false, id 0's sublayer is
-    /// never removed (orphaned — leak + growing layer tree) while ids 1 and 2 allocate fresh
-    /// layers on top of it.
+    /// Regression for a latent bug in VelocityUI-ksh's secondary fix: `applyLayout`'s prune only ran
+    /// the id-diff when `sublayers.count > fragments.count`. `fragment.id` is POSITIONAL (== nodeIndex),
+    /// so a cross-item recycle into a cell shape with an EQUAL-OR-LARGER but DIFFERENT id set never
+    /// triggered the guard — e.g. an image-only cell (ids {0}) recycled into a VStack{image,text} cell
+    /// (ids {1,2}): count 1→2 makes `1 > 2` false, so id 0's sublayer is orphaned (leak + growing layer
+    /// tree) while ids 1 and 2 allocate fresh layers on top of it.
     ///
-    /// The fix: `prepareForReuse`'s cross-item branch sets `needsSublayerReconcile`, forcing the
-    /// NEXT `applyLayout` to run the full id-diff prune unconditionally (not gated on count),
-    /// then clear the flag. This test asserts NO orphaned sublayer remains after exactly that
-    /// scenario — `contentLayer.sublayers` count and the old id (0) are gone, only ids {1, 2}
-    /// (the new item's exact fragment set) remain.
+    /// The fix: `prepareForReuse`'s cross-item branch sets `needsSublayerReconcile`, forcing the NEXT
+    /// `applyLayout` to run the full id-diff prune unconditionally, then clear the flag. This test
+    /// asserts NO orphaned sublayer remains — only ids {1, 2} (the new item's exact fragment set)
+    /// remain.
     func testCrossItemRecycleWithDisjointFragmentIDsDoesNotOrphanSublayers() {
         let cell = makeCell()
 

@@ -4,12 +4,10 @@ import Foundation
 
 /// The data handed to a `PlaceholderRenderer` for one image fragment's first paint.
 ///
-/// `.thumbnail`/`.blurHash` are the built-in cases VelocityUI decodes itself
-/// (`DefaultPlaceholderRenderer`). `.custom` is the open door for a consumer's own
-/// first-paint strategy (dominant color, ThumbHash, a proprietary format, a pre-decoded
-/// low-res `CGImage` wrapped in a payload type, static skeleton art) — set via
-/// `AsyncImageNode.placeholder(custom:)` and interpreted only by a renderer the consumer
-/// injects through `RenderEnvironment`.
+/// `.thumbnail`/`.blurHash` are built-in, decoded by `DefaultPlaceholderRenderer`. `.custom`
+/// is the open door for a consumer's own first-paint strategy (dominant color, ThumbHash, a
+/// pre-decoded low-res `CGImage`, skeleton art) — set via `AsyncImageNode.placeholder(custom:)`
+/// and interpreted only by a renderer injected through `RenderEnvironment`.
 public enum PlaceholderPayload: Sendable, Hashable {
     case thumbnail(Data)
     case blurHash(String)

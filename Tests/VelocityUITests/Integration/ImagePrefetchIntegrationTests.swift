@@ -97,15 +97,12 @@ final class ImagePrefetchIntegrationTests: XCTestCase {
 
     // MARK: - Test 1: prefetch fires for ahead-window URLs
 
-    /// Verifies that after a boundary crossing at leading=0, imageActor.prefetch is invoked
-    /// for indices [0, 10) — the half-open `prefetchRange(leadingIndex: 0, ahead: 10, ...)`
-    /// window, per RenderPipeline's own authoritative formula (RenderPipelineTests:
-    /// "prefetchAhead=10 means indices 0–9 should all be cache hits"). This includes the
-    /// visible indices 0-2: on a cold start, WorkingRange and LayoutCache are both empty, so
-    /// items 0-2 mount with an empty placeholder (no fragments yet) and the pipeline treats
-    /// them like any other index in range — they get layout-resolved and prefetched exactly
-    /// like 3-9, and refineKnownFrames delivers the resolved fragments to their already-
-    /// mounted placeholder cells once the pipeline commits.
+    /// Verifies that after a boundary crossing at leading=0, imageActor.prefetch fires for
+    /// indices [0, 10) — the half-open `prefetchRange(leadingIndex: 0, ahead: 10, ...)` window
+    /// (RenderPipelineTests: "prefetchAhead=10 means indices 0–9 should all be cache hits").
+    /// Includes visible indices 0-2: on a cold start WorkingRange/LayoutCache are empty, so they
+    /// mount with an empty placeholder and get layout-resolved/prefetched like 3-9, with
+    /// refineKnownFrames delivering fragments to the already-mounted cells once committed.
     func testPrefetchFiresForAheadWindow() async throws {
         let items = makeItems(count: 50)
         let env = makeEnvironmentWithCountingSession()
@@ -122,15 +119,13 @@ final class ImagePrefetchIntegrationTests: XCTestCase {
         feed.items = items
         feed.layoutSubviews()
 
-        // Poll until all 10 expected indices have been prefetched, or 2s max. Waiting on a
-        // single URL (e.g. index 9's) is not sufficient — prefetch Tasks for indices 0-9 are
-        // spawned as concurrent, unstructured Tasks with no ordering guarantee, so one URL
-        // landing in the set does not imply the others have too.
+        // Poll until all 10 expected indices have been prefetched, or 2s max. One URL landing
+        // doesn't imply the rest have — prefetch Tasks for indices 0-9 are concurrent,
+        // unstructured, unordered.
         //
-        // Task.sleep is used here because ImageActor runs on a custom DispatchQueueExecutor
-        // (velocityui.image.actor). Task.yield alone cannot cross the executor boundary —
-        // the prefetch Task runs at .utility priority on a separate serial queue, so we must
-        // poll until the dispatch queue delivers the work. Bounded at 200 × 10ms = 2s.
+        // Task.sleep (not Task.yield) because ImageActor runs on a custom DispatchQueueExecutor
+        // (velocityui.image.actor) — Task.yield can't cross the executor boundary, so we poll
+        // until the queue delivers the work. Bounded at 200 × 10ms = 2s.
         var retries = 0
         while retries < 200 {
             let prefetched = await imageActor._testGetPrefetchedURLs()
@@ -191,20 +186,15 @@ final class ImagePrefetchIntegrationTests: XCTestCase {
             retries += 1
         }
 
-        // Trigger refineKnownFrames so resolvedFrames[3] reflects the real (measured) height
-        // before we read it below.
+        // Trigger refineKnownFrames so resolvedFrames[3] reflects the real (measured) height.
         //
-        // NOTE: mounting index 3 can deliver its content via either of two valid paths —
-        // synchronously in this very call (if the prefetch's decode has already finished and
-        // the image is cache-resident by mount time) or asynchronously afterward (if the
-        // decode is still in flight). Both are correct; which one fires is a race with the
-        // background decode, not something the test controls. See VelocityUI-xbk: an earlier
-        // version of this test observed only the async path (an applyContent-delivery hook)
-        // and flaked hard under full-suite load, where the extra elapsed real time before this
-        // point made the synchronous path far more likely to win — the hook then never fired
-        // and the test spun out its whole timeout window despite the image having rendered
-        // correctly. `_debugIsContentRevealed` is path-independent: it reflects
-        // `RenderCell`'s `contentLayer` reveal state, which both delivery paths set.
+        // NOTE: mounting index 3 can deliver content synchronously (decode already finished,
+        // cache-resident by mount time) or asynchronously (decode still in flight) — both valid,
+        // which fires is a race with the background decode. See VelocityUI-xbk: an earlier
+        // version observed only the async path (applyContent hook) and flaked under full-suite
+        // load, where extra elapsed time made the sync path win, the hook never fired, and the
+        // test spun out its timeout despite correct rendering. `_debugIsContentRevealed` is
+        // path-independent — reflects `RenderCell`'s `contentLayer` reveal state either way sets.
         feed.layoutSubviews()
         guard let frame3 = feed._debugResolvedFrame(at: 3) else {
             XCTFail("index 3 must have a resolved frame once its WorkingRange entry has committed")

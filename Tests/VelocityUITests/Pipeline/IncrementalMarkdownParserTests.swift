@@ -271,14 +271,12 @@ final class IncrementalMarkdownParserTests: XCTestCase {
 
     // MARK: - T2: flat per-token cost through the parser, asserted via call counts (not timing)
 
-    /// `testBoundedReach_HotRegionStaysSmallAcrossManySealedParagraphs` above proxies the
-    /// Theta(n) vs Theta(n^2) claim via hot-region character count. This test proxies it more
-    /// directly, driving the REAL parser -> diff -> freeze pipeline the bind site uses and
-    /// asserting on `measure`/`rasterize` CALL COUNTS: once a block seals and gets frozen, it
-    /// must incur ZERO further measure/rasterize calls no matter how much more streams in after
-    /// it. Reuses `BlockReuseTests.MeasureRasterizeSpy` rather than inventing a parallel spy, and
-    /// deliberately avoids `Task.sleep`/wall-clock timing (flake risk on loaded CI) — the
-    /// assertion is purely structural call-count arithmetic.
+    /// Where the test above proxies the Theta(n) vs Theta(n^2) claim via hot-region character
+    /// count, this one proxies it directly: drives the real parser -> diff -> freeze pipeline and
+    /// asserts `measure`/`rasterize` CALL COUNTS — once a block seals and freezes, it must incur
+    /// ZERO further calls no matter how much more streams in after it. Reuses
+    /// `BlockReuseTests.MeasureRasterizeSpy` and avoids `Task.sleep`/wall-clock timing (flake risk
+    /// on loaded CI) — purely structural call-count arithmetic.
     func testFlatPerTokenCost_SealedBlocksIncurZeroFurtherMeasureRasterizeCallsAsStreamGrows() {
         let spy = BlockReuseTests.MeasureRasterizeSpy()
         var cache: [BlockKey: FreezeState] = [:]

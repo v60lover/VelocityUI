@@ -2,20 +2,16 @@
 
 import CoreGraphics
 
-/// Places items row-major into a fixed number of columns: item `i` sits at column `i % columns`,
-/// a new row starts every `columns` items, and each row is top-aligned with row height equal to
-/// the tallest item in that row. Rows preserve spatial order == index order, so visibility stays
-/// a single contiguous range — the same shape VerticalLayoutProvider relies on — even though item
-/// heights within a row can vary.
+/// Places items row-major: item `i` sits at column `i % columns`, a new row starts every
+/// `columns` items, each row top-aligned to its tallest item. Spatial order == index order,
+/// so visibility stays one contiguous range — same shape `VerticalLayoutProvider` relies on.
 ///
-/// CoreGraphics-only, pure arithmetic over `ResolvedLayout.totalFrame.height` — no re-measurement.
-/// Callers that need heights reflecting wrapping at the narrower column width (e.g. text that
-/// re-wraps once it no longer spans the full available width) must measure each cell at `colWidth`
-/// BEFORE calling `frames(for:)` — this type takes `totalFrame.height` verbatim, exactly like
-/// VerticalLayoutProvider.
+/// Pure arithmetic over `ResolvedLayout.totalFrame.height` — no re-measurement. Callers needing
+/// heights that reflect wrapping at the narrower column width must measure each cell at
+/// `colWidth` BEFORE calling `frames(for:)`; this type takes `totalFrame.height` verbatim.
 ///
 /// Reached via `GridLayout.custom(GridLayoutProvider(columns:spacing:))` — there is no `.grid`
-/// enum case; see `GridLayout`'s doc comment on preferring `.custom` over dead layout stubs.
+/// case; see `GridLayout`'s doc comment on preferring `.custom` over dead layout stubs.
 public struct GridLayoutProvider: LayoutProvider, Sendable {
     public let columns: Int
     public let spacing: CGFloat
@@ -120,25 +116,21 @@ extension GridLayoutProvider {
     }
 
     /// Row-granular visible index range: a row is visible iff `[rowTop, rowBottom)` overlaps
-    /// `[viewportTop, viewportBottom)`. Returns the smallest CONTIGUOUS index range covering every
-    /// visible row: `[firstVisibleRow*columns, min(count, (lastVisibleRow+1)*columns))`.
+    /// `[viewportTop, viewportBottom)`. Returns the smallest CONTIGUOUS range covering every visible
+    /// row: `[firstVisibleRow*columns, min(count, (lastVisibleRow+1)*columns))`.
     ///
-    /// Deliberately row-granular, not item-granular: within a variable-height row, items are
-    /// top-aligned (share `rowTop`) but have different `maxY`, so the per-item frame array is NOT
-    /// sorted by `maxY` and applying `VerticalLayoutProvider`'s item-level binary search directly
-    /// to grid frames is invalid. Binary-searching row tops/bottoms instead (both monotonic across
-    /// rows) keeps the result contiguous — a pure per-item overlap set would NOT be contiguous
-    /// under variable row heights (see
-    /// `GridLayoutProviderTests.testPerItemOverlap_isNotContiguous_underVariableHeights`).
-    /// Cost: each call rebuilds `rowBounds` from scratch, which is O(rows) time and allocates two
-    /// O(rows) arrays (`tops`, `bottoms`); the binary searches themselves are O(log rows).
+    /// Row-granular, not item-granular, on purpose: within a variable-height row items are
+    /// top-aligned but have different `maxY`, so per-item frames aren't sorted by `maxY` and
+    /// `VerticalLayoutProvider`'s item-level binary search doesn't apply directly. Row tops/bottoms
+    /// ARE monotonic across rows, so binary-searching those keeps the result contiguous — a raw
+    /// per-item overlap set would not be, under variable row heights (see
+    /// `testPerItemOverlap_isNotContiguous_underVariableHeights`). Rebuilds `rowBounds` from scratch
+    /// each call: O(rows) time/allocation, O(log rows) for the binary searches themselves.
     ///
-    /// Consequence of row granularity: a short item whose own frame sits above `viewportTop` but
-    /// whose row is visible IS included — this over-mounts by at most `2*columns` items, trading a
-    /// small amount of extra work for a contiguous range that reuses the vertical read-path.
+    /// Trade-off: a short item above `viewportTop` whose row is visible IS included — over-mounts
+    /// by at most `2*columns` items in exchange for a contiguous range on the vertical read-path.
     ///
-    /// `columns` MUST match the value used to build `frames` (via `frames(for:availableWidth:)`);
-    /// a mismatch silently yields wrong results.
+    /// `columns` MUST match the value used to build `frames`; a mismatch silently yields wrong results.
     public static func visibleIndexRange(
         in frames: [CGRect],
         columns: Int,

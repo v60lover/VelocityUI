@@ -5,47 +5,30 @@ import UIKit
 
 /// Incremental measure path for ONE still-growing hot text block (VelocityUI-c1uc).
 ///
-/// `TextMeasurementContext.measure` (the pooled, pure cold/first-paint path) reassigns
-/// `contentStorage.attributedString` wholesale on every call and reads height by
-/// enumerating every `NSTextLayoutFragment` from the top — both cost O(block size) per
-/// call. For a block that grows one token at a time while still hot, that makes every
-/// token's measure cost proportional to how much of the block already exists, not to
-/// what changed (the D1/D2/D3 problem — see TEXTKIT2_INCREMENTAL_RASTERIZATION_RESEARCH.md §1).
+/// `TextMeasurementContext.measure` (pooled cold/first-paint path) reassigns
+/// `contentStorage.attributedString` wholesale and enumerates every fragment for height —
+/// O(block size) per call, so a block growing one token at a time pays cost proportional to
+/// everything measured so far, not what changed (the D1/D2/D3 problem,
+/// TEXTKIT2_INCREMENTAL_RASTERIZATION_RESEARCH.md §1).
 ///
-/// This type keeps ONE `NSTextLayoutManager` / `NSTextContentStorage` / `NSTextContainer`
-/// alive for the block's whole streaming life. When a call is a pure append of what it
-/// last measured — same width, same non-content attributes, new content == old content
-/// plus a suffix — it appends only the delta via `replaceCharacters(in:with:)` inside
-/// `performEditingTransaction`. TextKit 2 then invalidates layout only for the edited
-/// range and keeps every earlier fragment's cached geometry, so the per-token cost is
-/// O(appended). Height is read via `usageBoundsForTextContainer` after
-/// `ensureLayout(for: documentRange)` — a maintained running bound, not an enumeration —
-/// confirmed to match a brute enumerate-from-top height within 0.01pt on an offscreen
-/// container (VelocityUI-q87l spike, all 10 claims CONFIRMED).
+/// Keeps one `NSTextLayoutManager`/`NSTextContentStorage`/`NSTextContainer` alive for the
+/// block's whole streaming life. A pure append (same width, same non-content attributes, new
+/// content == old + suffix) appends only the delta via `replaceCharacters(in:with:)`, so
+/// TextKit 2 invalidates just the edited range and keeps every earlier fragment's cached
+/// geometry — O(appended). Height reads from `usageBoundsForTextContainer` after
+/// `ensureLayout` (confirmed to match brute enumeration within 0.01pt — VelocityUI-q87l spike).
 ///
-/// Falls back to a full re-measure (whole-string replace, the same shape
-/// `TextMeasurementContext.measure` already uses conceptually) whenever the call is NOT
-/// a pure append: a non-append edit (new content doesn't start with what was last
-/// measured — e.g. a mid-string insert), a container width change, or any other
-/// attribute change (covers Dynamic Type: `contentSizeCategory` is one of the fields
-/// compared — see `AttributeFingerprint`). All three genuinely invalidate the whole
-/// block; TextKit 2 has no incremental path for them, so a full re-measure is correct,
-/// not a missed optimization.
+/// Falls back to a full re-measure for anything that isn't a pure append — mid-string edit,
+/// width change, or any attribute change including Dynamic Type (see `AttributeFingerprint`).
+/// TextKit 2 has no incremental path for these; full re-measure is correct, not a missed
+/// optimization.
 ///
-/// Lifetime is ONE hot block, not the process — construct a fresh instance per block
-/// while it is hot, and discard it once the block freezes or the cell recycles to a
-/// different item. No `static let shared`, no global lookup (CLAUDE.md: no singletons).
-/// Owning/pooling instances across a cell's hot-block lifetime and wiring this into the
-/// live scroll-path call site is the incremental rasterizer's job (VelocityUI-x4q0), not
-/// this type's.
+/// Lifetime is ONE hot block: construct fresh per block, discard on freeze or cell recycle to
+/// a different item (no singleton, no global lookup). Pooling instances across a cell's
+/// lifetime is the incremental rasterizer's job (VelocityUI-x4q0), not this type's — and this
+/// type never touches `TextMeasurementContext`, the route for cold blocks and first paint.
 ///
-/// Does NOT touch `TextMeasurementContext` — that pooled, pure path is unchanged and
-/// stays the measure route for cold blocks and first paint.
-///
-/// `internal`, not `public`: nothing outside this module consumes it yet. The
-/// incremental rasterizer (VelocityUI-x4q0) that will own/pool these per hot block also
-/// lives in `Sources/VelocityUI`, so this stays module-internal until an external call
-/// site actually needs it (CLAUDE.md §7: default `internal`, promote only on demand).
+/// `internal`, not `public`: only VelocityUI-x4q0 (same module) consumes it so far.
 final class HotBlockMeasurer {
     /// Every `TextDescriptor` field that affects geometry EXCEPT `content` — comparing
     /// this instead of `descriptor.layoutHash` matters: `layoutHash` folds `content`
@@ -85,20 +68,13 @@ final class HotBlockMeasurer {
     /// state directly; every edit must still go through `measure(_:width:)`.
     let layoutManager = NSTextLayoutManager()
     private let container: NSTextContainer
-    /// The legacy `NSTextStorage` bridge every edit (append AND full-replace alike) goes
-    /// through. Captured ONCE, right after `addTextLayoutManager`, and never reassigned
-    /// via `contentStorage.attributedString = ` afterward — confirmed on-device that
-    /// doing so tears the bridge back down to nil for the rest of this instance's life
-    /// (a real, reproducible TextKit2 behavior, not a timing race: reading
-    /// `contentStorage.textStorage` a second time after a whole-string `attributedString`
-    /// reassignment deterministically returns nil, even after spinning the run loop).
-    /// `NSTextContentStorage.replaceContents(in:with:)` — the "no legacy bridge"
-    /// alternative — was tried and rejected too: it throws an internal NSString range
-    /// exception when inserting a fresh `NSTextParagraph` at exactly
-    /// `documentRange.endLocation` right after an existing paragraph, an Apple-side
-    /// TextKit2 edge case this type can't safely paper over. Routing every edit through
-    /// this captured `storage` (both branches use `replaceCharacters`, never the
-    /// `attributedString` setter) sidesteps both problems.
+    /// The legacy `NSTextStorage` bridge every edit goes through. Captured ONCE right after
+    /// `addTextLayoutManager`, never reassigned via `contentStorage.attributedString =`
+    /// afterward — confirmed on-device this deterministically tears the bridge to nil for the
+    /// instance's life (real TextKit2 behavior, not a timing race). The alternative,
+    /// `NSTextContentStorage.replaceContents(in:with:)`, was also rejected: it throws inserting
+    /// a fresh `NSTextParagraph` at exactly `documentRange.endLocation`. Routing every edit
+    /// through captured `storage` via `replaceCharacters` sidesteps both problems.
     private let storage: NSTextStorage
 
     private var lastContent: String = ""
@@ -126,17 +102,14 @@ final class HotBlockMeasurer {
         return descriptor.content.hasPrefix(lastContent)
     }
 
-    /// Measures `descriptor` at `width`. Takes the O(appended) incremental path when
-    /// `isAppendOnly(_:width:)` is true; otherwise performs a full re-measure and resyncs
-    /// internal state to the new baseline so the NEXT call can resume incrementally.
+    /// Measures `descriptor` at `width`. Takes the O(appended) path when
+    /// `isAppendOnly(_:width:)` is true; otherwise full re-measure, resyncing internal state so
+    /// the next call can resume incrementally.
     ///
-    /// - Returns: `(height, appended)` — height only, no measured-width component. A
-    ///   tight measured width (narrower than `width` for short lines, the way
-    ///   `TextMeasurementContext.measure` computes it) requires walking every fragment,
-    ///   which is exactly the O(block) enumeration cost this type exists to avoid on the
-    ///   append path. The only current caller of a hot block's measured size
-    ///   (`FeedScrollView.applyInPlaceBlockDiff`) already reads only `.height` from its
-    ///   measure result — callers that need a tight width use `TextMeasurementContext`.
+    /// - Returns: `(height, appended)` — height only. A tight width needs walking every
+    ///   fragment (the O(block) cost this type avoids); the only caller
+    ///   (`FeedScrollView.applyInPlaceBlockDiff`) reads just `.height` — callers needing a
+    ///   tight width use `TextMeasurementContext`.
     @discardableResult
     func measure(_ descriptor: TextDescriptor, width: CGFloat) -> (height: CGFloat, appended: Bool) {
         let appended = isAppendOnly(descriptor, width: width)

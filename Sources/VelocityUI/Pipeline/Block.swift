@@ -7,16 +7,13 @@ import CoreGraphics
 
 /// Stable identity for one block within one item's ordered block list — item id + position.
 ///
-/// Mirrors `NodeTable.itemID`'s documented pattern (NodeTable.swift): `itemID` is stored as
-/// `AnyHashable` behind `nonisolated(unsafe)` because `AnyHashable` is not stdlib-`Sendable`,
-/// and a generic `Hashable & Sendable` initializer is the only place the boxing happens — the
-/// rest of this file (and its callers) read `itemID` as `AnyHashable`. Safety holds for the
-/// same reason it holds for `NodeTable`: the generic init guarantees the boxed payload is
-/// always `Sendable` in practice.
+/// `itemID` is `AnyHashable` behind `nonisolated(unsafe)` (mirrors `NodeTable.itemID`): not
+/// stdlib-`Sendable`, but the generic `Hashable & Sendable` init is the only place boxing
+/// happens, so the payload is always `Sendable` in practice.
 ///
-/// `BlockKey` identifies WHICH block this is, not what it currently contains — the same key
-/// persists across a block's lifetime from `.hot` (still growing) to `.frozen` (measured once).
-/// Content equality for diffing purposes is `Block.contentHash`, not part of this key.
+/// Identifies WHICH block this is, not what it contains — the key persists across a block's
+/// lifetime from `.hot` (growing) to `.frozen` (measured). Content equality for diffing is
+/// `Block.contentHash`, not part of this key.
 public struct BlockKey: Hashable, Sendable {
     // See struct-level doc for the nonisolated(unsafe) rationale — identical to NodeTable's.
     nonisolated(unsafe) public let itemID: AnyHashable

@@ -8,19 +8,14 @@
 
   /// Thread-safe URL → CGSize store for dimension-first image fetching.
   ///
-  /// DI contract: inject the **same** instance into `classify()` and `ImageActor`.
-  /// ImageActor writes dimensions as a decode-time side effect via `store(_:for:)`;
-  /// nonisolated `classify()` reads from the same store via `get(_:)`.
-  /// Separate instances break the cache-hit contract.
-  /// Pass the same URLSession to both via `init(session:)` so dimension probes and
-  /// full-image fetches share one HTTP/2 connection pool — one TCP/TLS handshake per
-  /// origin covers both.
-  ///
-  /// URL identity: query parameters are part of the key (e.g. `?v=1` vs `?v=2` cache
-  /// separately). Intentional — CDN cache-busting params must not share entries.
-  ///
-  /// Eviction: unbounded dictionary. At ~116B/entry, 10k URLs ≈ 1.2MB. Flag for
-  /// Phase 6 hardening (LRU eviction or NSCache-backed store).
+  /// - DI: inject the same instance into `classify()` and `ImageActor` — `ImageActor` writes
+  ///   via `store(_:for:)`, `classify()` reads via `get(_:)`; separate instances break the
+  ///   cache-hit contract. Share one `URLSession` too, so dimension probes and full fetches
+  ///   reuse one HTTP/2 connection pool.
+  /// - Query params are part of the key (`?v=1` vs `?v=2` cache separately) — needed so CDN
+  ///   cache-busting doesn't collide entries.
+  /// - Unbounded dictionary (~116B/entry, 10k URLs ≈ 1.2MB) — LRU eviction flagged for Phase 6
+  ///   hardening.
   public final class DimensionCache: Sendable {
 
     // Single lock over both maps so cache re-check + inFlight read/write are atomic.

@@ -141,6 +141,91 @@ final class StreamingMarkdownFeedIntegrationTests: XCTestCase {
         await drainFeedWork(feed)
     }
 
+    // MARK: - Diagnostic: does sealing with ZERO new visible content still redraw pixels?
+
+    /// Reads `image` into a plain premultiplied-RGBA byte buffer for exact pixel comparison —
+    /// `CGImage` identity (`===`) proves zero re-rasterize, but says nothing about whether two
+    /// DIFFERENT `CGImage` instances happen to be pixel-identical or genuinely different content.
+    private func rawPixels(of image: CGImage) -> [UInt8] {
+        let width = image.width
+        let height = image.height
+        guard width > 0, height > 0 else { return [] }
+        var data = [UInt8](repeating: 0, count: width * height * 4)
+        guard let context = CGContext(
+            data: &data, width: width, height: height, bitsPerComponent: 8,
+            bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return [] }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return data
+    }
+
+    /// Diagnostic for a user-reported flash: "the just-sealed paragraph briefly redraws right as
+    /// the next paragraph starts, even though its own text hasn't changed." Isolates the purest
+    /// version: the blank line sealing block0 carries no new visible characters
+    /// (`finalizeOpenBlock()` never folds it into `openLines`), so if `catchUpAndFinalize`
+    /// (`HotBlockRasterizerStore.swift`) works, the sealed bitmap must be BYTE-IDENTICAL to the
+    /// prior frame, not just the same `CGImage` instance. A pixel diff would mean the flash is a
+    /// real rendering discontinuity, not a caching gap.
+    func testSealedBlockWithNoNewContent_PixelIdenticalToLastHotFrame() async {
+        let feed = makeStreamingFeed()
+        var parser = IncrementalMarkdownParser()
+        parser.append("First paragraph")
+        feed.items = [StreamingMessage(id: 0, markdownParser: parser)]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+
+        // The very first mount never synchronously rasterizes text (no general first-mount
+        // rasterizer — see RenderCell.applyLayout's doc on the text branch), so a hot bitmap only
+        // exists after at least one more append round routes through applyInPlaceBlockDiff's
+        // hot-append path. This round is itself the FINAL content block0 will have — the round
+        // after this one only appends the blank line, adding nothing to block0's own text.
+        parser.append(", done growing")
+        feed.items = [StreamingMessage(id: 0, markdownParser: parser)]
+        feed.layoutSubviews()
+
+        guard let hotBitmap = feed._debugPaintedBitmaps(at: 0).values.first else {
+            return XCTFail("block0 must be painting something while still hot")
+        }
+        let hotPixels = rawPixels(of: hotBitmap)
+        XCTAssertFalse(hotPixels.isEmpty, "Precondition: must be able to read the hot bitmap's pixels")
+
+        // Pure seal signal: the blank line closes block0 but adds no characters TO block0. While
+        // block0 is still the ONLY block, `applyInPlaceBlockDiff` keeps treating it as the trailing
+        // (still-growing) block regardless of the PARSER's own frontier — see this function's doc:
+        // `trailingIndex == newBlocks.count - 1` always, so a single-block item's sole block is
+        // never eligible for `persist: true` until a real block AFTER it exists. So block0 is NOT
+        // frozen yet here — this round is a zero-delta hot-append, not a freeze.
+        parser.append("\n\n")
+        feed.items = [StreamingMessage(id: 0, markdownParser: parser)]
+        feed.layoutSubviews()
+
+        // NOW a real second block exists — block0 stops being trailingIndex and becomes eligible
+        // to freeze. This is the exact moment the user-reported flash happens: "the paragraph that
+        // just closed redraws right as the next one starts."
+        parser.append("Second paragraph starts")
+        feed.items = [StreamingMessage(id: 0, markdownParser: parser)]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+
+        XCTAssertEqual(parser.frontier, 1, "Precondition: the blank line must have sealed exactly block0")
+
+        let key0 = BlockKey(itemID: 0, index: 0)
+        guard let sealedBitmap = feed.renderEnvironment.frozenBitmapStore.bitmap(for: key0) else {
+            return XCTFail("block0 must be frozen into FrozenBitmapStore once the blank line seals it")
+        }
+        let sealedPixels = rawPixels(of: sealedBitmap)
+
+        XCTAssertEqual(hotBitmap.width, sealedBitmap.width,
+            "sealing with zero new visible content must not change the bitmap's pixel width")
+        XCTAssertEqual(hotBitmap.height, sealedBitmap.height,
+            "sealing with zero new visible content must not change the bitmap's pixel height")
+        XCTAssertEqual(hotPixels, sealedPixels,
+            "sealing a block whose visible text did NOT change must reuse pixel-identical bytes — "
+            + "any diff here is a real rendering discontinuity (e.g. HotBlockMeasurer's incremental "
+            + "measure disagreeing with a cold measure for the same text), not a cache-identity bug")
+    }
+
     // MARK: - hotBlockRasterizeEnabled == false falls back to full rasterizeText per token (VelocityUI-xxf7)
 
     /// BenchmarkHost's `stream` scenario runs the identical token stream with

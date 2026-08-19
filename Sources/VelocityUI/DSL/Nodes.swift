@@ -410,22 +410,15 @@ public struct AsyncImageNode: RenderNode {
         )
     }
 
-    /// Sets a consumer-defined placeholder payload, tried when `thumbnailData` and
-    /// `blurHash` are both nil or fail to decode. Interpreted only by a custom
-    /// `PlaceholderRenderer` injected via `RenderEnvironment` — the built-in
-    /// `DefaultPlaceholderRenderer` ignores it (falls through to the gray tint).
+    /// Sets a consumer-defined placeholder payload, tried when `thumbnailData` and `blurHash`
+    /// are both nil or fail to decode. Interpreted only by a custom `PlaceholderRenderer`
+    /// injected via `RenderEnvironment` — the built-in `DefaultPlaceholderRenderer` ignores it
+    /// (falls through to the gray tint). `payload` must be `Hashable & Sendable` so it folds
+    /// into `appearanceHash` (changing it triggers a repaint) and can cross into the pipeline.
     ///
-    /// `payload` must be `Hashable & Sendable` so it folds into `appearanceHash` (changing
-    /// it triggers a repaint) and can safely cross into the render pipeline.
-    ///
-    /// ## Read before using — your renderer's `render(...)` runs on the scroll path
-    /// The `PlaceholderRenderer` you inject to interpret this payload runs SYNCHRONOUSLY on
-    /// the MainActor, inline in the cell-bind scroll path — never off-main, never awaited.
-    /// Keep whatever this payload describes CHEAP to render: match the built-ins' p99 < 500us
-    /// budget, and produce output no larger than the built-in placeholder bound (32px) since
-    /// it's hardware-scaled up to the fragment's real size regardless. A solid color or tiny
-    /// pre-shrunk thumbnail is the intended shape; a full-resolution decode inside your
-    /// renderer is an anti-pattern that will drop scroll frames. See `PlaceholderRenderer`'s
+    /// Your `PlaceholderRenderer.render(...)` runs SYNCHRONOUSLY on the MainActor in the
+    /// cell-bind scroll path — keep it cheap (p99 < 500us, output ≤ the 32px placeholder
+    /// bound; a full-res decode here drops scroll frames). See `PlaceholderRenderer`'s
     /// docstring for the full contract.
     public func placeholder<T: Hashable & Sendable>(custom payload: T?) -> AsyncImageNode {
         AsyncImageNode(

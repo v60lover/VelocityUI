@@ -549,14 +549,13 @@ final class FragmentTests: XCTestCase {
     // MARK: Test 15: benchmark repro — framed container clips an overflowing unframed leaf
 
     func testFramedContainer_clipsOverflowingUnframedImageChild() async throws {
-        // Reproduces the BenchmarkHost glitch: HStack { Image(aspectRatio: 0.5, .fit) }.frame(width:400, height:200).
-        // The unframed image child measures 400x800 (width / aspectRatio) — far taller than
-        // the 200pt framed slot. `applyFrame`'s container branch only shifts children by an
-        // alignment offset; it does NOT resize/clip them, so without a geometry-level clip in
-        // extractFragments this leaf's fragment overflows the cell by 600pt. Because
-        // RenderCell never sets masksToBounds, the overflow paints over neighboring cells on
-        // scroll-up ("cells expanding/glitching"). The clip must clamp the emitted fragment
-        // to the framed slot.
+        // Reproduces the BenchmarkHost glitch: HStack { Image(aspectRatio: 0.5, .fit) }
+        // .frame(width:400, height:200). The unframed child measures 400x800 (width /
+        // aspectRatio) — `applyFrame`'s container branch only shifts children by an alignment
+        // offset, it doesn't resize/clip, so without a geometry-level clip in extractFragments
+        // this leaf overflows the cell by 600pt. RenderCell never sets masksToBounds, so the
+        // overflow paints over neighboring cells on scroll-up. The clip must clamp the emitted
+        // fragment to the framed slot.
         let table = NodeTable(
             itemID: "benchmark-repro",
             nodes: [

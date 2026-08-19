@@ -107,7 +107,7 @@ struct LaunchArguments {
         prefetchWindow = Self.value(for: "--prefetch-window", in: args).flatMap(Int.init) ?? 10
         liveHUD = args.contains("--live")
         touchSpeedMultiplier = Self.value(for: "--touch-speed", in: args).flatMap(Double.init) ?? 1.0
-        streamTokensPerSecond = Self.value(for: "--stream-rate", in: args).flatMap(Double.init) ?? 20.0
+        streamTokensPerSecond = Self.value(for: "--stream-rate", in: args).flatMap(Double.init) ?? 40.0
         hotBlockRasterizeMode = Self.value(for: "--hot-rasterize", in: args).flatMap(HotBlockRasterizeMode.init) ?? .on
         streamTextOnly = args.contains("--stream-text-only")
         gestureGatedDeferralMode = Self.value(for: "--gesture-deferral", in: args).flatMap(GestureGatedDeferralMode.init) ?? .off

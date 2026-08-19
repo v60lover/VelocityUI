@@ -25,12 +25,10 @@ private struct FeedTestCell: RenderView {
 /// freshness, the itemsDiffer fast-path branch counters, and Coordinator identity survival
 /// across simulated `makeUIView` re-calls.
 ///
-/// SwiftUI's `UIViewRepresentable.Context` has no public initializer, so `makeUIView(context:)`
-/// and `updateUIView(_:context:)` cannot be invoked directly from a unit test. All three tests
-/// go through `AsyncFeed`'s `#if canImport(XCTest)` test shims (`_testMakeUIView(coordinator:)`,
-/// `_testItemsDiffer(uiView:)`), which delegate to the exact same private helpers the real
-/// `makeUIView`/`updateUIView` call — no reimplementation, no drift risk. See VelocityUI-zhd
-/// design notes for the full trace + assertion mapping.
+/// SwiftUI's `UIViewRepresentable.Context` has no public initializer, so these go through
+/// `AsyncFeed`'s `#if canImport(XCTest)` shims (`_testMakeUIView`, `_testItemsDiffer`), which
+/// delegate to the same private helpers the real `makeUIView`/`updateUIView` call — no
+/// reimplementation, no drift risk. See VelocityUI-zhd design notes for the full trace.
 @MainActor
 final class AsyncFeedTests: XCTestCase {
 

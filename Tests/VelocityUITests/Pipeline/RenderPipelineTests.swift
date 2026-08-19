@@ -55,17 +55,14 @@ private final class PipelinePrefetchCountingProtocol: URLProtocol {
 // MARK: - Multi-release gate (RenderPipelineTests-local)
 
 /// Test-only gate: `open()` releases every `wait()` call registered so far, and any
-/// `wait()` call after `open()` returns immediately.
+/// `wait()` after `open()` returns immediately.
 ///
-/// A single-release `AsyncSemaphore` is not sufficient as a gate for
-/// `ImageActor._testPrefetchGateHook`: the hook fires before `inFlight` registration
-/// (ImageActor.prefetch()), so concurrent prefetch() calls that share one cache key
-/// (same URL/targetSize/cornerRadius/scale — as a batch of items pointing at one URL
-/// does) can each independently reach the hook before any of them dedupes against the
-/// others. A one-shot semaphore signal only wakes one such caller; the rest suspend on
-/// `wait()` forever, since nothing signals again — an unrecoverable deadlock. This gate
-/// opens for all current and future waiters at once, matching what the test actually
-/// needs: "let every prefetch that reached the hook proceed."
+/// A single-release `AsyncSemaphore` isn't enough for `ImageActor._testPrefetchGateHook`: the
+/// hook fires before `inFlight` registration, so concurrent `prefetch()` calls sharing one cache
+/// key (a batch of items pointing at one URL) can each reach the hook before any dedupes against
+/// the others. A one-shot signal wakes only one caller; the rest deadlock on `wait()` forever.
+/// This gate opens for all current and future waiters at once — "let every prefetch that reached
+/// the hook proceed."
 private actor OneShotGate {
     private var isOpen = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -232,15 +229,14 @@ final class RenderPipelineTests: XCTestCase {
 
     // MARK: - Test 5: markInvalidated resets state and re-spawn works (AC3 re-spawn half)
 
-    /// Verifies two AC(3) properties:
-    ///   (a) markInvalidated() resets lastLeadingIndex so a superseded batch's index re-triggers a new Task.
-    ///   (b) The re-spawned task completes successfully and commits all items to WorkingRange.
+    /// Verifies two AC(3) properties: (a) markInvalidated() resets lastLeadingIndex so a superseded
+    /// batch's index re-triggers a new Task; (b) the re-spawned task completes and commits all items
+    /// to WorkingRange.
     ///
-    /// The gate hook fires inside a fire-and-forget prefetch Task — by design this is after
-    /// commit (commit latency is on the measure-only path, not network). "Committed nothing for
-    /// the superseded batch" is therefore not assertable here without a measure-phase gate hook;
-    /// that property is covered by testSupersededPrefetchLeavesNoStaleCommits (Test 3), which
-    /// exercises cancellation during the measure phase via rapid boundary churn.
+    /// The gate hook fires inside a fire-and-forget prefetch Task — after commit by design (commit
+    /// latency is on the measure-only path, not network), so "committed nothing for the superseded
+    /// batch" isn't assertable here without a measure-phase gate hook; that's covered by
+    /// testSupersededPrefetchLeavesNoStaleCommits (Test 3) via rapid boundary churn.
     func testMarkInvalidatedCancelsInFlightPrefetch() async {
         // Build tables with real URLs so the image prefetch path is exercised.
         let url = URL(string: "https://example.com/img.jpg")!
@@ -363,14 +359,13 @@ final class RenderPipelineTests: XCTestCase {
 
     // MARK: - Test 7: AC(1) — every .image fragment with a non-nil URL triggers prefetch
 
-    /// Verifies VelocityUI-48c AC(1): after onIndexBoundary commits, every .image fragment
-    /// with a non-nil URL has had imageActor.prefetch(for:…) invoked — evidenced by exactly
-    /// one network request per distinct URL reaching PipelinePrefetchCountingProtocol.
+    /// Verifies VelocityUI-48c AC(1): after onIndexBoundary commits, every .image fragment with a
+    /// non-nil URL has had imageActor.prefetch(for:…) invoked — evidenced by exactly one network
+    /// request per distinct URL reaching PipelinePrefetchCountingProtocol.
     ///
-    /// Synchronisation: waitForCurrentPrefetch() is the sole happens-before anchor.
-    /// No Task.sleep — the prefetch withTaskGroup in RenderPipeline awaits every prefetch()
-    /// call, and each prefetch() awaits its inner decode Task to completion, so the URLProtocol
-    /// count is fully settled when waitForCurrentPrefetch() returns.
+    /// Synchronisation: waitForCurrentPrefetch() is the sole happens-before anchor, no Task.sleep —
+    /// RenderPipeline's prefetch withTaskGroup awaits every prefetch() call, and each prefetch()
+    /// awaits its inner decode Task, so the URLProtocol count is fully settled on return.
     func testEveryImageFragmentTriggersPrefetch() async {
         let n = 5
         let imageURLs = (0..<n).map { i in
@@ -454,17 +449,16 @@ final class RenderPipelineTests: XCTestCase {
 
     /// Verifies AC(2) and AC(4) for bead VelocityUI-1su.1.
     ///
-    /// AC(1) — structural verification: cache-hit items reach the for-await consumer before the
-    /// cold-miss item (item 0 traverses 2 extra async suspension points: measureNode + cache.set).
-    /// The consumer spawns prefetch Tasks in completion order, so items 1-9 dispatch before item 0.
-    /// Wall-clock timestamp-delta assertions (as originally specified in AC1) require an injectable
-    /// slow-measure hook (_testMeasureGateHook) that does not yet exist — deferred to Phase 6
-    /// os_signpost integration. This test instead verifies correctness under a mixed-cache batch.
+    /// AC(1) (structural only): cache-hit items reach the for-await consumer before the cold-miss
+    /// item (item 0 traverses 2 extra async suspensions: measureNode + cache.set), so items 1-9
+    /// dispatch prefetch before item 0. Wall-clock timestamp-delta assertions need an injectable
+    /// slow-measure hook (`_testMeasureGateHook`) that doesn't exist yet — deferred to Phase 6
+    /// os_signpost integration; this test verifies correctness under a mixed-cache batch instead.
     ///
     /// AC(2): WorkingRange.commit fires in a single MainActor.run hop — all items committed.
-    /// AC(4): each distinct URL receives exactly one network fetch regardless of mixed cache state.
+    /// AC(4): each distinct URL gets exactly one network fetch regardless of mixed cache state.
     ///
-    /// Setup: items 1-9 are pre-warmed in LayoutCache (cache hits); item 0 is a cold miss.
+    /// Setup: items 1-9 pre-warmed in LayoutCache (cache hits); item 0 is a cold miss.
     func testMixedBatchPerItemDispatch() async {
         let n = 10
         let imageURLs = (0..<n).map { URL(string: "https://mixed-batch.example.com/\($0).jpg")! }
@@ -542,14 +536,13 @@ final class RenderPipelineTests: XCTestCase {
 
     /// Verifies VelocityUI-1su.4 AC(1) for the primary generation-guard layer.
     ///
-    /// Setup: all-cache-hit batch at leadingIndex 0 (prefetch Tasks dispatch quickly).
-    /// Gate hook holds each prefetch at step 3 (after Task.isCancelled, before isCurrent check).
-    /// While all N prefetches are suspended at the gate, a non-overlapping boundary fires,
-    /// bumping the generation. Gate releases — isCurrent() returns false — all bail.
+    /// Setup: all-cache-hit batch at leadingIndex 0 (prefetch Tasks dispatch quickly). Gate hook
+    /// holds each prefetch at step 3 (after Task.isCancelled, before isCurrent check). While all N
+    /// are suspended at the gate, a non-overlapping boundary fires, bumping the generation — gate
+    /// releases, isCurrent() returns false, all bail.
     ///
-    /// Assertions:
-    /// - _testPrefetchedURLs is empty (no inner Task was spawned → URL never appended)
-    /// - Network count = 0 (no network fetch started for the abandoned URLs)
+    /// Assertions: `_testPrefetchedURLs` is empty (no inner Task spawned) and network count = 0
+    /// (no fetch started for the abandoned URLs).
     func testGenerationGuardBailsBeforeInnerTaskSpawn() async {
         let n = 5
         let imageURLs = (0..<n).map { URL(string: "https://gen-guard.example.com/\($0).jpg")! }
@@ -669,14 +662,14 @@ final class RenderPipelineTests: XCTestCase {
     /// Liveness test for VelocityUI-1su.4 AC(1) — deep cancel layer.
     ///
     /// An all-cache-hit batch at leadingIndex 0 is immediately superseded by a non-overlapping
-    /// boundary at index 500. Some prefetch Tasks may have already spawned their inner decode
-    /// Tasks (past step 4) before the supersession fires. The deep-cancel mechanism calls
-    /// inFlight[key]?.cancel() on those Tasks. This test verifies the pipeline reaches
-    /// stable completion without deadlock under rapid supersession.
+    /// boundary at index 500. Some prefetch Tasks may have already spawned inner decode Tasks (past
+    /// step 4) before supersession fires; the deep-cancel mechanism calls `inFlight[key]?.cancel()`
+    /// on those. Verifies the pipeline reaches stable completion without deadlock under rapid
+    /// supersession.
     ///
-    /// Property asserted: waitForCurrentPrefetch() returns (no stall).
-    /// Network-level count bounds are verified by testGenerationGuardBailsBeforeInnerTaskSpawn
-    /// (gate-held variant) and testEveryImageFragmentTriggersPrefetch (no-supersession baseline).
+    /// Property asserted: waitForCurrentPrefetch() returns (no stall). Network-count bounds are
+    /// covered by testGenerationGuardBailsBeforeInnerTaskSpawn (gate-held) and
+    /// testEveryImageFragmentTriggersPrefetch (no-supersession baseline).
     func testDiscreteJumpBoundaryDrainsWithoutStall() async {
         let n = 5
         let imageURLs = (0..<n).map { URL(string: "https://discrete-jump.example.com/\($0).jpg")! }
@@ -827,15 +820,13 @@ final class RenderPipelineTests: XCTestCase {
     /// Verifies VelocityUI-1su.4 AC(1) deep-cancel layer and bw1 hook wiring.
     ///
     /// Three prefetches acquire decode slots and block at `_testDecodeBodyGateHook`.
-    /// `cancelInFlightPrefetches` cancels all three inner Tasks — cancellation propagates
-    /// into `gate.wait()` inside the hook via `withTaskCancellationHandler` in AsyncSemaphore,
-    /// unblocking each task. The post-hook `guard !Task.isCancelled` in `_decode()` releases
-    /// the slot. A fourth "witness" prefetch acquires a freed slot and completes, proving
-    /// no slot leak under deep cancel.
+    /// `cancelInFlightPrefetches` cancels all three inner Tasks — cancellation propagates into
+    /// `gate.wait()` via `withTaskCancellationHandler` in AsyncSemaphore, unblocking each task, and
+    /// the post-hook `guard !Task.isCancelled` in `_decode()` releases the slot. A fourth "witness"
+    /// prefetch then acquires a freed slot and completes, proving no slot leak under deep cancel.
     ///
-    /// Assertions:
-    /// - Witness URL receives ≥ 1 network fetch (slot was released; witness proceeded).
-    /// - Each cancelled URL receives exactly 1 network fetch (no retry after cancel).
+    /// Assertions: witness URL gets ≥ 1 fetch (slot released, witness proceeded); each cancelled URL
+    /// gets exactly 1 fetch (no retry after cancel).
     func testDeepCancelReleasesDecodeSlot() async {
         // 3 cancel URLs == AsyncSemaphore(value: 3) in ImageActor.swift:102.
         // Filling all slots proves the witness must wait; change this if the semaphore cap changes.

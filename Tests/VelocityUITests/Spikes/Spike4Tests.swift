@@ -5,20 +5,17 @@ import XCTest
 import UIKit
 @testable import VelocityUI
 
-/// Spike 4: validates TextKit 2 measure == render within 1pt,
-/// zero CATextLayer in source tree, concurrent rasterization is race-free,
-/// and rendering is deterministic across two calls.
-/// @MainActor: TextMeasurementContext created on main, rasterizeText is nonisolated.
+/// Spike 4: validates TextKit 2 measure == render within 1pt, zero CATextLayer in source tree,
+/// concurrent rasterization is race-free, and rendering is deterministic across two calls.
+/// `@MainActor`: TextMeasurementContext created on main, rasterizeText is nonisolated.
 ///
-/// VelocityUI-ezo.2.9 extends the corpus to the full parity matrix the epic requires:
-/// ZWJ emoji sequences and dynamic-type variants (velocityui-prompt.md's Spike 4 spec),
-/// plus the attribute catalog (ezo.2.3), line-break/truncation modes (ezo.2.4), and
-/// content-size categories (ezo.2.5) — every dependency that landed. RTL base-writing-
-/// direction (ezo.2.6) is intentionally NOT exercised here: that bead is still open, so
-/// this corpus only covers the glyph-level bidi that already worked before it (the
-/// Arabic/Japanese strings below). Test 5 additionally proves parity holds when text is
-/// measured/rendered as part of a mixed text+image tree through the real Phase 1 pipeline,
-/// not just via isolated TextMeasurementContext/rasterizeText calls.
+/// VelocityUI-ezo.2.9 extends the corpus to the full parity matrix: ZWJ emoji sequences and
+/// dynamic-type variants (velocityui-prompt.md's Spike 4 spec), the attribute catalog (ezo.2.3),
+/// line-break/truncation modes (ezo.2.4), and content-size categories (ezo.2.5). RTL
+/// base-writing-direction (ezo.2.6) is NOT exercised — that bead is still open, so this corpus
+/// only covers the glyph-level bidi that already worked (Arabic/Japanese strings below). Test 5
+/// additionally proves parity holds for text inside a mixed text+image tree through the real
+/// Phase 1 pipeline, not just isolated TextMeasurementContext/rasterizeText calls.
 @MainActor
 final class Spike4Tests: XCTestCase {
 
@@ -284,13 +281,12 @@ final class Spike4Tests: XCTestCase {
     // MARK: - Test 5: Mixed text + image Phase 1 stack (epic acceptance criterion)
 
     /// VelocityUI-ezo.2's epic acceptance criterion: Spike 4 parity must hold with text and
-    /// image nodes mixed, on the real Phase 1 stack — not just via the isolated
-    /// TextMeasurementContext/rasterizeText calls the tests above use. Builds NodeTables that
-    /// interleave `.image` and `.text` children under a vstack, runs them through the real
-    /// RenderPipeline -> WorkingRange, and reads back CellEntry.fragments — the exact structure
-    /// FeedScrollView's scroll path consumes — rather than recomputing extractFragments itself.
-    /// Each text fragment's pipeline-resolved frame must still satisfy the 1pt ink-height
-    /// contract; each image fragment must have a non-degenerate frame.
+    /// image nodes mixed, on the real Phase 1 stack, not just the isolated
+    /// TextMeasurementContext/rasterizeText calls above. Builds NodeTables interleaving `.image`
+    /// and `.text` under a vstack, runs them through the real RenderPipeline -> WorkingRange, and
+    /// reads back `CellEntry.fragments` — the exact structure FeedScrollView's scroll path
+    /// consumes — rather than recomputing extractFragments itself. Each text fragment's frame
+    /// must still satisfy the 1pt ink-height contract; each image fragment must be non-degenerate.
     func testMixedTextAndImageStackMaintainsParity() async {
         let corpus = makeCorpus()
         let pipeline = RenderPipeline()

@@ -98,14 +98,13 @@ private final class BarrierURLProtocol: URLProtocol {
 
 final class ImageActorTests: XCTestCase {
 
-    /// One-time settle window after the whole class finishes. Every test here spins up its
-    /// own `ImageActor` (own DispatchQueueExecutor + concurrent decode queue); back-to-back
-    /// across ~25 tests that churns a lot of short-lived GCD queues at once. Swift's
-    /// cooperative thread pool and GCD's QoS-scoped worker pool are both process-wide, so a
-    /// class immediately following this one can have its own real decode/network work
-    /// throttled by leftover pool pressure — see VelocityUI-1su.6 (confirmed via bisection:
-    /// this class alone, with no FeedScrollViewTests beforehand, is enough to make
-    /// ImagePrefetchIntegrationTests.testPrefetchedIndexMountsWithContent miss its 5s window).
+    /// One-time settle window after the class finishes. Each test spins up its own `ImageActor`
+    /// (own executor + concurrent decode queue); ~25 tests back-to-back churns a lot of
+    /// short-lived GCD queues. Since Swift's cooperative pool and GCD's QoS worker pool are
+    /// both process-wide, a following class can have real decode/network work throttled by
+    /// leftover pressure — see VelocityUI-1su.6 (confirmed via bisection: this class alone is
+    /// enough to make `ImagePrefetchIntegrationTests.testPrefetchedIndexMountsWithContent` miss
+    /// its 5s window).
     override class func tearDown() {
         Thread.sleep(forTimeInterval: 1.0)
         super.tearDown()
@@ -1022,20 +1021,17 @@ final class ImageActorTests: XCTestCase {
 
     // MARK: - Test 21a: A .visible image() decode acquires a slot before a queued .behind prefetch
 
-    /// Trace + assertion:
-    /// | Invariant | Assertion |
-    /// |---|---|
-    /// | After N `.behind` waiters are blocked on the 3 decode slots, a subsequently-requested `.visible` decode acquires a slot before any remaining `.behind` | `visibleTask` completes with a non-nil image while the queued `.behind` prefetch is still waiting (`_testDecodeSemaphoreWaiterCount(priority: .behind) == 1`) after only one slot is released |
+    /// Invariant: once the 3 decode slots are full of `.behind` waiters, a later `.visible`
+    /// decode acquires a slot before any remaining `.behind` waiter. Asserted by `visibleTask`
+    /// completing with a non-nil image while the queued `.behind` prefetch is still waiting
+    /// (`_testDecodeSemaphoreWaiterCount(priority: .behind) == 1`) after only one slot released.
     ///
-    /// Method: fill all 3 decode slots with `.behind` prefetches held open at
-    /// `_testDecodeBodyGateHook` (fires immediately after `decodeSemaphore.wait()` returns,
-    /// slot already held — every invocation blocks here, not just the first 3, so the test
-    /// can also catch and hold the `.visible` decode the instant it is admitted, before it
-    /// finishes and releases its own slot). Queue a 4th `.behind` prefetch (blocks — slots
-    /// exhausted), then a `.visible` image() call enqueued strictly after it. Release exactly
-    /// one held slot and confirm the very next hook invocation — held before it can complete
-    /// and cascade a second release — is the `.visible` call, with the earlier-queued
-    /// `.behind` waiter still queued at that instant.
+    /// Method: fill all 3 slots with `.behind` prefetches held at `_testDecodeBodyGateHook`
+    /// (fires on every invocation, slot already held, so it can also catch the `.visible` decode
+    /// the instant it's admitted). Queue a 4th `.behind` (blocks) then a `.visible` `image()`
+    /// call after it. Release exactly one slot and confirm the next hook invocation — held
+    /// before it can complete and cascade a second release — is the `.visible` call, with the
+    /// earlier `.behind` waiter still queued.
     func testVisibleDecodeJumpsAheadOfQueuedBehindPrefetch() async throws {
         CountingURLProtocol.reset()
         let config = URLSessionConfiguration.ephemeral

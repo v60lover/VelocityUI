@@ -66,18 +66,15 @@ public final class RenderEnvironment: Sendable {
     /// `nil` in production.
     public let pipelineTaskSpawnObserver: (@Sendable () -> Void)?
 
-    /// Designated init — all collaborators supplied by the caller.
+    /// Designated init — all collaborators supplied by the caller. `nonisolated`, callable from any
+    /// context — tests substituting a fake `ImageActor`/`VideoController` must use this instead of
+    /// the `@MainActor` convenience init.
     ///
-    /// Enforces two identity DI contracts at runtime:
-    /// - `imageActor.dimensionCache === dimensionCache`: ImageActor writes raw source
-    ///   dimensions at decode time; classify() reads from the same store. Separate
-    ///   instances break the cache-hit contract (DimensionCache.swift:11–17).
-    /// - `videoController.videoPreparation === videoPreparation`: VideoController and
-    ///   the preparation pipeline must share the same actor (Phase 4 invariant).
-    ///
-    /// Tests that need to substitute a fake `ImageActor` or `VideoController` must use
-    /// this init — it is nonisolated and callable from any context, unlike the
-    /// `@MainActor` convenience init.
+    /// Enforces two identity DI contracts at runtime: `imageActor.dimensionCache === dimensionCache`
+    /// (ImageActor writes raw source dimensions at decode time, `classify()` reads the same store —
+    /// separate instances break the hit contract, DimensionCache.swift:11–17) and
+    /// `videoController.videoPreparation === videoPreparation` (must share one actor, Phase 4
+    /// invariant).
     public init(
         textPool: TextMeasurementPool,
         layoutCache: LayoutCache,
@@ -116,23 +113,16 @@ public final class RenderEnvironment: Sendable {
         self.pipelineTaskSpawnObserver = pipelineTaskSpawnObserver
     }
 
-    /// Convenience init for app use.
+    /// Convenience init for app use. `@MainActor` because `VideoController.init` is `@MainActor`
+    /// — tests substituting a `FakeImageActor`/`FakeVideoController` must use the nonisolated
+    /// designated init instead.
     ///
-    /// `@MainActor` because `VideoController.init` is `@MainActor`. Tests that need
-    /// to substitute a `FakeImageActor` or `FakeVideoController` must use the
-    /// designated init instead — it is nonisolated and callable from any context.
-    ///
-    /// Auto-wires:
-    /// - `session` into both `DimensionCache` and `ImageActor`, satisfying the
-    ///   shared HTTP/2 connection pool contract (DimensionCache.swift:15–17).
-    /// - The same `DimensionCache` instance into `imageActor` (DI contract).
-    /// - The same `VideoPreparationActor` into both `videoController` and `videoPreparation`.
-    /// - `decodeScaleCeiling` into `imageActor` — see `ImageActor.decodeScaleCeiling`'s
-    ///   docstring for why 2.0 is the default (VelocityUI-zgs).
-    /// - A fresh `FrozenBitmapStore` at its own default byte budget — pass `frozenBitmapStore`
-    ///   to inject a store with a custom budget or to share one across a caller-managed graph.
-    /// - A fresh `HotBlockRasterizerStore` — pass `hotBlockRasterizerStore` to share one across
-    ///   a caller-managed graph (mirrors `videoController`'s always-constructed-here treatment).
+    /// Auto-wires: `session` into both `DimensionCache` and `ImageActor` (shared HTTP/2
+    /// connection pool, DimensionCache.swift:15–17); the same `DimensionCache` into `imageActor`;
+    /// the same `VideoPreparationActor` into both `videoController` and `videoPreparation`;
+    /// `decodeScaleCeiling` into `imageActor` (2.0 default, VelocityUI-zgs); a fresh
+    /// `FrozenBitmapStore`/`HotBlockRasterizerStore` at default budget — pass either explicitly
+    /// to inject a custom budget or share one across a caller-managed graph.
     @MainActor
     public convenience init(
         textPool: TextMeasurementPool = .init(),

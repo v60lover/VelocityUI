@@ -67,62 +67,58 @@ private struct ReferenceLRU {
 }
 
 /// Covers VelocityUI-ry1v (hybrid reuse phase B): the working-range / LRU-bounded
-/// `FrozenBitmapStore`. Mirrors `BlockReuseTests`' approach — the store itself needs no UIKit
-/// (only `CGImage`/`CGSize`/`BlockKey`), so every test below except the `RenderEnvironment`
-/// ownership section runs on plain `swift test`, no DeviceTestHost required. `makeFakeCGImage`
-/// below is pure CoreGraphics, the same technique `BlockReuseTests.makeFakeCGImage` uses.
+/// `FrozenBitmapStore`. Needs no UIKit (only `CGImage`/`CGSize`/`BlockKey`), so every test
+/// except the `RenderEnvironment` ownership section runs on plain `swift test`.
 ///
 /// Acceptance-criterion -> test mapping (VelocityUI-ry1v):
-/// - "bitmap(for:) returns CGImage? SYNCHRONOUSLY, callable from a non-async context"
+/// - bitmap(for:) is SYNCHRONOUS, callable from a non-async context
 ///     -> testBitmapFor_IsSynchronouslyCallable_HitReturnsSameInstance_MissReturnsNil
-/// - "Byte budget + LRU: storing entries whose total cost exceeds byteBudget evicts LRU until
-///    within budget; currentByteTotal never exceeds byteBudget after a store"
+/// - Byte budget + LRU: store exceeding byteBudget evicts LRU until within budget;
+///   currentByteTotal never exceeds byteBudget after a store
 ///     -> testStore_ExceedingBudget_EvictsLeastRecentlyUsedUntilWithinBudget
-/// - "bitmap(for:) hit bumps recency (a hit rescues an entry from being the next eviction victim)"
+/// - bitmap(for:) hit bumps recency, rescuing an entry from the next eviction
 ///     -> testBitmapFor_HitBumpsRecency_RescuesEntryFromNextEviction
-/// - "Working-range O(window) memory ceiling (LB5): peak currentByteTotal stays ~flat as chat
-///    grows from 50 -> 500 messages, NOT growing with chat length"
+/// - Working-range O(window) ceiling (LB5): peak currentByteTotal stays ~flat as chat grows
+///   50 -> 500 messages, not with chat length
 ///     -> testSlidingWindow_PeakByteTotalStaysFlat_AsChatGrows50To500Messages
-/// - "Evict drops the bitmap but not the caller's descriptor; currentByteTotal drops by the
-///    evicted cost"
+/// - evict drops only the bitmap, not the caller's descriptor; byteTotal drops by evicted cost
 ///     -> testEvict_DropsBitmapOnly_DescriptorUntouched_ByteTotalDropsByEvictedCost
-/// - "handleMemoryPressure() drops out-of-window bitmaps (collapses to in-window total, or 0 if
-///    none admitted); a subsequent bitmap(for:) for a dropped key returns nil"
+/// - handleMemoryPressure() drops out-of-window bitmaps (collapses to in-window total, or 0);
+///   a dropped key's bitmap(for:) returns nil
 ///     -> testHandleMemoryPressure_DropsOutOfWindowBitmaps_CollapsesToInWindowTotal
 ///     -> testHandleMemoryPressure_NoWindowEverAdmitted_DropsEverything
-/// - "RenderEnvironment owns it ... no singleton ... releases all bitmaps on env deinit"
-///     -> RenderEnvironment ownership section below (`#if canImport(UIKit)`, needs the
-///        UIKit-gated RenderEnvironment/VideoController/ImageActor types).
+/// - RenderEnvironment owns it, no singleton, releases all bitmaps on env deinit
+///     -> RenderEnvironment ownership section below (`#if canImport(UIKit)`)
 ///
 /// Acceptance-criterion -> test mapping (VelocityUI-socg phase C1):
-/// - "evict(_ keysThatLeft:) removes exactly the named keys in O(k); currentByteTotal drops by
-///    their cost; other entries are untouched"
+/// - evict(_ keysThatLeft:) removes exactly the named keys in O(k); byteTotal drops by their
+///   cost; other entries untouched
 ///     -> testEvictKeysThatLeft_RemovesExactlyNamedKeys_OtherEntriesUntouched
 ///     -> testEvictKeysThatLeft_KeyNotCached_IsSilentlyIgnored
 ///     -> testEvictKeysThatLeft_EmptySet_IsNoOp
 ///     -> testEvictKeysThatLeft_LargeCache_OnlyNamedKeysRemoved
-/// - "budget-from-window sizing produces a budget that does not evict an in-window block"
+/// - budget-from-window sizing does not evict an in-window block
 ///     -> testBudgetForWindowCount_SizedBudget_DoesNotEvictAFullInWindowBudget
 ///     -> testBudgetForWindowCount_PureFunction_MatchesWindowCountTimesCostTimesHeadroom
 ///     -> testBudgetForWindowCount_UsesMeasuredDefaultPerBitmapCost
 ///     -> testBudgetForWindowCount_NonPositiveInputs_ReturnZero
 ///     -> testWindowCountConvenienceInit_ProducesSameBudgetAsStaticHelper
 ///
-/// Acceptance-criterion -> test mapping (VelocityUI-socg review finding #2 — driver-sized budget,
-/// GROW-ONLY per the follow-up device-regression fix — see `sizeBudget`'s docstring for why item
-/// count underestimates a single streaming message's real block-count footprint):
-/// - "sizeBudget(forWindowCount:) raises byteBudget above the constructed floor when the real
-///    working-range footprint exceeds it"
+/// Acceptance-criterion -> test mapping (VelocityUI-socg finding #2 — driver-sized budget,
+/// GROW-ONLY; see `sizeBudget`'s docstring for why item count underestimates a streaming
+/// message's real block-count footprint):
+/// - sizeBudget(forWindowCount:) raises byteBudget above the constructed floor when the real
+///   footprint exceeds it
 ///     -> testSizeBudget_SetsByteBudget_MatchesStaticHelper
 ///     -> testSizeBudget_GrowingBudget_EvictsNothing
-/// - "sizeBudget(forWindowCount:) never lowers byteBudget below the constructed floor, and never
-///    evicts to reach a smaller budget — a small windowCount is a safe no-op"
+/// - sizeBudget(forWindowCount:) never lowers byteBudget below the floor, never evicts for a
+///   smaller budget — a small windowCount is a safe no-op
 ///     -> testSizeBudget_SmallerWindow_IsNoOp_FloorHolds
 ///
-/// Acceptance-criterion -> test mapping (VelocityUI-socg review finding #1 — window stays bounded):
-/// - "evict(_ keysThatLeft:) subtracts the departed keys from the tracked window, so admit
-///    (union)/evict (subtract) form a symmetric pair and handleMemoryPressure() can still drop
-///    out-of-window entries after a long scroll — window does not grow unbounded"
+/// Acceptance-criterion -> test mapping (VelocityUI-socg finding #1 — window stays bounded):
+/// - evict(_ keysThatLeft:) subtracts departed keys from the tracked window, so admit (union) /
+///   evict (subtract) form a symmetric pair and handleMemoryPressure() can still drop
+///   out-of-window entries after a long scroll — window never grows unbounded
 ///     -> testEvictKeysThatLeft_RemovesFromWindow_SoMemoryPressureCanDropThem
 final class FrozenBitmapStoreTests: XCTestCase {
 
@@ -476,13 +472,10 @@ final class FrozenBitmapStoreTests: XCTestCase {
     }
 
     /// O(k) contract: removing `k` named keys out of a much larger cache must not degrade to an
-    /// O(count) full sweep. This does not assert wall-clock complexity directly (flaky under
-    /// load) — it asserts the OBSERVABLE contract that only the named keys are affected, at any
-    /// cache size, which is the behavior an O(count) implementation could equally satisfy but an
-    /// accidental "scan everything" bug (e.g. iterating `entries` instead of `keysThatLeft`)
-    /// would not: this test's key insight is functional correctness at scale, backed by
-    /// `debugValidateListInvariants()` catching any list corruption an O(count) rewrite might
-    /// introduce.
+    /// O(count) sweep. Doesn't assert wall-clock complexity (flaky under load) — asserts the
+    /// observable contract that only the named keys are affected, which an accidental "scan
+    /// everything" bug (e.g. iterating `entries` instead of `keysThatLeft`) would violate.
+    /// `debugValidateListInvariants()` catches any list corruption such a rewrite might introduce.
     func testEvictKeysThatLeft_LargeCache_OnlyNamedKeysRemoved() {
         let store = FrozenBitmapStore(byteBudget: 100_000_000)
         let allKeys = (0..<500).map { key($0) }
@@ -551,12 +544,10 @@ final class FrozenBitmapStoreTests: XCTestCase {
 
     // MARK: - Acceptance (VelocityUI-socg C4): sizeBudget(forWindowCount:) driver-triggered resize
     //
-    // GROW-ONLY (device-regression follow-up): `budget(forWindowCount:)` sizes from `windowCount`
-    // ITEMS, but a single streaming chat message is ONE item holding MANY frozen text BLOCKS — item
-    // count systematically underestimates the real block footprint. Sizing straight from item count
-    // (e.g. `windowCount: 1`) would fall well below what one tall message needs and evict still-live
-    // blocks. `sizeBudget` therefore only ever RAISES `byteBudget` above the constructed floor
-    // (`init(byteBudget:)`'s value, 16 MB by default) — it never lowers it, and never evicts.
+    // GROW-ONLY (device-regression follow-up): `windowCount` counts ITEMS, but one streaming
+    // message is ONE item holding MANY frozen BLOCKS, so item count underestimates the real
+    // footprint. `sizeBudget` therefore only ever RAISES `byteBudget` above the constructed floor
+    // (16 MB default) — never lowers it, never evicts.
 
     /// `sizeBudget(forWindowCount:)` is the seam `FeedScrollView.updateVisibleCells` calls once
     /// the real working-range item count is known (the store itself is constructed before the
@@ -623,16 +614,14 @@ final class FrozenBitmapStoreTests: XCTestCase {
     // MARK: - Stress: intrusive-list invariants under randomized interleaving
 
     /// Regression guard for the intrusive doubly-linked-list rewrite (VelocityUI-ry1v phase B):
-    /// interleaves 2000 store/bitmap(for:)/evict(outside:) calls across a 6-key universe, with a
-    /// budget that fits only 3 of them so eviction fires constantly. That forces every unlink
-    /// edge case — empty list, single node, unlinking the head, unlinking the tail, unlinking a
-    /// middle node, and evicting the entire list via an empty window — to happen many times over.
+    /// interleaves 2000 store/bitmap(for:)/evict(outside:) calls across a 6-key universe with a
+    /// budget that fits only 3, so eviction fires constantly — forcing every unlink edge case
+    /// (empty list, single node, unlink head/tail/middle, evict-all via empty window) many times.
     ///
-    /// Cross-checks every step against `ReferenceLRU` (the old, structurally-simple array-based
-    /// algorithm this store used before the rewrite): a broken unlink/relink shows up either as
-    /// `currentByteTotal` drifting from the oracle, a hit/miss disagreeing with the oracle, or
-    /// `debugValidateListInvariants()` catching a dangling/orphaned node or corrupted prev/next
-    /// directly. Seeded PRNG — same sequence every run, so a failure reproduces.
+    /// Cross-checks every step against `ReferenceLRU` (the old array-based algorithm): a broken
+    /// unlink/relink shows up as `currentByteTotal` drift, a hit/miss disagreement, or
+    /// `debugValidateListInvariants()` catching a corrupted node directly. Seeded PRNG — same
+    /// sequence every run, so failures reproduce.
     func testStressInterleavedOps_StaysConsistentWithReferenceLRU_AndListInvariantsHold() {
         let budget = 300 // fits exactly 3 of the 6 keys below -> eviction fires constantly
         let store = FrozenBitmapStore(byteBudget: budget)
@@ -675,18 +664,14 @@ final class FrozenBitmapStoreTests: XCTestCase {
 
     // MARK: - Regression guard: weak prev/next avoids a Node retain cycle (no UIKit required)
 
-    /// Guards the weak-link decision documented on `FrozenBitmapStore.Node` (FrozenBitmapStore.swift):
-    /// `entries` is the SOLE strong owner of every `Node`; `prev`/`next` (and `State.head`/`tail`)
-    /// are `weak` specifically so two adjacent nodes never form an `A.next <-> B.prev` retain
-    /// cycle. `testRenderEnvironment_Teardown_ReleasesFrozenBitmapStore_NoLeak` (below, UIKit
-    /// -gated) only proves the STORE itself is released -- it can't detect a cycle between NODES,
-    /// because the store deallocates regardless of whether its nodes retain each other. This test
-    /// closes that gap on plain `swift test`: it observes a bitmap held by a node with BOTH a live
-    /// prev and next link (the exact shape a strong-link cycle would leak) and asserts it is
-    /// actually released once the store goes away. If `Node.prev`/`Node.next` were ever changed
-    /// from `weak var` to a strong `var`, this test would FAIL -- the release flag would stay
-    /// `false` because the cycle keeps the middle node (and its bitmap) alive after `entries`,
-    /// and thus the store, is gone.
+    /// Guards the weak-link decision on `FrozenBitmapStore.Node`: `entries` is the sole strong
+    /// owner of every `Node`; `prev`/`next` are `weak` so two adjacent nodes never form an
+    /// `A.next <-> B.prev` retain cycle. The UIKit-gated store-teardown test only proves the
+    /// STORE is released, not that nodes don't retain each other — this closes that gap on plain
+    /// `swift test` by observing a bitmap held by a node with BOTH a live prev and next link, and
+    /// asserting it's released once the store goes away. If `Node.prev`/`next` were ever changed
+    /// to a strong `var`, this would FAIL: the cycle would keep the middle node (and its bitmap)
+    /// alive after `entries`, and the store, is gone.
     func testDroppingStore_ReleasesNodesAndBitmaps_NoStrongLinkRetainCycle() {
         // Bulletproof dealloc observation: a CGDataProvider release callback fires exactly when
         // the CGImage built from it (and thus the provider) is deallocated. This is preferred

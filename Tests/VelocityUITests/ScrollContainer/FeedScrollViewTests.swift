@@ -9,15 +9,13 @@ import os
 @MainActor
 final class FeedScrollViewTests: XCTestCase {
 
-    /// One-time settle window after the whole class finishes, in addition to each real-media
-    /// test's own `drainFeedWork(_:)` call. ~9 tests spin up real `ImageActor`/DispatchQueueExecutor
-    /// instances and decode real files in quick succession; per-test draining handles each
-    /// FeedScrollView's own Tasks, but GCD's QoS-scoped worker pool is process-wide and can still
-    /// be under pressure right at the class boundary. See VelocityUI-1su.6 — this class stacking
-    /// with ImageActorTests (which has its own class-level settle) was needed to get
-    /// ImagePrefetchIntegrationTests.testPrefetchedIndexMountsWithContent to stop missing its 5s
-    /// window in full-suite runs, even though per-test draining alone already made every
-    /// individual FeedScrollViewTests test itself well-behaved in isolation.
+    /// One-time settle window after the class finishes, on top of each real-media test's own
+    /// `drainFeedWork(_:)`. ~9 tests spin up real `ImageActor`/DispatchQueueExecutor instances and
+    /// decode real files in quick succession — per-test draining handles each FeedScrollView's own
+    /// Tasks, but GCD's process-wide QoS worker pool can still be under pressure at the class
+    /// boundary. Needed (VelocityUI-1su.6) to stop
+    /// `ImagePrefetchIntegrationTests.testPrefetchedIndexMountsWithContent` missing its 5s window
+    /// in full-suite runs, even though every test is well-behaved in isolation.
     nonisolated override class func tearDown() {
         Thread.sleep(forTimeInterval: 1.0)
         super.tearDown()
@@ -517,15 +515,14 @@ final class FeedScrollViewTests: XCTestCase {
 
     /// Verifies the `applyContent` privacy guard is actually exercised on cross-item recycle.
     ///
-    /// The test uses a `DecodeGate` to hold item A's decode in-flight while the cell is
-    /// rebound to item B. Once the gate is opened, item A's Task calls
-    /// `applyContent(id:image:for: A.id)`. The privacy guard compares A.id against
-    /// `currentItemID` (now B.id) and rejects the stale delivery — proving the guard fired.
+    /// Uses a `DecodeGate` to hold item A's decode in-flight while the cell rebinds to item B.
+    /// Once opened, item A's Task calls `applyContent(id:image:for: A.id)`; the guard compares
+    /// A.id against `currentItemID` (now B.id) and rejects the stale delivery.
     ///
     /// Without the gate, both "guard fired" and "Task cancelled before guard" produce
-    /// `contentLayer.opacity == 0`, making the test unable to distinguish the two cases.
-    /// With the gate, the Task is guaranteed to reach `applyContent` — so opacity == 0
-    /// can only be explained by the guard rejecting the delivery.
+    /// `contentLayer.opacity == 0`, so the test couldn't distinguish the cases. With the gate,
+    /// the Task is guaranteed to reach `applyContent`, so opacity == 0 can only mean the guard
+    /// rejected the delivery.
     func testCrossItemRecycleDoesNotDeliverStaleImage() async throws {
         let url = try writeTempJPEG(width: 60, height: 60)
         defer { try? FileManager.default.removeItem(at: url) }
@@ -624,14 +621,14 @@ final class FeedScrollViewTests: XCTestCase {
 
     // MARK: - 13. Same-item re-mount keeps contentLayer.opacity at 1 (no placeholder flash)
 
-    /// Verifies: when the same item (same ID) is re-mounted via a URL change,
-    /// contentLayer.opacity stays at 1 throughout — no flash to the placeholder gradient state.
+    /// Verifies: when the same item (same ID) is re-mounted via a URL change, contentLayer.opacity
+    /// stays at 1 throughout — no flash to the placeholder gradient state.
     ///
-    /// Design context: URL is in imageDescriptor.layoutHash so a URL change is classified
-    /// as .layout → itemsDidChange recycles the cell via returnToPool (cancelPendingMedia
-    /// only; sublayers and opacity preserved) → prepareForReuse(for: sameID) sees
-    /// isSameItem=true → skips opacity reset → applyLayout([]) (WR miss) prunes sublayers
-    /// inside contentLayer but does NOT touch contentLayer.opacity.
+    /// Why: URL is in `imageDescriptor.layoutHash`, so a URL change classifies as `.layout` →
+    /// `itemsDidChange` recycles the cell via `returnToPool` (cancels pending media only,
+    /// preserves sublayers/opacity) → `prepareForReuse(for: sameID)` sees `isSameItem=true` and
+    /// skips the opacity reset → `applyLayout([])` (WR miss) prunes sublayers inside contentLayer
+    /// but never touches `contentLayer.opacity`.
     func testSameItemRemountPreservesContentsUntilNewImageArrives() async throws {
         let url1 = try writeTempJPEG(width: 60, height: 60)
         let url2 = try writeTempJPEG(width: 90, height: 90)
@@ -791,17 +788,17 @@ final class FeedScrollViewTests: XCTestCase {
     /// Guards the invariant that itemsDidChange's height-forwarding path reads .itemID zero
     /// times — it uses (prevIdx, nextIdx) integer pairs, never an [AnyHashable: _] dict.
     ///
-    /// NodeTable._itemIDCounter counts every .itemID property read (not AnyHashable constructions).
-    /// RenderDiffer.diff with N all-surviving appearance-changed items reads .itemID exactly 4×N
-    /// times: scratchPrevIndex build (N), lookup (N), removeValue (N), removed-check loop (N).
-    /// itemsDidChange's height-forwarding (survivors/rebuildFrames) adds zero reads.
-    /// A regression that rebuilds an [AnyHashable: _] dict for height-forwarding (+N inserts,
-    /// +N lookups) raises the counter to 6×N and the assertion fails.
+    /// `NodeTable._itemIDCounter` counts every `.itemID` property read (not AnyHashable
+    /// constructions). `RenderDiffer.diff` with N all-surviving appearance-changed items reads
+    /// `.itemID` exactly 4×N times (scratchPrevIndex build, lookup, removeValue, removed-check
+    /// loop, each N). Height-forwarding (survivors/rebuildFrames) adds zero reads; a regression
+    /// that rebuilds an `[AnyHashable: _]` dict there (+N inserts, +N lookups) raises the counter
+    /// to 6×N and fails the assertion.
     ///
-    /// frame.height=0 keeps visibleCells empty so the appearance-changed loop's spawnMediaFetches
-    /// call — which reads e.next.itemID once per visible cell — never executes. This isolates
-    /// the measurement to the differ only and satisfies _itemIDCounter's serial-access invariant
-    /// (no concurrent Task spawns that could read .itemID during the window).
+    /// `frame.height=0` keeps `visibleCells` empty so the appearance-changed loop's
+    /// `spawnMediaFetches` call (reads `e.next.itemID` per visible cell) never executes — isolates
+    /// the measurement to the differ and satisfies `_itemIDCounter`'s serial-access invariant (no
+    /// concurrent Task spawns reading `.itemID` during the window).
     func testAppearanceOnlyUpdateAnyHashableAccessCountBounded() {
         struct StyleItem: Identifiable, Sendable {
             let id: Int
@@ -905,42 +902,31 @@ final class FeedScrollViewTests: XCTestCase {
 
     /// Microbench for VelocityUI-wyc — verifies the performance claim in VelocityUI-4kp.3 #3.
     ///
-    /// Measures `itemsDidChange` wall time for a 1000-item appearance-only feed update and
-    /// compares against a synthetic e26 baseline constructed by adding the O(N) AnyHashable
-    /// dict-build overhead that 4kp.3 removed (the `newIndexByItemID` build at old lines 230-232).
-    ///
-    /// Synthetic baseline construction:
-    ///   e26_time    ≈ current_time + T_newIndexByItemID   (1 extra O(N) AnyHashable dict)
+    /// Measures `itemsDidChange` wall time for a 1000-item appearance-only update and compares
+    /// against a synthetic e26 baseline that adds back the O(N) AnyHashable dict-build overhead
+    /// 4kp.3 removed (`newIndexByItemID` build at old lines 230-232):
+    ///   e26_time    ≈ current_time + T_newIndexByItemID
     ///   preE26_time ≈ current_time + T_newIndexByItemID + T_knownHeights
-    ///                                                      (2 extra O(N) AnyHashable dicts;
-    ///                                                       removedIDs is empty on appearance path)
+    ///                 (removedIDs is empty on the appearance path)
     ///
-    /// Why the 3× target cannot be asserted at total-function scope:
-    ///   On the force-miss path (nil `itemSignature`), `itemsDidChange` calls `flatten()` for
-    ///   all N items before diffing. On iOS simulator, `flatten()` for 1000 single-node items
-    ///   takes ~8ms (existential dispatch + NodeTable init per item). The removed dict build
-    ///   (~0.5ms) is ~6% of that total. A 3× speedup of the full function would require the
-    ///   dict build to cost >2× everything else — impossible when flatten dominates. The 3×
-    ///   claim holds for the isolated post-differ paths (rebuildFrames + visibility loops) but
-    ///   those are private. The assertions here are therefore:
-    ///     (a) an absolute p99 ceiling — catches algorithmic regressions that make the whole
-    ///         function slow, regardless of where the cost lands
-    ///     (b) dict-build overhead measurement printed for trend tracking — confirms the
-    ///         removed cost is real and detectable; cross-check against test #16
-    ///         (testAppearanceOnlyUpdateAnyHashableAccessCountBounded) which asserts the dict
-    ///         build has zero .itemID accesses, proving the code path is gone.
+    /// Why the 3× target can't be asserted at total-function scope: on the force-miss path (nil
+    /// `itemSignature`), `itemsDidChange` calls `flatten()` for all N items before diffing —
+    /// ~8ms for 1000 single-node items on simulator, vs ~0.5ms for the removed dict build (~6%
+    /// of total). A 3× speedup of the whole function would need the dict build to cost >2×
+    /// everything else, impossible once flatten dominates. The 3× claim holds for the isolated
+    /// post-differ paths (rebuildFrames + visibility loops), which are private, so this test
+    /// instead asserts (a) an absolute p99 ceiling catching algorithmic regressions anywhere in
+    /// the function, and (b) dict-build overhead printed for trend tracking, cross-checked
+    /// against test #16 (`testAppearanceOnlyUpdateAnyHashableAccessCountBounded`, which proves
+    /// the dict build's `.itemID` accesses are gone).
     ///
-    /// Scope of the "flatten dominates" justification:
-    ///   The argument above is PATH-DEPENDENT — it holds on the force-miss path where
-    ///   `flatten()` runs for every item on every update. This test exercises exactly that
-    ///   path because it does not set `feed.itemSignature` (nil signature forces a cache-miss
-    ///   on every item, preserving today's behavior bit-for-bit so this regression guard stays
-    ///   valid). On the cache-HIT path (`itemSignature` provided, most items unchanged)
-    ///   `flatten()` is skipped for hits and no longer dominates — total-function-scope speedup
-    ///   targets become achievable there. The cache-hit floor is asserted by
-    ///   testItemsDidChangeCacheHitFloor. This test stays the force-miss baseline.
+    /// This "flatten dominates" argument is PATH-DEPENDENT: it holds on the force-miss path this
+    /// test exercises (`itemSignature` unset → cache-miss on every item, preserving today's
+    /// behavior bit-for-bit). On the cache-HIT path (most items unchanged) `flatten()` is
+    /// skipped for hits and total-function speedup becomes achievable — asserted separately by
+    /// `testItemsDidChangeCacheHitFloor`. This test stays the force-miss baseline.
     ///
-    /// Median + p99 are printed for CI trend tracking.
+    /// Median + p99 printed for CI trend tracking.
     func testItemsDidChangeAppearanceOnlySpeedupVsE26Baseline() {
         struct StyleItem: Identifiable, Sendable {
             let id: Int
@@ -1263,17 +1249,13 @@ final class FeedScrollViewTests: XCTestCase {
     ///   (b) p99 < 10ms (ceiling that catches O(N²) regressions in the diff/rebuildFrames floor)
     ///   (c) median speedup > 2× vs the miss-loop median
     ///
-    /// NOTE on the original 60µs / 130× target from the bead spec:
-    ///   The bead's cost model counted only builder+flatten overhead (~5ms for N=1000
-    ///   single-node items) and estimated cache-hit overhead at ~58µs. That estimate
-    ///   excluded differ.diff() and rebuildFrames, which are O(N) and run on every
-    ///   itemsDidChange call regardless of the cache. The diff builds scratchPrevIndex
-    ///   (N AnyHashable dict insertions) and walks N next tables; rebuildFrames fills
-    ///   survivors (N entries) and iterates N frames. Together these cost ~3ms for N=1000
-    ///   and set the function floor. The cache does save ~5ms of builder+flatten work per
-    ///   call, delivering a real ~2.6× total speedup (8ms → ~3ms). For feeds with deeper
-    ///   DSL trees the builder+flatten cost grows while the diff floor stays stable, so
-    ///   the speedup benefit grows with tree depth.
+    /// NOTE on the original 60µs / 130× bead-spec target: that cost model counted only
+    /// builder+flatten overhead (~5ms for N=1000) and estimated cache-hit overhead at ~58µs,
+    /// excluding differ.diff()/rebuildFrames — both O(N), both run every call regardless of
+    /// cache (diff builds an N-entry AnyHashable dict and walks N tables; rebuildFrames fills N
+    /// survivors and iterates N frames), costing ~3ms for N=1000 and setting the function floor.
+    /// The cache does save ~5ms of builder+flatten work per call — a real ~2.6× speedup
+    /// (8ms → ~3ms) that grows with DSL tree depth since the diff floor stays flat.
     ///
     /// Median + p99 printed for CI trend tracking.
     func testItemsDidChangeCacheHitFloor() {
@@ -1418,16 +1400,14 @@ final class FeedScrollViewTests: XCTestCase {
     //              call that delivers fragments — no async hop, no applyContent (VelocityUI-1ho AC1,5,6)
 
     /// Verifies the core sync-paint invariant end-to-end through the full FeedScrollView stack:
+    /// mount itemA and let it load (image enters cache); prepend itemB, invalidating WorkingRange
+    /// so itemA moves to index 1 (WR miss); the pipeline re-measures and commits, triggering
+    /// setNeedsLayout; on the next layoutSubviews, refineKnownFrames builds a sync map
+    /// (cachedImage hit) and applyLayout(_:synchronousContent:) makes sublayer.contents non-nil
+    /// in that SAME call — no extra Task.yield or async hop.
     ///
-    /// 1. Mount itemA, wait for async load to complete (image enters cache).
-    /// 2. Prepend itemB → WorkingRange invalidated → itemA moves to index 1 (WR miss).
-    /// 3. Pipeline re-measures → commits to WR → setNeedsLayout.
-    /// 4. On the next layoutSubviews, refineKnownFrames builds a sync map (cachedImage hit),
-    ///    calls applyLayout(_:synchronousContent:) → sublayer.contents is non-nil in the SAME
-    ///    layoutSubviews call — no additional Task.yield or async hop required.
-    ///
-    /// Additionally asserts: _debugApplyContentCount == 0 (applyContent was bypassed),
-    /// and placeholderLayer.opacity == 0 (full-coverage sync map reveals contentLayer inline).
+    /// Also asserts `_debugApplyContentCount == 0` (applyContent bypassed) and
+    /// `placeholderLayer.opacity == 0` (full-coverage sync map reveals contentLayer inline).
     func testSyncPaintSetsContentsWithinRefineKnownFrames() async throws {
         let url = try writeTempJPEG(width: 60, height: 60)
         defer { try? FileManager.default.removeItem(at: url) }
@@ -1546,14 +1526,13 @@ final class FeedScrollViewTests: XCTestCase {
     /// AC(2)(3): after LayoutCache is warmed for the head-set (mirroring `warmUp`), the FIRST
     /// `layoutSubviews` after items are assigned must deliver real fragments to every visible
     /// cell in the SAME pass — zero `applyLayout([])` gradient-only frames, and WorkingRange
-    /// itself must be materialized (not just the cell painted) so subsequent frames take the
-    /// WR-hit branch instead of falling through refineKnownFrames bookkeeping.
+    /// itself must be materialized so subsequent frames take the WR-hit branch instead of
+    /// falling through refineKnownFrames bookkeeping.
     ///
-    /// Trigger: LayoutCache warmed BEFORE `feed.items` is assigned and BEFORE the pipeline's
-    /// notifyPipelineIfNeeded Task has any chance to run (we assert immediately after the
-    /// single synchronous `layoutSubviews()` call, before yielding back to the run loop) — this
-    /// is the exact window where WorkingRange is empty but LayoutCache is hot, which is the
-    /// failure mode this bead fixes.
+    /// Trigger: LayoutCache warmed BEFORE `feed.items` is assigned and before the pipeline's
+    /// `notifyPipelineIfNeeded` Task has any chance to run (asserted immediately after the single
+    /// synchronous `layoutSubviews()` call, before yielding back to the run loop) — the exact
+    /// window where WorkingRange is empty but LayoutCache is hot, the failure mode this bead fixes.
     func testWarmUpEliminatesFirstFrameGrayPlaceholder() async throws {
         let url = try writeTempJPEG(width: 60, height: 60)
         defer { try? FileManager.default.removeItem(at: url) }
@@ -1618,31 +1597,28 @@ final class FeedScrollViewTests: XCTestCase {
         await drainFeedWork(feed)
     }
 
-    /// Regression test for VelocityUI-ket: `layoutSubviews`' first width transition (the
+    /// Regression for VelocityUI-ket: `layoutSubviews`' first width transition (the
     /// `0 -> bounds.width` sentinel) was handled identically to a genuine width change
     /// (rotation/resize), so `handleWidthChange()` unconditionally spawned
     /// `Task { await cache.invalidateAll() }` — wiping LayoutCache entries `AsyncFeed.warmUp`
-    /// populated for items beyond the very first visible screen, even though nothing about
-    /// those entries was stale (same width, first-ever mount). Warms 30 items, mounts a
-    /// viewport that only fits the first at each row's synchronous intrinsic height
-    /// (VelocityUI-ksh — `width / aspectRatio`, always well over the 200pt viewport here), and
-    /// asserts the off-screen item's warmed entry survives well past the first
-    /// `layoutSubviews` call. The yield-drain loop gives any (buggy) async invalidation
-    /// Task every chance to run — same idiom as this file's other async-completion polls
-    /// (e.g. `testCrossItemRecycleDoesNotDeliverStaleImage`), just bounded by iteration
-    /// count instead of a deterministic condition, since the assertion here is about
-    /// absence of a state change rather than its arrival.
+    /// populated beyond the first visible screen, even though nothing about them was stale
+    /// (same width, first-ever mount). Warms 30 items, mounts a viewport that only fits the
+    /// first at each row's synchronous intrinsic height (VelocityUI-ksh — `width / aspectRatio`,
+    /// well over the 200pt viewport here), and asserts the off-screen item's warmed entry
+    /// survives past the first `layoutSubviews` call. The yield-drain loop gives any (buggy)
+    /// async invalidation Task every chance to run — same idiom as
+    /// `testCrossItemRecycleDoesNotDeliverStaleImage`, bounded by iteration count since the
+    /// assertion is about absence of a state change, not its arrival.
     func testWarmUpEntriesForOffscreenItemsSurviveFirstMountWidthTransition() async {
         let env = makeEnvironment()
         let width: CGFloat = 375
-        // 30 items, each with a DISTINCT aspectRatio: AsyncImageNode.layoutHash covers
-        // url/aspectRatio/contentMode (not item.id — see Nodes.swift), so identical-shaped
-        // items collapse onto the SAME CacheKey. A shared key would let RenderPipeline's own
-        // post-invalidation re-prefetch (which covers indices 0..<10 from leading index 0,
-        // default prefetchAheadCount 10 / prefetchBehindCount 3) silently repopulate the
-        // "off-screen" key too, masking the bug this test guards against. Distinct aspect
-        // ratios give every index a distinct layoutHash/CacheKey, so index 20's entry can
-        // ONLY come from warmUp — the pipeline's own window never reaches past index 9.
+        // 30 items, each with a DISTINCT aspectRatio: `AsyncImageNode.layoutHash` covers
+        // url/aspectRatio/contentMode (not item.id — see Nodes.swift), so identical-shaped items
+        // would collapse onto the same CacheKey, letting RenderPipeline's own post-invalidation
+        // re-prefetch (indices 0..<10, prefetchAheadCount 10/prefetchBehindCount 3) silently
+        // repopulate the "off-screen" key too and mask the bug this test guards against. Distinct
+        // ratios give every index its own CacheKey, so index 20's entry can ONLY come from
+        // warmUp — the pipeline's own window never reaches past index 9.
         let testItems = (0..<30).map { TestItem(id: $0, aspectRatio: 1.0 + CGFloat($0) * 0.01) }
         let builder: (TestItem) -> any RenderNode = { item in
             AsyncImageNode(url: nil, aspectRatio: item.aspectRatio)
@@ -1676,16 +1652,13 @@ final class FeedScrollViewTests: XCTestCase {
             + "to have gone stale from")
     }
 
-    /// Regression test for a second `layoutSubviews()` call being a true no-op once the
-    /// LayoutCache-hit inline materialization (this bead) has already committed a WR entry
-    /// on the first pass. NOTE: this does NOT exercise `WorkingRange.commit`'s double-commit
-    /// idempotency contract — after the first `layoutSubviews()`, index 0 is already in
-    /// `visibleCells`, so `updateVisibleCells`'s mount-skip guard
-    /// (`guard visibleCells[index] == nil else { continue }`) short-circuits the second call
-    /// before `commit()` is ever invoked again for that index. The direct double-commit
-    /// idempotency check lives in `WorkingRangeTests.testDoubleCommitWithIdenticalDataIsIdempotent`,
-    /// which calls `WorkingRange.commit(_:_:at:)` twice with identical arguments and asserts
-    /// `entry(at:)` is unchanged — see Tests/VelocityUITests/Pipeline/WorkingRangeTests.swift.
+    /// Regression: a second `layoutSubviews()` call is a true no-op once the LayoutCache-hit
+    /// inline materialization has already committed a WR entry on the first pass. NOTE: this
+    /// does NOT exercise `WorkingRange.commit`'s double-commit idempotency contract — after the
+    /// first call, index 0 is already in `visibleCells`, so `updateVisibleCells`'s mount-skip
+    /// guard (`guard visibleCells[index] == nil else { continue }`) short-circuits the second
+    /// call before `commit()` runs again for that index. The direct double-commit idempotency
+    /// check is `WorkingRangeTests.testDoubleCommitWithIdenticalDataIsIdempotent`.
     func testSecondLayoutSubviewsCallAfterLayoutCacheHitIsInert() async throws {
         let url = try writeTempJPEG(width: 60, height: 60)
         defer { try? FileManager.default.removeItem(at: url) }
@@ -1847,19 +1820,17 @@ final class FeedScrollViewTests: XCTestCase {
     // MARK: - 26. Synchronous intrinsic height before any async pipeline commit (VelocityUI-ksh)
 
     /// Root-cause regression for VelocityUI-ksh: `rebuildFrames` used to seed EVERY unmeasured
-    /// image row with the flat `estimatedItemHeight` placeholder (300pt) regardless of the
-    /// item's real aspect ratio, until the async pipeline (`measureNode`) committed a real
-    /// layout to WorkingRange. Under sustained fast scroll with no warm-up pass, that
-    /// wrong-estimate window never closes — `resolvedFrames` stays wrong, `visRange` churns
-    /// every frame, and the cell pool never converges (the bead's Instruments evidence: ~90%
-    /// `RenderCell.init` on every dequeue, post-ramp).
+    /// image row with the flat `estimatedItemHeight` placeholder (300pt) regardless of real
+    /// aspect ratio, until `measureNode` committed a real layout to WorkingRange. Under sustained
+    /// fast scroll with no warm-up pass, that window never closes — `resolvedFrames` stays wrong,
+    /// `visRange` churns every frame, and the cell pool never converges (bead's Instruments
+    /// evidence: ~90% `RenderCell.init` on every dequeue, post-ramp).
     ///
-    /// Asserts that immediately after `feed.items = ...` and a single synchronous
-    /// `layoutSubviews()` — with NO `await` anywhere in this test, so the async pipeline Task
-    /// spawned by `notifyPipelineIfNeeded` cannot possibly have run yet — a tall row
-    /// (aspectRatio 0.5 → width/aspectRatio = 750pt at width 375) and a short row (aspectRatio
-    /// 2.0 → 187.5pt) already have their DISTINCT, CORRECT intrinsic heights, not the flat
-    /// 300pt estimate both would collapse to under the old behavior.
+    /// Asserts that immediately after `feed.items = ...` and one synchronous `layoutSubviews()`
+    /// — no `await` anywhere in this test, so the pipeline Task spawned by
+    /// `notifyPipelineIfNeeded` cannot have run yet — a tall row (aspectRatio 0.5 → 750pt at
+    /// width 375) and a short row (aspectRatio 2.0 → 187.5pt) already have DISTINCT, CORRECT
+    /// intrinsic heights, not the flat 300pt both would collapse to under the old behavior.
     func testSynchronousIntrinsicHeightBeforePipelineCommit() {
         let width: CGFloat = 375
         let feed = makeFeed(width: width, height: 812)
@@ -1898,22 +1869,20 @@ final class FeedScrollViewTests: XCTestCase {
 
     /// Regression for VelocityUI-ksh's core symptom. Pre-populates LayoutCache with REAL
     /// heights spanning the bead's repro range (188pt-750pt at width 375) via `warmLayoutCache`
-    /// — the same mechanism `AsyncFeed.warmUp` uses — so `updateVisibleCells`' WR-miss/
-    /// LayoutCache-hit branch inline-materializes and calls `VerticalLayoutProvider.refineFrames`
-    /// SYNCHRONOUSLY the moment each row first mounts (no `Task`/pipeline timing involved at
-    /// all — this reconciliation is on the deterministic, single-threaded mount path).
+    /// (same mechanism `AsyncFeed.warmUp` uses), so `updateVisibleCells`' WR-miss/LayoutCache-hit
+    /// branch calls `VerticalLayoutProvider.refineFrames` SYNCHRONOUSLY the moment each row first
+    /// mounts — no `Task`/pipeline timing involved, this is the deterministic mount path.
     ///
     /// Pre-fix: every row starts at the flat `estimatedItemHeight` (300pt) placeholder, so the
-    /// FIRST mount of each heterogeneous row (188-750pt real height) triggers a large
-    /// refine-delta, shifting every not-yet-visited row's position by up to ~450pt. Because
-    /// `updateVisibleCells` computes `visRange`/`keepRange` ONCE at function entry (before the
-    /// mount loop's inline refinements land), the corrected geometry only takes effect on the
-    /// NEXT `layoutSubviews` call — which can pull a different, wider set of indices into view
-    /// than the steady-state window, forcing `RenderCell.init` beyond the pool's already-warm
-    /// size. Post-fix: `rebuildFrames`' synchronous intrinsic-height estimate already matches
-    /// the LayoutCache-warmed real height (same `width / aspectRatio` formula), so the inline
-    /// refine computes a zero delta and nothing shifts — the pool never needs more cells than
-    /// the working-range window.
+    /// first mount of each heterogeneous row (188-750pt real) triggers a large refine-delta,
+    /// shifting not-yet-visited rows by up to ~450pt. `updateVisibleCells` computes
+    /// `visRange`/`keepRange` ONCE at function entry (before the mount loop's inline refinements
+    /// land), so the corrected geometry only takes effect on the NEXT `layoutSubviews` call —
+    /// which can pull a wider index set into view than steady-state, forcing `RenderCell.init`
+    /// beyond the pool's already-warm size. Post-fix: `rebuildFrames`'s synchronous
+    /// intrinsic-height estimate already matches the LayoutCache-warmed real height (same
+    /// `width / aspectRatio` formula), so the inline refine computes a zero delta and nothing
+    /// shifts — the pool never needs more cells than the working-range window.
     func testCellPoolConvergesAfterWarmupWithHeterogeneousRealHeights() async {
         let width: CGFloat = 375
         let env = makeEnvironment()
@@ -1967,21 +1936,18 @@ final class FeedScrollViewTests: XCTestCase {
 
     /// Regression for VelocityUI-9lq's `dequeue`/`returnToPool` rewrite: both moved from
     /// `removeValue(forKey:)`-then-conditionally-reinsert to `_modify`-based in-place mutation
-    /// (`cellPools[kind]?.popLast()` / `cellPools[kind, default: []].append`) to stop the
-    /// dictionary from being fully emptied and reinserted into on every single recycle
-    /// (Instruments showed this as `_NativeDictionary.setValue -> _copyOrMoveAndResize`
-    /// persistent allocations under `returnToPool`). A typo or wrong-accessor regression in
-    /// that rewrite would either silently stop finding pooled cells (pool hit rate collapses,
-    /// `RenderCell.init` fires every dequeue) or hand back a wrong/duplicate instance — this
-    /// test asserts neither happens by tracking every distinct `CALayer` identity mounted
-    /// across sustained recycling: it must plateau near the working-range window size, not
-    /// grow toward `itemCount`.
+    /// (`cellPools[kind]?.popLast()` / `cellPools[kind, default: []].append`), avoiding a full
+    /// empty-and-reinsert per recycle (Instruments showed `_NativeDictionary.setValue ->
+    /// _copyOrMoveAndResize` allocations under `returnToPool`). A wrong-accessor regression there
+    /// would either silently stop finding pooled cells (hit rate collapses, `RenderCell.init`
+    /// fires every dequeue) or hand back a wrong/duplicate instance — this test rules both out by
+    /// tracking every distinct `CALayer` identity mounted across sustained recycling: it must
+    /// plateau near the working-range window size, not grow toward `itemCount`.
     ///
-    /// Out of scope: the underlying "zero heap bytes" claim is only observable via Instruments
-    /// (see VelocityUI-9lq's BenchmarkHost repro) — XCTest has no hook onto Dictionary's
-    /// internal rehash path, so this test verifies the black-box contract (identity +
-    /// convergence) that would break if the `_modify` rewrite were wrong, not the byte count
-    /// itself. Same honesty boundary VelocityUI-ksh's regression test already drew.
+    /// Out of scope: "zero heap bytes" is only observable via Instruments (VelocityUI-9lq's
+    /// BenchmarkHost repro) — XCTest has no hook onto Dictionary's rehash path, so this verifies
+    /// the black-box contract (identity + convergence), not the byte count itself. Same honesty
+    /// boundary VelocityUI-ksh's regression test drew.
     func testCellPoolRoundTripsInstanceIdentityAfterDictAccessRefactor() async {
         let width: CGFloat = 375
         let env = makeEnvironment()
@@ -2033,14 +1999,13 @@ final class FeedScrollViewTests: XCTestCase {
 
     // MARK: - 29. reuseDecision gates the bind-site recycle (VelocityUI-socg C2)
 
-    /// A same-id streaming update (item content changes, identity doesn't) must classify as
-    /// `.layout` — `AsyncImageNode.layoutHash` covers `aspectRatio`, so changing it on the SAME
-    /// item id forces `RenderDiffer.classify` to `.layout`, which is exactly the "full
-    /// invalidation" branch of `itemsDidChange` that used to unconditionally return every
-    /// visible cell to the pool. `reuseDecision(oldID:newID:)` now gates that branch: since
-    /// `layoutChanged` pairs are matched by item id (RenderDiffer.diff keys off `itemID`), the
-    /// slot's `oldID` (the cell's `currentItemID`) equals the new item's id, so the decision
-    /// must be `.inPlace` — the shell is kept, not pooled.
+    /// A same-id streaming update (content changes, identity doesn't) must classify as `.layout`
+    /// — `AsyncImageNode.layoutHash` covers `aspectRatio`, so changing it on the SAME item id
+    /// forces `RenderDiffer.classify` to `.layout`, the "full invalidation" branch of
+    /// `itemsDidChange` that used to unconditionally pool every visible cell. `reuseDecision
+    /// (oldID:newID:)` now gates that branch: since `layoutChanged` pairs are matched by item id
+    /// (`RenderDiffer.diff` keys off `itemID`), the slot's `oldID` equals the new item's id, so
+    /// the decision must be `.inPlace` — the shell is kept, not pooled.
     func testSameIDLayoutChange_TakesInPlaceBranch_DoesNotReturnShellToPool() async {
         let feed = makeFeed()
         feed.items = [TestItem(id: 0, aspectRatio: 1.0)]
@@ -2073,15 +2038,14 @@ final class FeedScrollViewTests: XCTestCase {
             ".inPlace branch must keep the SAME RenderCell instance bound at index 0 — no recycle")
 
         // The kept shell must not freeze on its pre-change content: aspectRatio 2.0 at width 375
-        // measures to 187.5 (width / aspectRatio — LayoutEngine.measureNode and intrinsicHeight
-        // are guaranteed to agree, see LayoutEngine.swift:195-196). `rebuildFrames` seeds a
-        // survivor's height from its OLD frame, so index 0 starts this poll still at 375 — the
-        // assertion only holds once refineKnownFrames delivers the NEW measured height, which
-        // requires the .inPlace keep branch to have re-enrolled index 0 into
-        // `_pendingFragmentIndices` (this is what breaks without the fix: the index never
-        // refreshes and the loop times out still reporting 375).
-        // Poll layoutSubviews the same way sibling async-delivery tests in this file do
-        // (Task.yield + wall-clock deadline) — never Task.sleep as a coordination primitive.
+        // measures to 187.5 (width / aspectRatio — measureNode and intrinsicHeight are guaranteed
+        // to agree, see LayoutEngine.swift:195-196). `rebuildFrames` seeds a survivor's height from
+        // its OLD frame, so index 0 starts this poll still at 375 — the assertion only holds once
+        // refineKnownFrames delivers the NEW height, which requires the .inPlace keep branch to
+        // have re-enrolled index 0 into `_pendingFragmentIndices` (without the fix, the index
+        // never refreshes and the loop times out still reporting 375).
+        // Poll layoutSubviews like sibling async-delivery tests in this file (Task.yield +
+        // wall-clock deadline) — never Task.sleep as a coordination primitive.
         var refreshedHeight: CGFloat?
         let refreshDeadline = ContinuousClock.now.advanced(by: .seconds(10))
         while ContinuousClock.now < refreshDeadline {
@@ -2146,15 +2110,13 @@ final class FeedScrollViewTests: XCTestCase {
         feed.items = testItems
         feed.layoutSubviews()
 
-        // Warm-up: the working-range window has to fill with pooled cells at least once before
-        // allocations stop. Measured directly (temporary per-step instrumentation) that with this
-        // feed's geometry (100 items, aspectRatio 1.0 → 375pt rows at width 375, stepSize 200) the
-        // window fills and `_dequeueAllocCount` plateaus at step 19; `warmupSteps = 40` gives a
-        // generous margin over that fill point — matches
-        // testCellPoolConvergesAfterWarmupWithHeterogeneousRealHeights' "generous margin over the
-        // working-range window" rationale. `.inPlace` never fires here (every index binds a
-        // distinct item id), so this test is really re-confirming the untouched scroll-driven
-        // recycle loop in updateVisibleCells behaves exactly as before C2's wiring.
+        // Warm-up: the working-range window must fill with pooled cells at least once before
+        // allocations stop. Measured directly: with this feed's geometry (100 items, aspectRatio
+        // 1.0 → 375pt rows at width 375, stepSize 200), `_dequeueAllocCount` plateaus at step 19;
+        // `warmupSteps = 40` gives a generous margin, matching
+        // testCellPoolConvergesAfterWarmupWithHeterogeneousRealHeights' rationale. `.inPlace`
+        // never fires here (every index binds a distinct item id), so this really re-confirms the
+        // untouched scroll-driven recycle loop in updateVisibleCells behaves as before C2's wiring.
         let stepSize: CGFloat = 200
         let totalSteps = 90
         let warmupSteps = 40
@@ -2236,15 +2198,14 @@ final class FeedScrollViewTests: XCTestCase {
         await drainFeedWork(feed)
     }
 
-    /// `init(frame:)` builds the view before UIKit ever attaches it to a window, so the
-    /// `traitCollection` read at construction time reflects the process default, not a live
-    /// system setting — this is the exact cold-launch gap the finding described: a device
-    /// launched with Larger Text enabled would mount unscaled text and never see it correct
-    /// itself, because the OS only posts `didChangeNotification` on a *change*, never on mount.
-    /// This test never posts that notification at all — it proves `didMoveToWindow` alone
-    /// (FeedScrollView.swift) catches the real category once the view is attached to a window
-    /// whose trait environment already carries a non-default `preferredContentSizeCategory`,
-    /// exactly like a cold-launch device where the trait is live before any view exists.
+    /// `init(frame:)` builds the view before UIKit attaches it to a window, so the
+    /// `traitCollection` read at construction reflects the process default, not a live system
+    /// setting — the cold-launch gap this covers: a device launched with Larger Text enabled
+    /// would mount unscaled text and never self-correct, since the OS only posts
+    /// `didChangeNotification` on a *change*, never on mount. This test never posts that
+    /// notification — it proves `didMoveToWindow` (FeedScrollView.swift) alone catches the real
+    /// category once attached to a window whose trait environment already carries a non-default
+    /// `preferredContentSizeCategory`, exactly like a cold-launch device.
     func testWindowMount_SeedsLiveContentSizeCategory_WithoutNotification() async {
         let env = makeEnvironment()
         let testCenter = NotificationCenter()

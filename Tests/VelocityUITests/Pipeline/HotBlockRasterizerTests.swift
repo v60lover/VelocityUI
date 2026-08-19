@@ -5,14 +5,14 @@ import XCTest
 import UIKit
 @testable import VelocityUI
 
-/// Acceptance tests for VelocityUI-x4q0's `HotBlockRasterizer` / `HotBlockRasterizerStore` —
-/// the production stateful, cell-owned incremental text rasterizer (direction (b) composite)
-/// and its per-`BlockKey` lifecycle owner. Exercises the same shapes the VelocityUI-q87l spike
-/// (`HotBlockRasterizerSpikeTests.swift`, `IncrementalTextProbe`) validated, but against the
-/// real production types instead of the spike's test-local probe.
+/// Acceptance tests for VelocityUI-x4q0's `HotBlockRasterizer`/`HotBlockRasterizerStore` — the
+/// production stateful, cell-owned incremental text rasterizer and its per-`BlockKey` lifecycle
+/// owner. Exercises the same shapes the VelocityUI-q87l spike validated
+/// (`HotBlockRasterizerSpikeTests.swift`), against real production types instead of the spike's
+/// probe.
 ///
-/// Every assertion here is count-based, pixel-based, or exact-value based — never wall-clock
-/// (this bead's hard requirement; timing assertions flake on shared/loaded hardware).
+/// Every assertion is count/pixel/exact-value based — never wall-clock (flakes on shared/loaded
+/// hardware).
 ///
 /// | Invariant (ledger's Testable criteria)                                          | Assertion |
 /// |-----------------------------------------------------------------------------------|-----------|
@@ -99,15 +99,13 @@ final class HotBlockRasterizerTests: XCTestCase {
 
     // MARK: - Acceptance: flat per-token redrawn-fragment count (direction (b) core claim)
 
-    /// Streams 60 "sealed paragraph" tokens (occasionally forcing an internal wrap before
-    /// sealing, exactly mirroring `HotBlockRasterizerSpikeTests.testStableOriginAndFlatReLayout_CodeFenceStream`'s
-    /// pattern) into ONE production `HotBlockRasterizer`, reading `_debugLastRedrawnFragmentCount`
-    /// after each call. Flatness is self-calibrating — the first wrapping token AND the first
-    /// plain token (after the very first call, which always takes the full-rasterize branch and
-    /// isn't part of either kind's steady-state) each establish an observed constant, and every
-    /// LATER token of the same kind must equal it EXACTLY, never merely "under some bound." This
-    /// only fails on a genuine cost regression (redrawn count growing with N), not on an
-    /// arbitrarily-tight guessed ceiling.
+    /// Streams 60 "sealed paragraph" tokens (occasionally forcing an internal wrap) into ONE
+    /// production `HotBlockRasterizer`, mirroring `HotBlockRasterizerSpikeTests
+    /// .testStableOriginAndFlatReLayout_CodeFenceStream`'s pattern, reading
+    /// `_debugLastRedrawnFragmentCount` after each call. Flatness is self-calibrating: the first
+    /// wrapping token and first plain token (after call 1, which always full-rasterizes) each
+    /// establish a constant, and every LATER token of that kind must match it EXACTLY — this only
+    /// fails on a genuine cost regression, not an arbitrarily-tight guessed ceiling.
     func testFlatRedrawnFragmentCount_CodeFenceStream() {
         let rasterizer = HotBlockRasterizer()
         let width: CGFloat = 220
@@ -154,18 +152,16 @@ final class HotBlockRasterizerTests: XCTestCase {
 
     // MARK: - Acceptance: composite seam correct under ligature font + emoji-at-seam
 
-    /// Mirrors `HotBlockRasterizerSpikeTests.testLigatureAndEmojiAtSeam` exactly (same width,
-    /// font size, and streamed parts — a ZWJ emoji sequence appended as its own token right
-    /// after a still-open paragraph), but against the PRODUCTION `HotBlockRasterizer.append`/
-    /// `finish()` instead of the spike's private `IncrementalTextProbe`. Confirms the
-    /// incrementally-composited final image is pixel-identical to a fresh single-shot
-    /// `rasterizeText` of the identical final string — a mismatch would mean the seam left a
+    /// Mirrors `HotBlockRasterizerSpikeTests.testLigatureAndEmojiAtSeam` (same width, font size,
+    /// streamed parts — a ZWJ emoji sequence appended right after a still-open paragraph), but
+    /// against the PRODUCTION `HotBlockRasterizer.append`/`finish()` instead of the spike's private
+    /// `IncrementalTextProbe`. Confirms the composited final image is pixel-identical to a fresh
+    /// single-shot `rasterizeText` of the same string — a mismatch means the seam left a
     /// stale/partial glyph (research §6.5).
     ///
-    /// `HotBlockRasterizer.append` takes the block's FULL content so far each call (not a raw
-    /// delta — `HotBlockMeasurer` computes the delta internally), unlike the spike's probe which
-    /// took a delta directly — so each call below passes the ACCUMULATED string, not just the
-    /// new part.
+    /// `HotBlockRasterizer.append` takes the block's FULL accumulated content each call (delta is
+    /// computed internally by `HotBlockMeasurer`), unlike the spike's probe which took a raw delta —
+    /// so each call below passes the ACCUMULATED string, not just the new part.
     func testLigatureAndEmojiAtSeam() {
         let width: CGFloat = 260
         let fontSize: CGFloat = 16
@@ -234,19 +230,16 @@ final class HotBlockRasterizerTests: XCTestCase {
 
     // MARK: - Acceptance: multi-fragment crop/blit correctness (stableTopY > 0)
 
-    /// Grows the LAST line of a 3-line block across three `append` calls, never resetting with a
-    /// trailing "\n" — none of the three calls wrap, so the fragment count stays exactly 3 the
-    /// whole time and the total block height never changes either. That means, on both the second
-    /// and third call, `stableCount = previousFragmentCount - 1 = 2` and `stableTopY` (bottom of
-    /// line two) is strictly LESS than the retained `previousImage`'s own full height (still all
-    /// 3 lines) — the composite branch's `stableTopY > 0` blit has a real sub-region to crop, not
-    /// the whole image. Neither `testFlatRedrawnFragmentCount_CodeFenceStream` (trailing fragment
-    /// always empty) nor `testLigatureAndEmojiAtSeam` (single wrapped line, never more than 1
-    /// fragment) exercises this shape.
+    /// Grows the LAST line of a 3-line block across three `append` calls (no wraps, fragment count
+    /// stays exactly 3, height never changes). On calls 2 and 3, `stableCount = previousFragmentCount
+    /// - 1 = 2` and `stableTopY` is strictly LESS than `previousImage`'s full height — the composite
+    /// branch's `stableTopY > 0` blit crops a real sub-region, not the whole image. Neither
+    /// `testFlatRedrawnFragmentCount_CodeFenceStream` (trailing fragment always empty) nor
+    /// `testLigatureAndEmojiAtSeam` (single wrapped line) exercises this shape.
     ///
-    /// Compares against a fresh single-shot `rasterizeText` of the final string rather than a
-    /// second incrementally-driven rasterizer, because a squash bug reproduces identically on both
-    /// sides of a same-code-path comparison — only a from-scratch ground truth can catch it.
+    /// Compares against a fresh single-shot `rasterizeText` rather than a second incrementally-driven
+    /// rasterizer — a squash bug reproduces identically on both sides of a same-code-path comparison,
+    /// so only a from-scratch ground truth catches it.
     func testMultiFragmentBlit_GrowingLastLineMatchesGroundTruth() {
         let rasterizer = HotBlockRasterizer()
         let width: CGFloat = 400
@@ -287,20 +280,16 @@ final class HotBlockRasterizerTests: XCTestCase {
 
     // MARK: - HotBlockRasterizerStore: creates-then-reuses an entry per key
 
-    /// Black-box proxy for "creates-then-reuses": a Store that (incorrectly) constructed a
-    /// brand-new `HotBlockRasterizer` on every call for the same key would still, in this
-    /// design, converge on a pixel-CORRECT final image — `HotBlockRasterizer.append` always
-    /// receives the block's FULL accumulated content, and its non-append fallback branch does a
-    /// correct (just less efficient) full re-measure/rasterize of whatever content it's given.
-    /// So pixel/CGImage-identity comparisons alone cannot distinguish "reused one entry" from
-    /// "recreated a fresh entry every call" — only redrawn-fragment COST can (exposed via
-    /// `HotBlockRasterizer._debugLastRedrawnFragmentCount`, which the Store does not surface,
-    /// and `entries` is `private` so `@testable import` cannot reach it either).
+    /// Black-box proxy for "creates-then-reuses": a Store that (incorrectly) built a fresh
+    /// `HotBlockRasterizer` per call for the same key would still converge on a pixel-CORRECT final
+    /// image (`append` always gets the FULL accumulated content, and the non-append fallback does a
+    /// correct if less efficient full re-measure). So pixel/CGImage identity alone can't distinguish
+    /// "reused" from "recreated" — only redrawn-fragment COST can, and the Store doesn't surface
+    /// `_debugLastRedrawnFragmentCount` (`entries` is `private`, unreachable via `@testable`).
     ///
-    /// What IS testable black-box: the Store's per-key entry, driven through two calls, must
-    /// behave EXACTLY like a directly-driven `HotBlockRasterizer` fed the identical two-call
-    /// sequence — proving the public per-key API contract holds, even though the internal
-    /// reuse-vs-recreate mechanism isn't independently observable through this surface.
+    /// What IS testable black-box: the Store's per-key entry, driven through two calls, must behave
+    /// EXACTLY like a directly-driven `HotBlockRasterizer` fed the same two-call sequence — proving
+    /// the public per-key contract holds even though reuse-vs-recreate isn't independently observable.
     func testStoreAppend_CreatesThenReusesEntryPerKey() {
         let store = HotBlockRasterizerStore()
         let key = BlockKey(itemID: "msg", index: 0)

@@ -28,15 +28,13 @@ public struct Fragment: Sendable {
 
 // MARK: - Post-pass extraction
 
-/// Walks a ResolvedLayout tree alongside its NodeTable and produces a flat,
-/// ordered list of Fragments with absolute frames in cell coordinates.
+/// Walks a ResolvedLayout tree alongside its NodeTable and produces a flat, ordered list
+/// of Fragments with absolute frames in cell coordinates.
 ///
-/// Container nodes (vstack, hstack, zstack) contribute no Fragment of their own —
-/// they only resolve coordinate spaces for their children. Leaf nodes (image, text,
-/// spacer, hosting, gif, video, customLayer) each produce one Fragment.
-///
-/// Z-order for overlapping fragments: array index mirrors ZStack draw order
-/// (earlier = further back, later = further front).
+/// - Containers (vstack/hstack/zstack) contribute no Fragment, only resolve child
+///   coordinate spaces. Leaf nodes (image, text, spacer, hosting, gif, video, customLayer)
+///   each produce one.
+/// - Array order = z-order (earlier = back, later = front), matching ZStack draw order.
 public nonisolated func extractFragments(table: NodeTable, layout: ResolvedLayout) -> [Fragment] {
     var result: [Fragment] = []
     // clip starts nil: an unframed tree never establishes a slot to clip against, so this
@@ -48,24 +46,18 @@ public nonisolated func extractFragments(table: NodeTable, layout: ResolvedLayou
 
 // MARK: - Private
 
-/// `clip`, when non-nil, is an absolute-coordinate rect (already in cell coordinates, same
-/// space as `Fragment.frame`) that every descendant fragment must be intersected against
-/// before being emitted. It is established the moment recursion crosses a FRAMED container
-/// (VelocityUI-983) and narrows (never widens) as recursion descends through nested framed
-/// containers, via `clip.map { $0.intersection(slotAbs) } ?? slotAbs`.
+/// `clip`, when non-nil, is an absolute rect (cell coordinates, same space as `Fragment.frame`)
+/// every descendant fragment must intersect before emission. Set on crossing a FRAMED container
+/// (VelocityUI-983) and narrows — never widens — through nested framed containers via
+/// `clip.map { $0.intersection(slotAbs) } ?? slotAbs`.
 ///
-/// Why this exists: `applyFrame` (LayoutEngine.swift) makes a framed container's own
-/// `totalFrame` exactly the slot, but an UNFRAMED descendant leaf inside it can still measure
-/// larger than that slot on its own axis (e.g. an unframed `.image` child's intrinsic
-/// `width / aspectRatio` height) — nothing before this point clamps a container's raw
-/// children to the container's bounds. Without this clip, such a leaf's fragment paints past
-/// the framed cell's edges; because RenderCell never sets `masksToBounds` (CLAUDE.md hard
-/// rule — reserved for corner-radius decode-time rounding, not layout clipping), an
-/// unclipped overflow fragment visibly paints over whatever the CALayer z-order puts beneath
-/// it, which on scroll-up manifests as the enclosing cell appearing to "expand"/glitch over
-/// its neighbors. This is a geometry-level clip (intersecting the emitted `CGRect`), not a
-/// pixel-level crop — `contentMode` still governs how the leaf's content is drawn within
-/// whatever (now-clamped) rect it's given.
+/// Why: `applyFrame` clamps a framed container's own `totalFrame` to the slot, but an UNFRAMED
+/// descendant leaf can still measure larger on its own axis (e.g. an unframed `.image`'s
+/// intrinsic `width / aspectRatio` height) — nothing else clamps raw children to the container's
+/// bounds. Since `RenderCell` never sets `masksToBounds` (reserved for corner-radius rounding,
+/// not layout clipping), an unclipped leaf paints past the cell edge and over neighboring cells
+/// — visible as "expand"/glitch on scroll-up. This is a geometry clip on the emitted `CGRect`,
+/// not a pixel crop — `contentMode` still governs on-leaf drawing.
 private nonisolated func collectFragments(
     table: NodeTable,
     layout: ResolvedLayout,

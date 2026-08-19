@@ -6,23 +6,18 @@ import UIKit
 @testable import VelocityUI
 
 /// Measurement spike for VelocityUI-q87l — de-risks VelocityUI-wj8x (incremental
-/// re-rasterization of a single still-growing hot text block) BEFORE any production
-/// wiring. Full analysis in TEXTKIT2_INCREMENTAL_RASTERIZATION_RESEARCH.md (§3, §4, §6).
+/// re-rasterization of a single still-growing hot text block) before any production wiring.
+/// Full analysis in TEXTKIT2_INCREMENTAL_RASTERIZATION_RESEARCH.md (§3, §4, §6).
 ///
-/// This spike streams N appended chunks into ONE persistent NSTextLayoutManager /
-/// NSTextContentStorage / NSTextContainer, editing only via
-/// `textStorage.replaceCharacters(in:with:)` inside `performEditingTransaction` — never
-/// by reassigning `attributedString` (that is exactly the D1 cost driver the research
-/// doc identifies as today's problem, see TextRasteriser.swift / TextMeasurementContext.swift).
-///
-/// It does NOT touch `rasterizeText`, `TextMeasurementContext`, `FreezeState`, or the
-/// freeze path — this is measurement only. `IncrementalTextProbe` below is a test-local
-/// type, not a production primitive; a real `HotBlockRasterizer` (VelocityUI-x4q0) is a
-/// separate, later bead.
-///
-/// All assertions here are COUNT-based (fragments re-laid-out, lines glyph-rasterized,
-/// pixel areas) or exact-value based (origins, heights) — never wall-clock, per the
-/// bead's hard requirement (timing assertions flake on shared/loaded hardware).
+/// - Streams N appended chunks into ONE persistent NSTextLayoutManager/NSTextContentStorage/
+///   NSTextContainer, editing only via `textStorage.replaceCharacters(in:with:)` inside
+///   `performEditingTransaction` — never by reassigning `attributedString` (the D1 cost driver
+///   the research doc identifies).
+/// - Measurement only — does NOT touch `rasterizeText`, `TextMeasurementContext`, `FreezeState`,
+///   or the freeze path. `IncrementalTextProbe` below is test-local, not production; a real
+///   `HotBlockRasterizer` (VelocityUI-x4q0) is a separate, later bead.
+/// - Assertions are COUNT-based (fragments re-laid-out, lines rasterized, pixel areas) or
+///   exact-value based (origins, heights) — never wall-clock (timing flakes on shared hardware).
 @MainActor
 final class HotBlockRasterizerSpikeTests: XCTestCase {
 
@@ -255,16 +250,12 @@ final class HotBlockRasterizerSpikeTests: XCTestCase {
 
     // MARK: - Test 1: stable-origin + flat re-layout across a code-fence-like stream
 
-    /// Streams many short "sealed paragraphs" (each ends with "\n", forming its own
-    /// fragment), occasionally forcing a within-paragraph wrap before sealing (hazard 2:
-    /// "append causes the last line to wrap — bounded to last + one new fragment").
-    ///
-    /// Flatness is proved WITHOUT a guessed magic-number bound: the first wrapping token
-    /// and the first non-wrapping token each establish an observed constant for
-    /// reLaidOutCount/redrawnLineCount, and every LATER token of the same kind is
-    /// asserted EQUAL to that constant (not merely "under some ceiling"). This is
-    /// self-calibrating and only fails if cost actually changes as N grows — the real
-    /// red flag — rather than failing on an arbitrarily-tight hand-picked bound.
+    /// Streams many short "sealed paragraphs" (each ends with "\n"), occasionally forcing a
+    /// within-paragraph wrap before sealing (hazard 2: "append causes the last line to wrap —
+    /// bounded to last + one new fragment"). Flatness is proved without a guessed magic-number
+    /// bound: the first wrapping token and first non-wrapping token each establish an observed
+    /// constant for reLaidOutCount/redrawnLineCount, and every later token of the same kind must
+    /// equal that constant — self-calibrating, only fails if cost actually changes as N grows.
     func testStableOriginAndFlatReLayout_CodeFenceStream() {
         let probe = IncrementalTextProbe(width: 220, font: .systemFont(ofSize: 15))
         let tokenCount = 60
@@ -381,21 +372,17 @@ final class HotBlockRasterizerSpikeTests: XCTestCase {
 
     // MARK: - Test 5: non-append edit breaks stable-origin (hazard 3)
 
-    /// Builds three sealed paragraphs, then inserts new text INSIDE the first paragraph
-    /// (not at the document end). Confirms the fragments that were positioned AFTER the
-    /// insertion point shift — i.e. stable-origin does NOT hold for non-append edits.
-    /// This is what justifies "the primitive must assert append-only and fall back to
-    /// full rasterizeText if it ever sees a non-append edit" (research §6.3).
+    /// Builds three sealed paragraphs, then inserts new text INSIDE the first paragraph (not at
+    /// the document end). Confirms fragments AFTER the insertion point shift — stable-origin
+    /// does NOT hold for non-append edits, justifying "the primitive must assert append-only and
+    /// fall back to full rasterizeText on a non-append edit" (research §6.3).
     ///
-    /// The insert must actually change the FIRST paragraph's LAID-OUT HEIGHT, or nothing
-    /// below it moves (a same-line insert that doesn't force a wrap leaves every later
-    /// fragment's Y untouched — that was the original bug here, not a real result). This
-    /// version inserts a long word run (no newline) long enough to force the first
-    /// paragraph to wrap to a second line at width 220 — fragment COUNT stays at 3 (still
-    /// one fragment per paragraph, wrapping happens inside the fragment via an extra
-    /// textLineFragment), so index-based origin comparison for fragments 1/2 stays valid
-    /// and isolates exactly one variable: "did an earlier fragment's height change move
-    /// the ones after it."
+    /// The insert must actually change the first paragraph's laid-out height, or nothing below it
+    /// moves (a same-line insert with no wrap leaves later fragments' Y untouched). This version
+    /// inserts a long word run (no newline) that forces the first paragraph to wrap — fragment
+    /// COUNT stays at 3, wrapping happens inside the fragment via an extra textLineFragment — so
+    /// origin comparison for fragments 1/2 isolates exactly one variable: did an earlier
+    /// fragment's height change move the rest.
     func testMidInsertBreaksStableOrigin() {
         let probe = IncrementalTextProbe(width: 220, font: .systemFont(ofSize: 15))
         probe.append("first paragraph\n")

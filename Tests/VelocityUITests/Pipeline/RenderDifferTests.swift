@@ -462,34 +462,24 @@ final class RenderDifferTests: XCTestCase {
         let medianMS = medianNS / 1_000_000
         let p99MS    = p99NS    / 1_000_000
         print("RenderDiffer 1k-items/10-changes  median: \(String(format: "%.3f", medianMS))ms  p99: \(String(format: "%.3f", p99MS))ms")
-        // Thresholds below (median <2.5ms, p99 <4ms) were recalibrated against measured
-        // baselines, not the original <1ms/<2ms figures the test shipped with — those were
-        // never actually met on either simulator or a physical device and were never revisited
-        // (VelocityUI-1su.5). RenderDiffer.swift itself is unchanged since this test was
+        // Thresholds below (median <2.5ms, p99 <4ms) were recalibrated against measured baselines
+        // — the original <1ms/<2ms figures were never actually met on sim or device and were never
+        // revisited (VelocityUI-1su.5). RenderDiffer.swift is unchanged since this test was
         // introduced, so this is a threshold-calibration fix, not a regression case.
         //
-        // Simulator vs. physical device — what actually varies and by how much:
-        // On a *quiescent* host, simulator and device track each other closely (device is not
-        // reliably faster or slower than sim here — both land ~1.3-1.7ms median). The gap that
-        // matters is simulator vs. *host machine load*, not simulator vs. device per se: the
-        // simulator shares the host Mac's CPU/scheduler with every other process on the host
-        // (Spotlight/mds_stores indexing, other Xcode builds, etc.), so its numbers swing wildly
-        // with unrelated host contention. A physical device has its own dedicated CPU and is
-        // insulated from host load entirely — its numbers stay tight regardless of what else is
-        // running on the Mac. So: physical-device runs are the trustworthy baseline for setting
-        // thresholds; simulator runs are only trustworthy when you've confirmed the host is quiet
-        // (check `uptime` / `ps aux | grep mds_stores` first) — a slow simulator run is more often
-        // "host was busy" than "this code got slower."
+        // Simulator vs. device: on a *quiescent* host both track closely (~1.3-1.7ms median).
+        // What actually varies is host load — the simulator shares the host Mac's CPU/scheduler
+        // with everything else running (Spotlight, other Xcode builds), so its numbers swing wildly
+        // under contention; a physical device is insulated from host load and stays tight. Trust
+        // device runs; trust simulator runs only when the host is confirmed quiet (`uptime` /
+        // `ps aux | grep mds_stores`) — a slow sim run is usually "host was busy," not a regression.
         //   iPhone 13 Pro (device), quiescent host — 4 runs: median 1.564-1.602ms, p99 1.600-1.762ms
         //   iPhone 17 (simulator), quiescent host   — 2 runs: median 1.333-1.635ms, p99 1.393-1.679ms
-        //   iPhone 17 (simulator), busy host (many concurrent xcodebuild/simulator processes from
-        //   an unrelated debugging session, Spotlight re-indexing DerivedData writes) — 4 runs:
-        //   median 3.686-4.529ms, p99 7.600-10.788ms — a 2.5-3x slowdown from host contention alone,
-        //   with no code change involved.
-        // The new thresholds sit above the quiescent baseline (~1.6ms median / ~1.8ms p99) with
-        // headroom for normal CI jitter, while still catching a 2x+ algorithmic regression; they
-        // do not attempt to survive the busy-host numbers above — that reflects the host machine
-        // being saturated by unrelated work, not realistic CI load.
+        //   iPhone 17 (simulator), busy host (concurrent xcodebuild/simulator, Spotlight indexing)
+        //   — 4 runs: median 3.686-4.529ms, p99 7.600-10.788ms — 2.5-3x slower from contention alone.
+        // Thresholds sit above the quiescent baseline (~1.6ms median / ~1.8ms p99) with headroom for
+        // CI jitter, while still catching a 2x+ algorithmic regression — they don't try to survive
+        // the busy-host numbers, which reflect host saturation, not realistic CI load.
         XCTAssertLessThan(medianMS, 2.5,
             "median must be <2.5ms (got \(String(format: "%.3f", medianMS))ms)")
         XCTAssertLessThan(p99MS, 4.0,

@@ -4,22 +4,18 @@ import Foundation
 import CoreGraphics
 
 /// Converts a Layer 1 DSL tree into a flat, existential-free NodeTable at the Layer 1/2 boundary.
+/// Only this call touches Layer-1-internal DSL children arrays; after it, zero `any RenderNode`
+/// references exist in or past the returned table.
 ///
-/// @MainActor: DSL node children arrays are Layer-1-internal and accessed only here.
-/// After this call, zero `any RenderNode` references exist in or past the returned NodeTable.
+/// All existential type tests live in the single `switch` inside `visit` — a new DSL node type
+/// only needs a case there. Modifier nodes (padding etc.) should fold into their target
+/// descriptor's layout contribution at measure time, not become NodeKind cases.
 ///
-/// All existential type tests are concentrated in the single `switch` inside `visit`.
-/// Adding a new DSL node type requires only adding a case there — nowhere else.
-/// Modifier nodes (padding etc.) should fold into their target descriptor's layout contribution
-/// at measure time rather than becoming NodeKind cases — keeps NodeKind closed and exhaustive.
-///
-/// - Parameter contentSizeCategory: The Dynamic Type category to bake into every `TextDescriptor`
-///   this call produces (VelocityUI-ezo.2.5). `flatten()` is the one `@MainActor` boundary aware
-///   of the live trait environment — `TextNode` itself carries no category, so this is where it
-///   enters the pipeline. Default `.unspecified` (no scaling) preserves exact prior behavior for
-///   every caller that doesn't opt in. Folded into the returned `NodeTable.layoutHash` (and each
-///   `.text` node's own `layoutHash`) ONLY when the tree contains at least one text node — see
-///   `sawText` below for why an unconditional fold would be wrong.
+/// - Parameter contentSizeCategory: Dynamic Type category baked into every `TextDescriptor`
+///   (VelocityUI-ezo.2.5). `flatten()` is the only `@MainActor` boundary aware of the live
+///   trait environment, so it's where this enters the pipeline. Default `.unspecified`
+///   preserves prior behavior exactly. Folds into `NodeTable.layoutHash` only when the tree
+///   contains a text node — see `sawText` below for why unconditional folding would be wrong.
 @MainActor
 public func flatten<ID: Hashable & Sendable>(
     _ root: any RenderNode,
@@ -39,21 +35,16 @@ public func flatten<ID: Hashable & Sendable>(
     var sawText = false
 
     func visit(_ node: any RenderNode, parent: Int) {
-        // Unwrap any FrameModifierNode chain BEFORE the unconditional appends below.
-        // FrameModifierNode is transparent: it contributes no NodeKind and no
-        // parentIndices entry of its own — the wrapped concrete node lands at `myIndex`
-        // with `parent` as ITS parent, exactly as if `.frame()` had never been called.
+        // Unwrap the FrameModifierNode chain (transparent: contributes no NodeKind/parentIndices
+        // entry of its own — the wrapped node lands at `myIndex` with `parent`, as if `.frame()`
+        // never wrapped it).
         //
-        // Traversal visits the OUTERMOST `.frame()` first (it's what `node` is bound to
-        // on entry) and walks toward content via `f.content`, so each subsequent iteration
-        // is strictly closer to content than everything merged so far. Per the merge
-        // contract from #1 ("a specified dimension on the INNER, closer-to-content frame
-        // wins"), the newly-unwrapped frame at each step is the one closer to content —
-        // it must be passed as `inner`, with the previously-accumulated (shallower, more
-        // outer) `spec` passed as `outer`. Verified against `.frame(width:100).frame(width:200)`
-        // (inner=100, outer=200): `merge(inner: f.spec, outer: spec)` resolves to width=100
-        // as the contract requires; the naively-symmetric `merge(inner: spec, outer: f.spec)`
-        // would silently let the outer frame win instead — do not swap this back.
+        // Traversal hits the OUTERMOST `.frame()` first and walks toward content, so each step
+        // is closer to content than what's merged so far. Per the "inner (closer-to-content)
+        // wins" merge contract, the newly-unwrapped frame is `inner` and the accumulated `spec`
+        // is `outer`. Verified: `.frame(width:100).frame(width:200)` → `merge(inner: f.spec,
+        // outer: spec)` resolves width=100 correctly; swapping the args would let the outer
+        // frame win instead — do not swap this back.
         var node = node
         var spec = FrameSpec.unspecified
         while let f = node as? FrameModifierNode {
@@ -132,16 +123,14 @@ public func flatten<ID: Hashable & Sendable>(
     )
 }
 
-/// Combines a DSL-level layoutHash with the Dynamic Type category flatten() was called with.
-/// Used both for the returned NodeTable's top-level layoutHash (gated by `sawText`) and for
-/// each individual `.text` node's own `TextDescriptor.layoutHash`.
+/// Combines a DSL-level layoutHash with the Dynamic Type category `flatten()` was called with.
+/// Used for both the table's top-level layoutHash (gated by `sawText`) and each `.text` node's
+/// own `TextDescriptor.layoutHash`.
 ///
-/// `.unspecified` is a true identity transform (returns `layoutHash` verbatim, not merely an
-/// equal-valued mix) — every existing caller that never opts into Dynamic Type gets EXACTLY
-/// `TextDescriptor.layoutHash == TextNode.layoutHash` / `NodeTable.layoutHash == root.layoutHash`,
-/// matching this file's pre-ezo.2.5 output byte-for-byte (see `testFlatten_textDescriptor_
-/// carriesNodeHashes` / `testFlatten_tableHashes_matchRootNode`, which assert exact equality,
-/// not just cross-call equality).
+/// `.unspecified` is a true identity transform — returns `layoutHash` verbatim, not just an
+/// equal-valued mix — so callers that never opt into Dynamic Type get byte-identical output to
+/// pre-ezo.2.5 (`testFlatten_textDescriptor_carriesNodeHashes`,
+/// `testFlatten_tableHashes_matchRootNode` assert exact, not cross-call, equality).
 private func combineHash(_ layoutHash: Int, _ category: VContentSizeCategory) -> Int {
     guard category != .unspecified else { return layoutHash }
     var h = Hasher()

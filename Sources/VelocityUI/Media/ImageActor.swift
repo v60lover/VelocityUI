@@ -68,26 +68,21 @@ private final class CachedImage {
 // MARK: - ImageActor
 
 /// Layer 4 image pipeline: network fetch (cooperative pool) → bounded concurrent decode
-/// (dedicated DispatchQueue, max 3 simultaneous via AsyncSemaphore) → BGRA8888 normalise
-/// + corner-round → NSCache.
+/// (dedicated DispatchQueue, max 3 via AsyncSemaphore) → BGRA8888 normalise + corner-round →
+/// NSCache.
 ///
-/// Design invariants:
-/// - Network and decode run on separate executors. URLSession suspends on the cooperative
-///   pool (no thread held). CGImageSource decode runs on the dedicated concurrent queue.
-///   A serial pipeline doing 200ms network + 5ms decode would be 2.5% utilised and starve
-///   visible-priority decodes under burst load.
-/// - AsyncSemaphore(value: 3) caps concurrent decode closures so decode bursts cannot
-///   exhaust cooperative pool threads needed by measureNode (contract clause 3).
-/// - Cache key is (url, pixelWidth, pixelHeight, scaledRadius) — integer pixels eliminate
-///   CGFloat equality hazards and collapse (50pt @2x, 100pt @1x) to the same entry.
-/// - DimensionCache.store() receives the raw source dimensions from the image header —
-///   not the render-size thumbnail — so classify() gets the true aspect ratio for any
-///   future layout size without a secondary ranged probe.
-/// - Concurrent requests for the same (url, size, radius, scale) key share one decode
-///   `Task` via an `inFlight` map — both `image()` and `preload()` coalesce against it.
-///   Mirrors DimensionCache's coalescing pattern: creator handles cache store; joiners await
-///   the result.
-/// - No singleton. Constructed once in RenderEnvironment, injected by initializer.
+/// - Network and decode use separate executors (URLSession suspends on the cooperative pool,
+///   decode on a dedicated concurrent queue) — a serial pipeline would starve visible-priority
+///   decodes under burst load.
+/// - `AsyncSemaphore(value: 3)` caps concurrent decodes so bursts can't exhaust cooperative pool
+///   threads `measureNode` needs (contract clause 3).
+/// - Cache key is `(url, pixelWidth, pixelHeight, scaledRadius)` — integer pixels avoid CGFloat
+///   equality hazards and collapse e.g. (50pt@2x, 100pt@1x) to one entry.
+/// - `DimensionCache.store()` gets raw source header dimensions, not the thumbnail size, so
+///   `classify()` has the true aspect ratio for any future layout size.
+/// - Concurrent requests for the same key share one decode `Task` via `inFlight` — `image()` and
+///   `preload()` both coalesce against it (mirrors `DimensionCache`'s pattern).
+/// - No singleton — constructed once in `RenderEnvironment`, injected by initializer.
 public actor ImageActor {
     nonisolated let _executor: DispatchQueueExecutor
     public nonisolated var unownedExecutor: UnownedSerialExecutor {
@@ -115,31 +110,24 @@ public actor ImageActor {
     // Required for cachedImage() — a nonisolated synchronous probe on the hot path.
     nonisolated(unsafe) private let cache = NSCache<ImageCacheKey, CachedImage>()
     private var inFlight: [ImageCacheKey: Task<DecodeResult, Never>] = [:]
-    /// Per-key admission record for the in-flight decode's `decodeSemaphore` waiter.
-    ///
-    /// Populated/cleared in lockstep with `inFlight` at every call site (`image()`,
-    /// `preload()`, `prefetch()`) — same key, same moment. Exists so a later, higher-priority
-    /// joiner (see `image()` step 2 / `elevateInFlightDecode(key:to:)`) can find the waiter
-    /// identity and current tier of a decode that another caller already started, and elevate
-    /// it via `AsyncSemaphore.elevate(id:to:)` — without which the joiner would silently
-    /// inherit the original caller's (possibly lower) priority for the remainder of the wait.
-    ///
-    /// The `id` is generated here, once per key, at `inFlight` population time — NOT inside
-    /// `AsyncSemaphore.wait()` — so it stays stable and lookup-able across the (potentially
-    /// long) network-fetch phase, before the decode has even reached the semaphore.
+    /// Per-key admission record for the in-flight decode's `decodeSemaphore` waiter. Populated
+    /// /cleared in lockstep with `inFlight` at every call site (`image()`, `preload()`,
+    /// `prefetch()`). Lets a later, higher-priority joiner find the waiter's identity and elevate
+    /// it via `AsyncSemaphore.elevate(id:to:)` — without this, a joiner would silently inherit
+    /// the original (possibly lower) priority for the rest of the wait. `id` is generated at
+    /// `inFlight` population time, not inside `AsyncSemaphore.wait()`, so it's stable and
+    /// lookup-able through the network-fetch phase before decode reaches the semaphore.
     private var inFlightDecodes: [ImageCacheKey: (id: UUID, priority: DecodePriority)] = [:]
     private let session: URLSession
     /// `nonisolated` so RenderEnvironment can check identity (===) in its designated init.
     nonisolated let dimensionCache: DimensionCache
 
     /// - Parameters:
-    ///   - session:            URLSession for image fetches. Defaults to `.shared`; tests can
-    ///                         inject a custom session.
-    ///   - dimensionCache:     Cache for raw source dimensions. Must be the same instance
-    ///                         used by classify() — separate instances break the hit contract.
-    ///                         Callers should obtain this from RenderEnvironment, not construct it here.
-    ///   - decodeScaleCeiling: Upper bound on decode scale. Defaults to 2.0 — see the property's
-    ///                         docstring. Pass 3.0+ to decode at full display scale.
+    ///   - session: Defaults to `.shared`; tests can inject a custom session.
+    ///   - dimensionCache: Must be the same instance used by `classify()` (obtain from
+    ///     `RenderEnvironment`, don't construct here) — separate instances break the hit contract.
+    ///   - decodeScaleCeiling: Defaults to 2.0, see property docstring. Pass 3.0+ for full
+    ///     display scale.
     public init(
         session: URLSession = .shared,
         dimensionCache: DimensionCache,
@@ -173,14 +161,12 @@ public actor ImageActor {
     nonisolated let _testDecodeQueueKey = DispatchSpecificKey<Bool>()
 
     /// Counts decode closures that ran on velocityui.image.decode (expected) vs other queues.
-    /// Protected by _testDecodeLock — lock makes writes safe across concurrent Task/queue threads.
-    /// Pattern matches NodeTable._itemIDCounter — nonisolated(unsafe) is the lesser violation.
+    /// `_testDecodeLock` makes writes safe across concurrent Task/queue threads (pattern
+    /// matches `NodeTable._itemIDCounter` — `nonisolated(unsafe)` is the lesser violation).
     ///
-    /// Serial-test invariant: these static counters assume one ImageActor instance is under
-    /// test at a time and no concurrent test-suite processes share them. Call
-    /// _testDecodeResetCounts() before each test that reads these values. Any test that reads
-    /// the counters while a concurrent test target could be running decodes will produce
-    /// false-passing or under-counted results.
+    /// Assumes one `ImageActor` under test at a time with no concurrent suite sharing these
+    /// counters — call `_testDecodeResetCounts()` before each reading test, or risk
+    /// false-passing/under-counted results.
     nonisolated(unsafe) private static let _testDecodeLock = NSLock()
     nonisolated(unsafe) static var _testDecodeOnQueueCount: Int = 0
     nonisolated(unsafe) static var _testDecodeTotalCount: Int = 0
@@ -200,15 +186,10 @@ public actor ImageActor {
         ImageActor._testDecodeTotalCount = 0
     }
 
-    /// Injected by unit tests to interpose before `image()` returns.
-    ///
-    /// When non-nil, `image()` suspends at this hook before the cache-hit check.
-    /// The hook is `@Sendable async` but does NOT check `Task.isCancelled` internally —
-    /// callers control the resume point explicitly. This lets tests hold the decode
-    /// in-flight until after a cross-item recycle, then deliver the image to exercise
-    /// the `applyContent` privacy guard.
-    ///
-    /// Set only from test code via `@testable import VelocityUI`. Never set in production.
+    /// Test-only interposer: when non-nil, `image()` suspends here before the cache-hit check.
+    /// Doesn't check `Task.isCancelled` — callers control the resume point, letting tests hold
+    /// a decode in-flight past a cross-item recycle to exercise `applyContent`'s privacy guard.
+    /// Set only via `@testable import VelocityUI`; never set in production.
     var _testDecodeGateHook: (@Sendable () async -> Void)?
 
     /// Sets `_testDecodeGateHook` from test code. Actor-isolated setter so the assignment
@@ -217,15 +198,12 @@ public actor ImageActor {
         _testDecodeGateHook = hook
     }
 
-    /// Injected by unit tests to interpose in `preload()` before the decode Task is created —
-    /// fires after the in-flight coalescing check and the pre-launch cancellation guard.
-    ///
-    /// When non-nil, `preload()` suspends at this hook. Cancelling the outer task during this
-    /// hook has no effect on the inner decode Task (unstructured; does not inherit cancellation).
-    /// Use to observe actor state at the inFlight boundary, not to test slot-release under
-    /// cancellation (for that, see VelocityUI-bw1: hook inside `_decode()` after wait()).
-    ///
-    /// Set only from test code via `@testable import VelocityUI`. Never set in production.
+    /// Test-only interposer in `preload()`, firing after the in-flight coalescing check and
+    /// pre-launch cancellation guard, before the decode Task is created. Cancelling the outer
+    /// task here doesn't affect the inner decode Task (unstructured, no cancellation
+    /// inheritance) — use to observe `inFlight` boundary state, not slot-release under
+    /// cancellation (see VelocityUI-bw1's `_decode()` hook for that). Test-only, never set in
+    /// production.
     var _testPreloadGateHook: (@Sendable () async -> Void)?
 
     /// Sets `_testPreloadGateHook` from test code.
@@ -245,14 +223,11 @@ public actor ImageActor {
         _testPrefetchGateHook = hook
     }
 
-    /// Injected by unit tests to interpose in `_decode()` after `decodeSemaphore.wait()`
-    /// returns and before `withCheckedContinuation`. Fires with the semaphore slot already
-    /// held — cancel the inner Task during this hook then signal, and verify the slot is
-    /// released (subsequent wait() calls must succeed). Gates the `image()`, `preload()`,
-    /// and `prefetch()` paths since all three funnel through `_decode()` (both `image()`
-    /// and `prefetch()` via `_networkFetchAndDecode`).
-    ///
-    /// Set only from test code via `@testable import VelocityUI`. Never set in production.
+    /// Test-only interposer in `_decode()`, after `decodeSemaphore.wait()` returns (slot
+    /// already held) and before `withCheckedContinuation`. Cancel the inner Task here, signal,
+    /// then verify the slot released (subsequent `wait()` succeeds). Gates `image()`,
+    /// `preload()`, and `prefetch()` — all funnel through `_decode()`. Test-only, never set in
+    /// production.
     var _testDecodeBodyGateHook: (@Sendable () async -> Void)?
 
     func set_testDecodeBodyGateHook(_ hook: (@Sendable () async -> Void)?) {
@@ -306,15 +281,15 @@ public actor ImageActor {
     /// Fetch and decode an image for `url`.
     ///
     /// - Parameters:
-    ///   - url:          Source URL (file:// and https:// supported).
-    ///   - targetSize:   Desired render size in points (not pixels).
-    ///   - cornerRadius: Rounding radius in points, applied at decode time via CGContext
-    ///                   clip. Pass 0 for no rounding.
-    ///   - scale:        Screen scale (points → pixels). Must be captured from UIScreen at
-    ///                   the @MainActor call site — UIScreen.main is not safe off main.
-    /// - Returns: BGRA8888 premultiplied CGImage, or nil on error or pre-launch cancellation.
-    ///   If an in-flight task for this key is already running, returns its result regardless
-    ///   of the calling task's cancellation state (shared work is not killed for one caller).
+    ///   - url: Source URL (file:// and https:// supported).
+    ///   - targetSize: Desired render size in points (not pixels).
+    ///   - cornerRadius: Rounding radius in points, applied at decode time via CGContext clip.
+    ///     Pass 0 for no rounding.
+    ///   - scale: Screen scale (points → pixels). Must be captured from UIScreen at the
+    ///     @MainActor call site — `UIScreen.main` is not safe off main.
+    /// - Returns: BGRA8888 premultiplied CGImage, or nil on error or pre-launch cancellation. If
+    ///   an in-flight task for this key is already running, returns its result regardless of the
+    ///   calling task's cancellation state (shared work isn't killed for one caller).
     public func image(
         for url: URL,
         targetSize: CGSize,
@@ -369,27 +344,16 @@ public actor ImageActor {
         return result.image
     }
 
-    /// Decode pre-loaded Data and prime the image cache at the given layout dimensions.
+    /// Decodes pre-loaded `Data` and primes the image cache at the given layout dimensions — the
+    /// decode + cache-store path of `image(for:targetSize:cornerRadius:scale:)` without the
+    /// network fetch. Shares the same 3-slot decode pool as `image()` (FIFO — a preload burst can
+    /// delay a concurrent `image()` call), so use only for one-shot warm-up before the feed
+    /// starts fetching. `url`/`targetSize`/`cornerRadius`/`scale` must match what `image(for:…)`
+    /// will pass later, or the cache key misses. Concurrent calls for the same key join the
+    /// in-flight decode.
     ///
-    /// Equivalent to steps 1 + 5–7 of `image(for:targetSize:cornerRadius:scale:)` — the decode
-    /// and cache-store path — without the network fetch (steps 3–4a). Shared with `image()` to
-    /// cap total decode concurrency at 3 — preload and visible-cell decodes draw from one slot
-    /// pool. FIFO ordering means a preload burst can delay a concurrent `image()` call; intended
-    /// for one-shot warm-up before the visible feed begins fetching.
-    ///
-    /// - Parameters:
-    ///   - data:         Raw image bytes (caller-supplied; not fetched here).
-    ///   - url:          Canonical URL the data originated from. Must match the URL later passed
-    ///                   to `image(for:…)` so the cache key aligns and produces a hit.
-    ///   - targetSize:   Desired render size in points — must match the layout-computed size used
-    ///                   at measurement time, or the cache key will miss.
-    ///   - cornerRadius: Rounding radius in points, applied at decode time. Pass 0 for none.
-    ///   - scale:        Screen scale captured at a @MainActor call site.
-    /// - Note: Bad data (nil CGImageSource or thumbnail failure) silently skips the cache store;
-    ///         the caller receives no signal. Verify warm-up success by probing image(for:…)
-    ///         before measurement begins.
-    /// - Note: Concurrent calls for the same key join the in-flight decode — only one decode
-    ///         Task runs per key at a time. Use during warm-up before the visible feed begins.
+    /// Bad data (nil `CGImageSource` or thumbnail failure) silently skips the cache store —
+    /// verify warm-up succeeded by probing `image(for:…)` afterward.
     public func preload(
         _ data: Data,
         for url: URL,
@@ -443,41 +407,27 @@ public actor ImageActor {
         }
     }
 
-    /// Network-fetch, decode, and cache an image at lower scheduling priority.
+    /// Network-fetch, decode, and cache an image at lower scheduling priority. Cache hit returns
+    /// immediately; in-flight hit joins the existing Task via the shared `inFlight` map (creator
+    /// stores, joiners await); cold path runs the same pipeline as `image()`
+    /// (`_networkFetchAndDecode` → normalise + round → cache store + `DimensionCache.store()`) but
+    /// discards the return value.
     ///
-    /// - Cache hit → returns immediately (no work).
-    /// - In-flight hit → joins the existing Task (from a concurrent `image()` or `prefetch()`);
-    ///   the shared `inFlight` map keyed by `ImageCacheKey` guarantees coalescing across all
-    ///   entry points. Creator handles cache store; joiners await the result.
-    /// - Cold path → network fetch → decode via `_networkFetchAndDecode` → normalise +
-    ///   corner-round → cache store + `DimensionCache.store()` side-effect. Same pipeline
-    ///   as `image()`; return value is discarded.
-    /// - QoS: inner Task runs at `.utility` so the cooperative scheduler deprioritises
-    ///   prefetch network waits relative to mount-time `image()` callers (`.userInitiated`).
-    ///   `decodeQueue` always runs at `.userInitiated` (shared; see TODO in `_decode`).
-    ///   URLSession connection pool is shared — QoS differentiation is effective at the
-    ///   cooperative pool scheduler layer only, not at TCP/TLS or server-side ordering.
-    /// - Cancellation: `await task.value` on `Task<DecodeResult, Never>` does not throw on
-    ///   cancellation; `prefetch()` awaits the inner Task regardless. The inner Task is
-    ///   unstructured — cancelling the calling Task of `prefetch()` does NOT cancel the
-    ///   inner Task or any concurrent `image()` awaiting the same inFlight entry.
+    /// The inner Task runs at `.utility` so the cooperative scheduler deprioritises prefetch waits
+    /// relative to `.userInitiated` `image()` callers — QoS differentiation only bites at the
+    /// cooperative scheduler layer, not TCP/TLS or server-side ordering. It's unstructured:
+    /// cancelling `prefetch()`'s caller does NOT cancel it or any concurrent `image()` awaiting
+    /// the same `inFlight` entry.
     ///
     /// - Parameters:
-    ///   - url:          Source URL.
-    ///   - targetSize:   Desired render size in points — must match the size passed to the
-    ///                   paired `image(for:…)` call so the cache key aligns.
-    ///   - cornerRadius: Rounding radius in points. Pass 0 for no rounding.
-    ///   - scale:        Screen scale captured at a @MainActor call site.
-    ///   - priority:     Decode-gate admission tier (see `DecodePriority`). Caller-supplied —
-    ///                   no default, so every call site states its intent explicitly. Only
-    ///                   affects the order slots are handed out among contended waiters;
-    ///                   never cancels or preempts a decode that already holds a slot.
-    ///   - isCurrent:    Optional generation-guard closure. Called immediately before the
-    ///                   inner decode Task is spawned — no await between the check and the
-    ///                   spawn. Returns `false` when the originating prefetch batch has been
-    ///                   superseded by a newer `onIndexBoundary` call; the fetch is abandoned
-    ///                   without starting any network work. Pass `nil` to skip the guard
-    ///                   (backwards-compatible default).
+    ///   - targetSize/cornerRadius/scale: must match the paired `image(for:…)` call so the cache
+    ///     key aligns.
+    ///   - priority: decode-gate admission tier (`DecodePriority`) — no default, every call site
+    ///     states intent. Only affects slot hand-out order among waiters, never preempts a
+    ///     decode that already holds a slot.
+    ///   - isCurrent: optional generation guard, checked with no await before spawning the inner
+    ///     decode Task. `false` means a newer `onIndexBoundary` superseded this batch — the fetch
+    ///     is abandoned before any network work starts. `nil` skips the guard.
     public func prefetch(
         for url: URL,
         targetSize: CGSize,
@@ -533,30 +483,21 @@ public actor ImageActor {
 
     /// Cancel the in-flight decode Task for each URL+dimensions combination, if any.
     ///
-    /// Called by `RenderPipeline` when a new `onIndexBoundary` supersedes the previous
-    /// batch — stops network fetches for abandoned URLs that are already past the
-    /// generation-guard check and have a running inner decode Task. No-op for specs with
-    /// no active `inFlight` entry. Cancellation is cooperative: the inner Task's
-    /// `session.data(from:)` respects task cancellation; any acquired decode semaphore
-    /// slot is released by the `guard !Task.isCancelled` path in `_decode()`.
+    /// Called by `RenderPipeline` when a new `onIndexBoundary` supersedes the previous batch —
+    /// stops network fetches for abandoned URLs past the generation-guard check with a running
+    /// inner decode Task. No-op if no active `inFlight` entry. Cancellation is cooperative:
+    /// `session.data(from:)` respects task cancellation, and a held decode-semaphore slot is
+    /// released by `_decode()`'s `guard !Task.isCancelled` path.
     ///
-    /// Caution: the `inFlight` map is shared by `image()`, `preload()`, and `prefetch()`.
-    /// A concurrent `image()` caller joined to the same key will receive `nil` when the
-    /// Task is cancelled. This is safe in the typical discrete-jump scenario — cells for
-    /// the abandoned range are recycled before the cancel fires — but two edge windows exist:
-    ///
-    /// (a) Jump-then-jump-back: `boundary(500)` cancels prefetches for [0, 10); the user
-    ///     immediately scrolls back, and `image()` for cells 0–9 may join the
-    ///     still-cancelling Task before its creator clears `inFlight[key]`, receiving
-    ///     `nil` → potential gray flash on remount.
-    ///
-    /// (b) `visibleCount > prefetchAhead`: a visible cell at index
-    ///     `leadingIndex + prefetchAhead + k` falls outside the stale filter's range and
-    ///     can have its prefetch cancelled while a concurrent `image()` call is in-flight
-    ///     for the same key, also receiving `nil`.
-    ///
-    /// Assumption: the cell mount path retries on `nil` — a `nil` return does not
-    /// permanently gray the cell. Verify before widening deep-cancel to larger windows.
+    /// Caution: `inFlight` is shared with `image()`/`preload()` — a concurrent `image()` joined
+    /// to the same key gets `nil` when the Task is cancelled. Safe in the typical discrete-jump
+    /// case (abandoned cells recycle before the cancel fires), but two edge windows exist: (a)
+    /// jump-then-jump-back — `boundary(500)` cancels prefetch for [0,10), user scrolls straight
+    /// back, `image()` for cells 0-9 may join the still-cancelling Task before `inFlight[key]`
+    /// clears, getting `nil` (possible gray flash on remount); (b) `visibleCount > prefetchAhead`
+    /// — a visible cell outside the stale filter's range can have its prefetch cancelled while a
+    /// concurrent `image()` is in-flight for the same key, also getting `nil`. Assumes the cell
+    /// mount path retries on `nil`; verify before widening deep-cancel to larger windows.
     func cancelInFlightPrefetches(_ specs: [PrefetchSpec]) {
         for spec in specs {
             let key = ImageCacheKey(
@@ -571,30 +512,26 @@ public actor ImageActor {
 
     // MARK: - Private helpers
 
-    /// Elevates the semaphore waiter for `key`'s in-flight decode to `newPriority`, if that
-    /// decode is currently recorded at a strictly lower priority. No-op otherwise (already
-    /// at/above `newPriority`, or no in-flight record for `key`).
-    ///
-    /// Used by `image()` step 2 when a `.visible` caller joins a decode that a lower-priority
-    /// caller (prefetch) already started — "prefetch started it, now it's on screen"
-    /// (VelocityUI-8nz). `preload()`/`prefetch()` joiners do not call this — only a `.visible`
-    /// `image()` join elevates.
+    /// Elevates the semaphore waiter for `key`'s in-flight decode to `newPriority` if currently
+    /// recorded strictly lower; no-op if already at/above it or no in-flight record exists.
+    /// Used by `image()` when a `.visible` caller joins a decode a lower-priority prefetch
+    /// already started — "prefetch started it, now it's on screen" (VelocityUI-8nz).
+    /// `preload()`/`prefetch()` joiners never call this — only a `.visible` `image()` join does.
     private func elevateInFlightDecode(key: ImageCacheKey, to newPriority: DecodePriority) async {
         guard let admission = inFlightDecodes[key], admission.priority > newPriority else { return }
         inFlightDecodes[key]?.priority = newPriority
         await decodeSemaphore.elevate(id: admission.id, to: newPriority)
     }
 
-    /// Acquire a decode slot, run CGImageSource decode on `decodeQueue`, release the slot,
-    /// and return the result. Semaphore acquire/release and continuation are owned here so
-    /// callers share one implementation.
+    /// Acquires a decode slot, runs `CGImageSource` decode on `decodeQueue`, releases the slot,
+    /// and returns the result. Owns semaphore acquire/release + continuation so callers share one
+    /// implementation. Never throws — cancellation and decode failure both fold into a
+    /// `nil`-fielded `DecodeResult`.
     ///
-    /// - Parameter key: The in-flight cache key this decode is running for — used solely to
-    ///   read `inFlightDecodes[key]` immediately before `decodeSemaphore.wait()`, so a priority
-    ///   elevation that happened during the (potentially long) network-fetch phase — before
-    ///   this decode ever reached the semaphore — still takes effect on first admission.
-    /// - Returns: `DecodeResult(image: nil, rawSourceSize: nil)` on cancellation or decode
-    ///   failure. Never throws — all error paths are folded into the nil result.
+    /// - Parameter key: read from `inFlightDecodes[key]` immediately before
+    ///   `decodeSemaphore.wait()`, so a priority elevation applied during the (potentially long)
+    ///   network-fetch phase — before this decode reached the semaphore — still takes effect on
+    ///   first admission.
     private func _decode(
         key: ImageCacheKey,
         data: Data,
@@ -603,24 +540,17 @@ public actor ImageActor {
         scale: CGFloat,
         priority: DecodePriority
     ) async -> DecodeResult {
-        // Cancellation paths below (`catch` + post-acquire guard) are exercised by
-        // `cancelInFlightPrefetches`, which cancels the inner Task<DecodeResult, Never>
-        // handle via `inFlight[key]?.cancel()`. The catch path fires if cancellation
-        // arrives while blocked on `decodeSemaphore.wait()`; the post-acquire guard
-        // fires if cancellation arrives after the slot is consumed. Both release the slot.
+        // Cancellation exercised by `cancelInFlightPrefetches` via `inFlight[key]?.cancel()`:
+        // the `catch` below fires if cancelled while blocked on `wait()`; the post-acquire guard
+        // fires if cancelled after the slot is consumed. Both release the slot.
         //
-        // Read the current admission record immediately before `wait()` — no `await` between
-        // this read and the call below — so the id/priority passed in reflect any elevation
-        // applied since the decode Task was created (e.g. while still in the network-fetch
-        // phase in `_networkFetchAndDecode`, before this function was even called). Falls back
-        // to a fresh id and the call's own `priority` when there is no record (preload()'s
-        // direct-to-_decode path always has one; this guards a future caller that doesn't).
+        // Read the admission record with no `await` before `wait()` so it reflects any elevation
+        // applied since the decode Task was created (e.g. during network-fetch, before this
+        // function ran). Falls back to a fresh id/the call's own `priority` when there's no record.
         //
-        // Residual micro-race (documented, not closed — benign, outside this bead's scope):
-        // if a `.visible` join lands in the tiny window after this read and before `wait()`
-        // enqueues the waiter below, `elevate` will have already no-op'd (nothing was queued
-        // yet to find) and this decode admits one cycle later, at its original tier. That is a
-        // momentary priority inversion, never a correctness bug — no slot leak, no crash.
+        // Residual micro-race (benign, not closed): a `.visible` join landing in the gap between
+        // this read and `wait()` enqueuing the waiter finds nothing to elevate and admits one
+        // cycle later at its original tier — a momentary priority inversion, never a slot leak.
         let admission = inFlightDecodes[key]
 
         // Acquire a decode slot. Throws CancellationError if cancelled while waiting;
@@ -759,20 +689,13 @@ public actor ImageActor {
         return await _decode(key: key, data: data, targetSize: targetSize, cornerRadius: cornerRadius, scale: scale, priority: priority)
     }
 
-    /// Synchronous cache probe — callable from any isolation context, including `@MainActor`.
+    /// Synchronous cache probe, callable from any isolation context including `@MainActor`.
+    /// Returns `nil` on a cache miss OR an in-flight hit (checking `inFlight` needs actor
+    /// isolation, intentionally omitted here) — callers must fall back to `await image(for:…)`
+    /// on `nil`. `NSCache` guarantees thread-safe concurrent reads; `cache` is `let`, so
+    /// `nonisolated` access on this actor is Sendable-safe.
     ///
-    /// Returns the decoded `CGImage` if the entry is already in the NSCache, or `nil` on:
-    /// - Cache miss (not yet fetched or evicted).
-    /// - In-flight hit (the decode Task exists in `inFlight` but has not stored its result
-    ///   yet). Checking `inFlight` requires actor isolation; this method intentionally omits
-    ///   it. Callers must fall back to `await image(for:…)` on a nil return.
-    ///
-    /// NSCache guarantees thread-safe concurrent reads. The `cache` property is `let`
-    /// (constant reference, no rebinding), satisfying Swift 6's Sendable requirement for
-    /// `nonisolated` access on actor stored properties.
-    ///
-    /// Parameters match `image(for:targetSize:cornerRadius:scale:)` exactly — the key uses
-    /// the same `pixelLength` rounding, so entries written by `image()`, `preload()`, and
+    /// Parameters match `image(for:…)` exactly, so entries from `image()`, `preload()`, and
     /// `prefetch()` are all visible here.
     public nonisolated func cachedImage(
         for url: URL,

@@ -4,17 +4,15 @@
 import CoreGraphics
 import Foundation
 
-/// Normalises a decoded image to BGRA8888 premultiplied (Core Animation's preferred
-/// format) and optionally clips to a rounded rect — all in a single CGContext blit.
+/// Normalises a decoded image to BGRA8888 premultiplied (Core Animation's preferred format)
+/// and optionally clips to a rounded rect — all in a single CGContext blit.
 ///
-/// Called off-main on the decode queue. `scale` must be passed from the @MainActor
-/// call site; UIScreen.main is not safe to access off main. A custom `PlaceholderRenderer`
-/// may also call this synchronously on MainActor (`scale: 1` — placeholders decode at a
-/// fixed small pixel size, not screen scale) to satisfy its BGRA8888/rounding contract
-/// instead of re-implementing the blit.
+/// Called off-main on the decode queue; `scale` must come from the @MainActor call site since
+/// `UIScreen.main` isn't safe off-main. A custom `PlaceholderRenderer` may also call this
+/// synchronously on MainActor (`scale: 1`, since placeholders decode at a fixed small pixel
+/// size) to satisfy its BGRA8888/rounding contract instead of reimplementing the blit.
 ///
-/// - cornerRadius = 0: format normalisation only (no clip path).
-/// - Returns nil only if CGContext allocation fails (OOM).
+/// cornerRadius = 0 → format normalisation only, no clip. Returns nil only on CGContext OOM.
 /// Convert a point dimension to pixels using round-half-away-from-zero.
 /// Use this instead of bare `Int(pts * scale)` (which truncates) everywhere a point
 /// value is converted to pixels — CacheKey, normaliseAndRound, thumbnail MaxPixelSize —

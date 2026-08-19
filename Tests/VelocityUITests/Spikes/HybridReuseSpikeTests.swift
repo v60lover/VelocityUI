@@ -6,23 +6,21 @@ import UIKit
 @testable import VelocityUI
 
 /// Spike: validates the two load-bearing claims behind a HYBRID cell-reuse strategy for a
-/// streaming-chat feed, using the REAL measure+rasterize primitives (TextMeasurementContext,
-/// rasterizeText) — no new production types, matches the Spike4/Spike8 standalone-harness style.
+/// streaming-chat feed, using the real measure+rasterize primitives (`TextMeasurementContext`,
+/// `rasterizeText`) — no new production types, matches the Spike4/Spike8 standalone-harness
+/// style. A chat message is an ordered list of text BLOCKS; while it streams token-by-token,
+/// only the LAST (hot) block changes — earlier blocks are complete and never change again.
 ///
-/// A chat message is modeled as an ordered list of text BLOCKS. While a message streams
-/// token-by-token, only the LAST (hot) block changes; earlier blocks are complete and never
-/// change again. The cost model under test:
-/// - COMPUTE (LB1/LB2/LB3): freezing completed blocks (measure+rasterize ONCE, cache, never
-///   re-touch) makes cumulative streaming work scale ~O(N) in token count; a naive baseline that
-///   re-measures+re-rasterizes the WHOLE message on every token event scales ~O(N^2). For
-///   genuinely-new content (no overlap, e.g. scroll) there is no freeze win — "reconfigure whole"
-///   and "bind whole" do the same work (a tie).
-/// - MEMORY (LB5): freezing is a compute cache, not keep-forever. A simulated working-range
-///   window admits entering blocks (rasterize) and evicts leaving blocks (drop the bitmap, keep
-///   the tiny descriptor) so peak live-bitmap bytes stays O(window), not O(total chat length).
+/// - COMPUTE (LB1/LB2/LB3): freezing completed blocks (measure+rasterize once, cache, never
+///   re-touch) makes cumulative streaming work scale ~O(N) in tokens vs a naive
+///   re-measure+re-rasterize-the-whole-message baseline's ~O(N^2). For genuinely-new content
+///   (no overlap, e.g. scroll) there's no freeze win — "reconfigure whole" and "bind whole" tie.
+/// - MEMORY (LB5): freezing is a compute cache, not keep-forever — a simulated working-range
+///   window rasterizes entering blocks and evicts leaving ones (drops the bitmap, keeps the
+///   tiny descriptor), so peak live-bitmap bytes stays O(window), not O(total chat length).
 ///
-/// @MainActor to match Spike4Tests — rasterizeText/TextMeasurementContext are nonisolated and
-/// thread-safe when used serially, but UIGraphicsImageRenderer is exercised on main here too.
+/// `@MainActor` to match Spike4Tests — `rasterizeText`/`TextMeasurementContext` are nonisolated
+/// and thread-safe used serially, but `UIGraphicsImageRenderer` also runs on main here.
 @MainActor
 final class HybridReuseSpikeTests: XCTestCase {
 

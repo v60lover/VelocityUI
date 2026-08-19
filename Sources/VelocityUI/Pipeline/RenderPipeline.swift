@@ -106,22 +106,17 @@ public actor RenderPipeline {
         self.prefetchBehind = 3
     }
 
-    /// Notify the pipeline that the visible leading index has changed.
-    /// No-op if leadingIndex hasn't changed since last call.
-    /// Cancels and replaces any running prefetch task.
+    /// Notify the pipeline that the visible leading index has changed. No-op if unchanged since
+    /// last call; cancels and replaces any running prefetch task.
     ///
     /// - Parameters:
-    ///   - leadingIndex:   First visible item index at the time of the boundary crossing.
-    ///   - workingRange:   Ring buffer shared with the scroll container (MainActor-isolated).
-    ///   - tables:         NodeTables in display order, parallel to the item array.
-    ///   - availableWidth: Viewport width in points, captured verbatim at the MainActor call site.
-    ///   - scale:          Screen scale captured at the MainActor call site (e.g. `traitCollection.displayScale`).
-    ///                     `UITraitCollection.displayScale` is MainActor-isolated; capturing it at the call site
-    ///                     ensures the `ImageCacheKey` matches the one mount-time `spawnMediaFetches` constructs.
-    ///   - direction:      Real scroll-travel direction (from `FeedScrollView`'s `contentOffset` delta),
-    ///                     not a hardcoded assumption. Determines which side of `leadingIndex` prefetch
-    ///                     items classify `.ahead` vs `.behind`. Defaults to `.down` — VelocityUI-he0's
-    ///                     original assumption — so callers that don't observe direction are unaffected.
+    ///   - tables: NodeTables in display order, parallel to the item array.
+    ///   - scale: Captured at the `@MainActor` call site (e.g. `traitCollection.displayScale`)
+    ///     so the `ImageCacheKey` matches the one mount-time `spawnMediaFetches` constructs.
+    ///   - direction: Real scroll-travel direction from `FeedScrollView`'s `contentOffset` delta
+    ///     — determines which side of `leadingIndex` classifies `.ahead` vs `.behind`. Defaults
+    ///     to `.down` (VelocityUI-he0's original assumption), so non-observing callers are
+    ///     unaffected.
     public func onIndexBoundary(
         _ leadingIndex: Int,
         workingRange: WorkingRange,

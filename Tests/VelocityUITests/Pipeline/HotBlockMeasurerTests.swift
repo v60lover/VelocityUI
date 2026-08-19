@@ -5,22 +5,19 @@ import XCTest
 import UIKit
 @testable import VelocityUI
 
-/// Acceptance tests for VelocityUI-c1uc's `HotBlockMeasurer` — the production
-/// incremental-measure type for a single still-growing hot text block. Exercises the
-/// same shape the VelocityUI-q87l spike (HotBlockRasterizerSpikeTests.swift) validated,
-/// but against the real production type instead of the spike's test-local probe.
+/// Acceptance tests for VelocityUI-c1uc's `HotBlockMeasurer` (production incremental-measure
+/// type for one still-growing hot text block), exercising the same shape the VelocityUI-q87l
+/// spike validated but against the real type. All assertions are count/exact-value based, never
+/// wall-clock (timing assertions flake on shared/loaded hardware).
 ///
-/// Every assertion here is count-based or exact-value based, never wall-clock, matching
-/// the bead's hard requirement (timing assertions flake on shared/loaded hardware).
-///
-/// | Invariant (bead acceptance criteria)                                    | Assertion |
-/// |---------------------------------------------------------------------------|-----------|
-/// | Per-token measure of a growing block re-lays-out only the hot paragraph   | `testFlatReLaidOutCount_CodeFenceStream`: self-calibrating equal-to-first-observed reLaidOutCount |
-/// | Incremental height matches a from-scratch full measure within 1pt         | `testHeightParityWithinOnePoint`: `abs(height - TextMeasurementContext().measure(...).height) <= 1.0` (plus a self-consistency check vs `_debugEnumerateSumHeight()`) |
-/// | Incremental path taken (persistent objects, not a fresh-per-call rebuild)  | `testFlatReLaidOutCount_CodeFenceStream`: `XCTAssertTrue(result.appended)` proves the delta branch ran; the flat range-stability count is a supporting smoke check, not proof of geometry reuse |
-/// | Non-append edit falls back to a full measure                              | `testNonAppendEditFallsBackToFullMeasure`: `appended == false`, height matches ground truth |
-/// | Container width change falls back to a full measure                      | `testWidthChangeFallsBackToFullMeasure`: `appended == false`, height matches ground truth |
-/// | Dynamic Type change falls back to a full measure                          | `testDynamicTypeChangeFallsBackToFullMeasure`: `appended == false`, height matches ground truth |
+/// | Acceptance criterion | Assertion |
+/// |---|---|
+/// | Re-lays-out only the hot paragraph per token | `testFlatReLaidOutCount_CodeFenceStream`: reLaidOutCount == first-observed constant |
+/// | Height matches full measure within 1pt | `testHeightParityWithinOnePoint`: vs `TextMeasurementContext` + `_debugEnumerateSumHeight()` |
+/// | Incremental path taken, not rebuilt | `testFlatReLaidOutCount_CodeFenceStream`: `result.appended == true` |
+/// | Non-append edit falls back to full measure | `testNonAppendEditFallsBackToFullMeasure` |
+/// | Width change falls back to full measure | `testWidthChangeFallsBackToFullMeasure` |
+/// | Dynamic Type change falls back to full measure | `testDynamicTypeChangeFallsBackToFullMeasure` |
 @MainActor
 final class HotBlockMeasurerTests: XCTestCase {
 
@@ -49,25 +46,21 @@ final class HotBlockMeasurerTests: XCTestCase {
 
     // MARK: - Acceptance 1 + 3: flat re-laid-out fragment count, persistent-object reuse
 
-    /// Streams 60 "sealed paragraph" tokens (occasionally forcing an internal wrap before
-    /// sealing) into ONE `HotBlockMeasurer`, computing re-laid-out count the same way the
-    /// q87l spike does: full fragment-range snapshot before/after each call, prefix-matched
-    /// by (rangeStart, rangeLength) identity. Flatness is self-calibrating — the first
-    /// wrapping token and the first plain token each establish an observed constant, and
-    /// every LATER token of the same kind must equal it exactly (spike NOTES: a guessed
-    /// ceiling produced a false failure before; equality-to-first-observed only fails on
-    /// real drift).
+    /// Streams 60 "sealed paragraph" tokens (occasionally forcing an internal wrap before sealing)
+    /// into ONE `HotBlockMeasurer`, computing re-laid-out count the same way the q87l spike does:
+    /// fragment-range snapshot before/after each call, prefix-matched by (start, length). Flatness
+    /// is self-calibrating — the first wrapping and first plain token each set an observed
+    /// constant; every later token of the same kind must match it exactly (a guessed ceiling
+    /// produced a false failure before; equality-to-first-observed only fails on real drift).
     ///
-    /// What proves acceptance criterion 3 (incremental path, no fresh-per-call rebuild) is
-    /// the `XCTAssertTrue(result.appended)` below: `appended` is returned only when
-    /// `measure` took the `replaceCharacters` delta branch, never the whole-string fallback.
-    /// The flat reLaidOutCount is a SUPPORTING smoke check, not independent proof of geometry
-    /// reuse — it compares fragment RANGES (start, length), and a from-scratch rebuild of the
-    /// same text would produce identical ranges and the same stable prefix, so a flat count
-    /// alone can't distinguish reuse from rebuild-to-identical-ranges. It still earns its
-    /// place: a genuine per-token cost regression (each append re-wrapping more of the block
-    /// than the tail) would show up as reLaidOutCount drifting off its first-observed
-    /// constant.
+    /// Acceptance criterion 3 (incremental path, no rebuild) is proven by
+    /// `XCTAssertTrue(result.appended)` below — `appended` is true only on the `replaceCharacters`
+    /// delta branch, never the whole-string fallback. The flat reLaidOutCount is a SUPPORTING
+    /// smoke check, not independent proof of reuse: it compares fragment ranges, and a
+    /// from-scratch rebuild of the same text produces identical ranges, so a flat count alone
+    /// can't distinguish reuse from rebuild-to-identical-ranges. It still catches a genuine
+    /// per-token cost regression, which would show up as reLaidOutCount drifting off its
+    /// first-observed constant.
     func testFlatReLaidOutCount_CodeFenceStream() {
         let measurer = HotBlockMeasurer()
         let width: CGFloat = 220
@@ -121,18 +114,16 @@ final class HotBlockMeasurerTests: XCTestCase {
 
     // MARK: - Acceptance 2: usageBounds vs enumerate-from-top height parity
 
-    /// Confirms `usageBoundsForTextContainer` (what `measure(_:width:)` returns) matches
-    /// the brute enumerate-from-top height within the Spike 4 measure==render parity
-    /// bound (1pt), across 40 appends of a growing block.
+    /// Confirms `usageBoundsForTextContainer` (`measure(_:width:)`'s return) matches the brute
+    /// enumerate-from-top height within the Spike 4 measure==render parity bound (1pt), across
+    /// 40 appends of a growing block.
     ///
-    /// Both `result.height` and `_debugEnumerateSumHeight()` are derived from the SAME
-    /// incremental layout on the SAME measurer, so their agreement only proves internal
-    /// self-consistency — a stale-fragment bug (an append that fails to re-flow a paragraph
-    /// that should have re-wrapped) would corrupt both identically and still pass. So each
-    /// token ALSO checks the incremental height against an independent from-scratch
-    /// `TextMeasurementContext` measure of the same final content — the unchanged pure path
-    /// that lays every fragment out fresh. That is the assertion that actually pins the core
-    /// bead guarantee: the O(appended) path yields the same height a full measure would.
+    /// `result.height` and `_debugEnumerateSumHeight()` come from the SAME incremental layout on
+    /// the SAME measurer, so agreement only proves internal self-consistency — a stale-fragment
+    /// bug would corrupt both identically and still pass. Each token ALSO checks the incremental
+    /// height against an independent from-scratch `TextMeasurementContext` measure of the same
+    /// final content — that's the assertion pinning the real guarantee: the O(appended) path
+    /// yields the same height a full measure would.
     func testHeightParityWithinOnePoint() {
         let measurer = HotBlockMeasurer()
         let width: CGFloat = 220

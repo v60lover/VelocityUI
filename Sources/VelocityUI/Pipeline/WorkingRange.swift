@@ -10,16 +10,12 @@ public struct CellEntry: Sendable {
     public let fragments: [Fragment]
 }
 
-/// O(1) ring-buffer cache of CellEntry for items near the visible range.
+/// O(1) ring-buffer cache of CellEntry for items near the visible range. Replaces the v4
+/// `[Int: ResolvedLayout]` dictionary, which hashed on every lookup and rebuilt entirely on
+/// eviction — both unacceptable on the synchronous 120Hz scroll path.
 ///
-/// Replaces the v4 [Int: ResolvedLayout] dictionary which hashed on every
-/// lookup and rebuilt the entire dictionary on every eviction — both
-/// unacceptable on the synchronous 120Hz scroll path.
-///
-/// Invariants:
-/// - entry(at:) is O(1): one subtraction and one array index, no hashing.
-/// - advance(to:) is O(shift): runs only in the pipeline, never during scroll.
-/// - The read path (entry(at:)) never allocates.
+/// - `entry(at:)` is O(1): one subtraction, one array index, no hashing, no allocation.
+/// - `advance(to:)` is O(shift): runs only in the pipeline, never during scroll.
 @MainActor
 public final class WorkingRange {
     private var buffer: [CellEntry?]
@@ -45,13 +41,10 @@ public final class WorkingRange {
 
     /// Primary commit — called by RenderPipeline after measure + extractFragments.
     ///
-    /// Idempotent under identical inputs: this is a pure array-index write
-    /// (`buffer[offset] = CellEntry(...)`) with no accumulation or counter, so
-    /// two callers committing the same `(layout, fragments, index)` — e.g. the
-    /// scroll path's LayoutCache-hit inline materialization racing the
-    /// pipeline's `notifyPipelineIfNeeded` Task, both sourced from the same
-    /// LayoutCache entry — simply overwrite the same slot with byte-identical
-    /// data. Safe to call more than once for the same index.
+    /// Idempotent under identical inputs: a pure array-index write with no accumulation, so
+    /// two callers committing the same `(layout, fragments, index)` — e.g. the scroll path's
+    /// LayoutCache-hit inline write racing the pipeline's `notifyPipelineIfNeeded` Task —
+    /// just overwrite the same slot with identical data. Safe to call more than once.
     public func commit(_ layout: ResolvedLayout, _ fragments: [Fragment], at index: Int) {
         let offset = index - rangeStart
         guard offset >= 0, offset < capacity else { return }

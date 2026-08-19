@@ -58,14 +58,12 @@ extension TextDescriptor {
         return UIFont.Weight(rawValue: raw)
     }
 
-    /// Resolves `font` to a concrete UIFont: the named family if it loads, else the system
-    /// font at the same size/weight — deterministic fallback, never crashes on a missing or
-    /// misspelled family. Symbolic traits (e.g. italic) are then layered on top of whichever
-    /// font was resolved, so italic composes with a custom family too. Finally scaled for
-    /// Dynamic Type via `UIFontMetrics` when `contentSizeCategory` isn't `.unspecified`
-    /// (VelocityUI-ezo.2.5) — the `UITraitCollection` fed to `scaledFont` is built entirely
-    /// from `self.contentSizeCategory`, never read from `UIApplication`/`UIScreen`, so this
-    /// stays a pure function of the descriptor (CLAUDE.md §4: no global reads).
+    /// Resolves `font` to a concrete UIFont: named family if it loads, else system font at the
+    /// same size/weight (deterministic fallback, never crashes on a bad family name). Symbolic
+    /// traits (e.g. italic) layer on top afterward, so italic composes with custom families too.
+    /// Scaled for Dynamic Type via `UIFontMetrics` when `contentSizeCategory` isn't
+    /// `.unspecified` (VelocityUI-ezo.2.5) — built entirely from `self.contentSizeCategory`,
+    /// never read from `UIApplication`/`UIScreen` (CLAUDE.md §4: no global reads).
     private var resolvedFont: UIFont {
         var uiFont: UIFont
         if let family = font.family, let named = UIFont(name: family, size: font.size) {

@@ -4,15 +4,14 @@
 import Foundation
 import CoreGraphics
 
-/// nonisolated async — runs on the cooperative pool, never touches @MainActor.
-/// Recursively measures a NodeTable tree, parallelising children via TaskGroup.
+/// nonisolated async — runs on the cooperative pool, never touches @MainActor. Recursively
+/// measures a NodeTable tree, parallelising children via TaskGroup.
 ///
-/// Thin wrapper around `measureContent` (the original unconditional-switch body) that
-/// applies `.frame()` framing (VelocityUI-rsg) after intrinsic measurement. Splitting it
-/// this way keeps the unframed path a single predicted branch: `table.frame(at:)` returns
-/// `.unspecified` in O(1) with no array allocation when `table.frames == nil` (the common
-/// case), `spec.isSpecified` is false, and `measureContent`'s result is returned untouched
-/// — byte-identical to pre-framing `measureNode` output.
+/// Thin wrapper around `measureContent` (the original unconditional-switch body) that applies
+/// `.frame()` framing (VelocityUI-rsg) after intrinsic measurement. Keeps the unframed path a
+/// single predicted branch: `table.frame(at:)` returns `.unspecified` in O(1) with no allocation
+/// when `table.frames == nil` (the common case), so `measureContent`'s result passes through
+/// untouched — byte-identical to pre-framing output.
 public func measureNode(
     _ table: NodeTable,
     nodeIndex: Int,
@@ -102,25 +101,20 @@ private func measureContent(
 /// Resolves a `.frame()` slot around `content`'s intrinsic measurement.
 ///
 /// Frozen semantics (epic VelocityUI-j4z):
-/// - An unspecified dimension keeps the intrinsic size on that axis (`spec.width ?? intrinsic.width`).
+/// - Unspecified dimension keeps the intrinsic size on that axis.
 /// - `alignment` (default `.center`) positions content within the slot only when the slot is
-///   LARGER than the content on that axis — the padding/letterbox case.
-/// - When the slot is SMALLER than content, the slot wins: the content box is clamped down to
-///   the slot via `min(intrinsic, framed)`, so it is never reported larger than the slot
-///   ("clip-to-frame" — no negative-padding shift beyond the slot bounds).
-/// - An image leaf with `contentMode == .fill` fills the framed slot outright (both `cw`/`ch`
-///   equal the slot exactly) instead of being fit/aligned within it — SwiftUI's `.fill`
-///   semantics take precedence over letterboxing.
+///   LARGER than content — the padding/letterbox case.
+/// - When the slot is SMALLER, the slot wins: content is clamped via `min(intrinsic, framed)`,
+///   never reported larger than the slot ("clip-to-frame", no negative-padding overshoot).
+/// - An image leaf with `contentMode == .fill` fills the slot outright (`cw`/`ch` == slot),
+///   not fit/aligned — SwiftUI `.fill` semantics beat letterboxing.
 ///
-/// Containers vs. leaves are handled differently because a container's "content" IS its
-/// children, which already have their own absolute positions relative to this node's local
-/// origin (see `ResolvedLayout.offsetBy`'s doc comment on why `collectFragments` depends on
-/// children never being pre-shifted at the wrong level). So:
-/// - LEAF (`content.children.isEmpty`): report the aligned/clamped box as `contentFrame`,
-///   keep `children` empty. `extractFragments` draws the leaf at `contentFrame`.
-/// - CONTAINER: there is no separate "content box" to report — instead shift every child by
-///   the alignment offset via `offsetBy`, exactly as if the container's children had been
-///   laid out inside a `totalFrame`-sized box to begin with. `contentFrame` stays nil.
+/// Containers vs. leaves differ because a container's "content" IS its children, already
+/// positioned relative to this node's local origin (see `ResolvedLayout.offsetBy` on why
+/// `collectFragments` needs children never pre-shifted at the wrong level):
+/// - LEAF: report the aligned/clamped box as `contentFrame`, `children` stays empty.
+/// - CONTAINER: no separate content box — shift every child by the alignment offset via
+///   `offsetBy` instead, as if laid out inside a `totalFrame`-sized box. `contentFrame` stays nil.
 private func applyFrame(
     _ spec: FrameSpec,
     to content: ResolvedLayout,
@@ -186,28 +180,22 @@ private func alignOffset(slot: CGSize, content: CGSize, alignment: VAlignment) -
 }
 
 /// Synchronous, allocation-free intrinsic height for a NEW/unmeasured row, computed straight
-/// from the NodeTable — no decode, no cache probe, no actor hop. Exists so Layer 3's
-/// `FeedScrollView.rebuildFrames` can seed `resolvedFrames` with the real image height instead
-/// of the flat `estimatedItemHeight` placeholder before the async pipeline (`measureNode`) ever
-/// runs, which otherwise leaves every unmeasured image row wrong until its first WorkingRange
-/// commit — see VelocityUI-ksh.
+/// from the NodeTable — no decode, no cache probe, no actor hop. Lets `FeedScrollView.rebuildFrames`
+/// seed `resolvedFrames` with the real image height instead of the flat `estimatedItemHeight`
+/// placeholder before `measureNode` ever runs (VelocityUI-ksh).
 ///
-/// Mirrors the `.image` case of `measureNode` above EXACTLY (`width / aspectRatio`, falling back
-/// to `width` when `aspectRatio` is nil) so the two never disagree: once the pipeline measures
-/// the same table at the same width, `refineKnownFrames` sees a zero delta for these rows.
+/// Mirrors `measureNode`'s `.image` case EXACTLY (`width / aspectRatio`, falling back to `width`)
+/// so the two never disagree — `refineKnownFrames` sees zero delta once the pipeline measures
+/// the same table at the same width.
 ///
-/// Only handles the single-image row shape Phase 1 image-only feeds produce (`table.nodes` has
-/// exactly one node and it's `.image`). Returns `nil` for text/mixed/container rows — those
-/// still need `measureNode`'s async, TextKit-backed measurement and keep using
-/// `estimatedItemHeight` as their pre-measure placeholder.
+/// Only handles the single-image row shape (`table.nodes` has exactly one `.image` node).
+/// Returns `nil` for text/mixed/container rows, which keep using `estimatedItemHeight` until
+/// `measureNode`'s async TextKit measurement runs.
 ///
-/// `.frame()` update (VelocityUI-rsg): also consults `table.frame(at: 0)`. When the single
-/// image node has a framed height, `measureNode`'s `applyFrame` step makes THAT the row's
-/// `totalFrame.height` regardless of aspect ratio — this mirrors that by returning
-/// `spec.height ?? h` instead of the bare aspect-ratio `h`. A framed WIDTH is folded into
-/// the aspect-ratio computation the same way `measureNode`'s wrapper overrides the width
-/// proposal before intrinsic measurement runs, so the two formulas stay in lockstep for
-/// every combination of framed/unframed width and height (see invariant note above).
+/// `.frame()` (VelocityUI-rsg): also consults `table.frame(at: 0)`. A framed height overrides
+/// the aspect-ratio height (`spec.height ?? h`), matching `applyFrame`'s behavior; a framed
+/// width folds into the aspect-ratio computation the same way `measureNode` overrides the width
+/// proposal before intrinsic measurement — keeps both formulas in lockstep for every combination.
 func intrinsicHeight(for table: NodeTable, width: CGFloat) -> CGFloat? {
     guard table.nodes.count == 1, case .image(let d) = table.nodes[0] else { return nil }
     let spec = table.frame(at: 0)
@@ -258,20 +246,17 @@ private func measureVStack(
     return ResolvedLayout(totalFrame: frame, children: children, nodeIndex: nodeIndex)
 }
 
-/// Two-pass HStack measurement (VelocityUI-g5x): a serial pass measures fixed-size children
-/// in order — each fed the width still remaining after its predecessors' claims — then a
-/// parallel pass distributes whatever width is left evenly across flexible (`.text`) children.
+/// Two-pass HStack measurement (VelocityUI-g5x): a serial pass measures fixed-size children in
+/// order — each fed the width remaining after predecessors' claims — then a parallel pass splits
+/// whatever width is left evenly across flexible (`.text`) children.
 ///
-/// `.text` is the only flexible kind — UNLESS it carries a fixed-width `.frame()` (VelocityUI-rsg):
-/// a width-framed text node has an author-specified size, exactly like `.hosting` or a
-/// framed image, so it must claim serially from the width budget instead of absorbing a
-/// share of whatever's left. Everything else (`.hosting`, `.image`, `.gif`, `.video`,
-/// `.customLayer`, nested stacks, and `.spacer`) is fixed: it claims serially from the running
-/// width budget rather than waiting for the proportional split. `.spacer` is measured inline
-/// here rather than via `measureNode` because the shared `.spacer` case in `measureNode` maps
-/// its CGFloat onto whichever axis `width` represents — correct for VStack (size is the
-/// along-axis height, `width` is the cross length) but wrong for HStack, where size must be the
-/// along-axis *width* claim and the cross length (height) is unknown at this call depth.
+/// `.text` is the only flexible kind — UNLESS it carries a fixed-width `.frame()` (VelocityUI-rsg),
+/// which makes it author-sized like `.hosting`/a framed image, so it claims serially instead.
+/// Everything else (`.hosting`, `.image`, `.gif`, `.video`, `.customLayer`, nested stacks,
+/// `.spacer`) claims serially too. `.spacer` is measured inline here rather than via `measureNode`
+/// because `measureNode`'s shared `.spacer` case maps its CGFloat onto whatever axis `width`
+/// represents — correct for VStack (along-axis height) but wrong for HStack, where the along-axis
+/// claim is width and the cross length (height) is unknown at this depth.
 private func measureHStack(
     table: NodeTable, nodeIndex: Int,
     width: CGFloat, textPool: TextMeasurementPool,

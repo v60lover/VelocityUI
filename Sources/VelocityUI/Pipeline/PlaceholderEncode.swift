@@ -7,24 +7,20 @@ import Foundation
 /// Encodes a decoded image into a BlurHash string — the producer-side inverse of
 /// `decodeBlurHashPlaceholder`.
 ///
-/// Guarded by `canImport(CoreGraphics)` rather than `canImport(UIKit)` (unlike the rest of
-/// this pipeline directory): CGImage/CGContext are CoreGraphics, not UIKit, APIs, so this
-/// function builds equally on-device (iOS) and as plain macOS command-line tooling — the
-/// latter is the point. VelocityUI-1su.3 scoped BlurHash *encoding* out of the package
-/// (data-source responsibility); VelocityUI-9x0 brings it in as public API so any consumer
-/// (BenchmarkHost's offline dataset generator included) can derive a real per-item BlurHash
-/// from its own images instead of hand-picking sample hashes, without VelocityUI itself doing
-/// any I/O or owning a producer pipeline.
+/// Guarded by `canImport(CoreGraphics)`, not `canImport(UIKit)`: CGImage/CGContext are
+/// CoreGraphics APIs, so this builds on-device and as plain macOS CLI tooling — the latter is the
+/// point (BenchmarkHost's offline dataset generator uses it to derive real per-item BlurHashes
+/// instead of hand-picking samples). VelocityUI-1su.3 scoped BlurHash *encoding* out of the
+/// package as a data-source responsibility; VelocityUI-9x0 exposes it as public API.
 ///
-/// Pure, nonisolated, synchronous CPU work — no I/O, no caching, no hidden state. Downsamples
-/// the source to a small internal grid before summing basis functions: a BlurHash only ever
-/// reconstructs `componentsX * componentsY` frequency components, so summing against a
-/// full-resolution source would cost more with no accuracy benefit — mirrors the decode side's
-/// bounded-grid rationale (see `placeholderMaxPixelSize`'s docstring in PlaceholderDecode.swift).
+/// Pure, nonisolated, synchronous CPU work — no I/O, no caching. Downsamples to a small internal
+/// grid before summing basis functions, since a BlurHash only reconstructs `componentsX *
+/// componentsY` components anyway (mirrors `placeholderMaxPixelSize`'s bounded-grid rationale in
+/// PlaceholderDecode.swift).
 ///
 /// - Parameters:
-///   - componentsX: Horizontal frequency component count, clamped to BlurHash's 1...9 range.
-///   - componentsY: Vertical frequency component count, clamped to BlurHash's 1...9 range.
+///   - componentsX: horizontal frequency component count, clamped to BlurHash's 1...9 range.
+///   - componentsY: vertical frequency component count, clamped to BlurHash's 1...9 range.
 /// - Returns: nil only if the source image is zero-sized or CGContext allocation fails (OOM).
 public nonisolated func encodeBlurHash(
     _ image: CGImage,

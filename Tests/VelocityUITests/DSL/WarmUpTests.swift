@@ -109,14 +109,12 @@ final class WarmUpTests: XCTestCase {
             XCTAssertNotNil(entry, "LayoutCache must have a CellEntry for item \(item.id) after warmUp")
         }
 
-        // AC#2: Every image URL is resident in ImageActor's NSCache.
-        // cachedImage() is the authoritative check — it reads the same NSCache that
-        // mount-time buildSyncMap() reads. _testPrefetchedURLs only confirms the cold
-        // path was entered; cachedImage() confirms the image is actually stored.
+        // AC#2: every image URL is resident in ImageActor's NSCache. cachedImage() reads the
+        // same NSCache buildSyncMap() reads at mount time — _testPrefetchedURLs only confirms
+        // the cold path was entered, this confirms the image is actually stored.
         //
-        // targetSize derivation: AsyncImageNode(aspectRatio: 1.5) at width 375 →
-        // measureNode returns totalFrame CGRect(0,0,375,250) → fragment.frame.size = (375,250).
-        // scale is clamped to max(1, scale) = 2 inside warmUp, matching cachedImage's key.
+        // targetSize: AsyncImageNode(aspectRatio: 1.5) at width 375 → totalFrame (375,250).
+        // scale clamped to max(1, scale) = 2 inside warmUp, matching cachedImage's key.
         let expectedTargetSize = CGSize(width: 375, height: 250)
         for (i, url) in imageURLs.enumerated() {
             let img = env.imageActor.cachedImage(

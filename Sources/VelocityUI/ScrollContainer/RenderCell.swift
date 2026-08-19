@@ -63,14 +63,12 @@ public final class RenderCell {
     private var allMediaLoaded = false
     private(set) var currentItemID: AnyHashable?
     /// Set by `prepareForReuse`'s cross-item branch; consumed by the next `applyLayout` call.
-    /// `fragment.id` is positional (== nodeIndex — see Fragment.swift), so a cross-item recycle
-    /// where the new item's fragment id SET differs from the retained one (not just its count)
-    /// cannot be caught by `applyLayout`'s cheap `sublayers.count > fragments.count` fast path —
-    /// e.g. recycling an image-only cell (ids {0}) into a VStack{image,text} cell (ids {1,2}):
-    /// count 1→2 so the fast-path guard is false, but id 0 is never in the incoming set and
-    /// would otherwise orphan its sublayer forever (leak + growing layer tree). When this flag
-    /// is true, `applyLayout` runs the full id-diff prune unconditionally instead of the fast
-    /// path, then clears the flag. See VelocityUI-ksh.
+    /// `fragment.id` is positional (== nodeIndex), so a cross-item recycle where the new item's
+    /// id SET differs from the retained one (not just count) can't be caught by the cheap
+    /// `sublayers.count > fragments.count` check — e.g. an image-only cell (ids {0}) recycled
+    /// into a VStack{image,text} cell (ids {1,2}): count 1→2 passes the guard, but id 0 orphans
+    /// forever. When true, `applyLayout` runs the full id-diff prune unconditionally, then clears
+    /// the flag. See VelocityUI-ksh.
     private var needsSublayerReconcile = false
 
     public init(kind: CellKind = .standard, placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer()) {
@@ -165,16 +163,14 @@ public final class RenderCell {
 
     /// Geometry phase with optional synchronous content paint.
     ///
-    /// For image fragments whose id is present in `synchronousContent`, the decoded CGImage is
-    /// applied inline — no Task spawn, no fade animation, no gray placeholder tint. If the map
-    /// covers every image fragment, `contentLayer` is revealed and `placeholderLayer` hidden in
-    /// the same CATransaction (sync paint = image is part of the first rendered frame).
+    /// For image fragments whose id is in `synchronousContent`, the decoded CGImage is applied
+    /// inline — no Task spawn, no fade, no gray tint. If the map covers every image fragment,
+    /// `contentLayer` is revealed and `placeholderLayer` hidden in the same CATransaction (sync
+    /// paint = image is part of the first rendered frame).
     ///
-    /// Callers must obtain `synchronousContent` via `ImageActor.cachedImage` (nonisolated).
-    /// On a scale mismatch between warm-up and mount time, `cachedImage` returns nil and the
-    /// corresponding fragment silently falls back to the async path via `spawnMediaFetches`.
-    ///
-    /// Keys in `synchronousContent` not matching any fragment id are silently ignored — the map may contain extras.
+    /// Callers must obtain `synchronousContent` via `ImageActor.cachedImage` (nonisolated) — on a
+    /// scale mismatch it returns nil and the fragment falls back to the async `spawnMediaFetches`
+    /// path. Extra keys not matching any fragment id are silently ignored.
     public func applyLayout(_ fragments: [Fragment], synchronousContent: [Int: CGImage]) {
         let cellBounds = CGRect(origin: .zero, size: layer.bounds.size)
 
@@ -189,17 +185,10 @@ public final class RenderCell {
 
         // Prune sublayers no longer in the fragment set.
         //
-        // `needsSublayerReconcile` (set by prepareForReuse's cross-item branch): the retained
-        // sublayers came from a DIFFERENT item's fragment set, which `fragment.id` (positional —
-        // == nodeIndex, see Fragment.swift) may not overlap with at all, even when the count is
-        // equal or larger — e.g. an image-only cell (ids {0}) recycled into a
-        // VStack{image,text} cell (ids {1,2}): count 1→2, so the cheap count-based check below
-        // would never fire, orphaning id 0's sublayer (leak + growing layer tree) forever. Force
-        // the id-diff to run UNCONDITIONALLY in that case, then clear the flag — the one `Set`
-        // allocation lands only on cross-item mounts, which already allocate elsewhere.
-        //
-        // Same-item relayout (flag false): fast path, skip the id-diff entirely unless the
-        // count strictly shrinks (stable Phase-1 layouts never shrink per item otherwise).
+        // `needsSublayerReconcile` forces the id-diff unconditionally on a cross-item recycle
+        // whose fragment id SET differs from the retained one (see the property's doc for why
+        // count alone can't catch this) — the one `Set` alloc lands only on cross-item mounts.
+        // Same-item relayout (flag false): skip the id-diff unless count strictly shrinks.
         if needsSublayerReconcile || sublayers.count > fragments.count {
             let incomingIDs = Set(fragments.map { $0.id })
             for id in sublayers.keys.filter({ !incomingIDs.contains($0) }) {
@@ -350,17 +339,17 @@ public final class RenderCell {
     nonisolated static func _debugResetApplyContentCount() { _debugApplyContentCount = 0 }
     #endif
 
-    /// Apply a pre-decoded BGRA8888-normalised image. Crossfades contents over 0.2 s via
-    /// CATransition (CALayer.contents has no default CA action; setAnimationDuration alone
-    /// would produce an instant swap). Fades out the placeholder once ALL image fragments arrive.
+    /// Apply a pre-decoded BGRA8888-normalised image. Crossfades over 0.2s via CATransition
+    /// (`CALayer.contents` has no default CA action, so `setAnimationDuration` alone would be
+    /// an instant swap). Fades out the placeholder once ALL image fragments arrive.
     ///
-    /// `itemID` must match `currentItemID`. Passing the ID captured at fetch-start lets
-    /// RenderCell self-defend against stale callbacks that race a cross-item recycle — a
-    /// privacy guarantee: another item's image must never paint on this cell's sublayers.
+    /// `itemID` must match `currentItemID` — passing the ID captured at fetch-start lets the
+    /// cell self-defend against stale callbacks racing a cross-item recycle (privacy guarantee:
+    /// another item's image must never paint on this cell's sublayers).
     ///
-    /// Returns the `ContentTransitionKind` this delivery replaced, or nil if the delivery
-    /// was rejected (privacy guard) or the fragment id has no sublayer. Callers that don't
-    /// need to distinguish gray-tint from thumbnail-placeholder deliveries may ignore it.
+    /// Returns the `ContentTransitionKind` replaced, or nil if rejected (privacy guard) or the
+    /// fragment id has no sublayer. Callers that don't need gray-vs-thumbnail distinction may
+    /// ignore it.
     @discardableResult
     public func applyContent(id: Int, image: CGImage, for itemID: AnyHashable) -> ContentTransitionKind? {
         // Privacy guard: reject stale callbacks from a previous item's fetch.

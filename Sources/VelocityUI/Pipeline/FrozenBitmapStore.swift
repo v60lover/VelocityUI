@@ -4,45 +4,30 @@ import Foundation
 import CoreGraphics
 import os
 
-/// The working-range / LRU-bounded cache for frozen block bitmaps (VelocityUI-qc7 phase B,
-/// spike VelocityUI-6qd LB5). `freeze(_:)` (FreezeState.swift) measures + rasterizes a text
-/// block exactly once; this store is where the resulting `CGImage` LIVES afterward, bounded so
-/// peak memory stays O(window) as a chat grows, not O(chat length).
+/// Working-range / LRU-bounded cache for frozen block bitmaps (VelocityUI-qc7 phase B, spike
+/// VelocityUI-6qd LB5). `freeze(_:)` (FreezeState.swift) rasterizes a text block once; this
+/// store holds the resulting `CGImage` afterward, bounded so peak memory stays O(window) as a
+/// chat grows, not O(chat length).
 ///
-/// This is a CACHE, not a keep-forever store: eviction (byte-budget LRU, working-range sweep,
-/// or memory pressure) drops only the bitmap. The caller's `Block`/`BlockKey` descriptor lives
-/// entirely outside this type — the store never held it — so a re-entry just calls `freeze(_:)`
-/// again cheaply (a fresh measure/rasterize) and re-`store`s the result.
-///
-/// `final class ... : Sendable`, NOT an actor: the MainActor bind/scroll path is synchronous
-/// (CLAUDE.md invariant — scroll path never awaits), so `bitmap(for:)` must be callable and
-/// return `CGImage?` without any `await`. Mutable state (the entry map, LRU intrusive list, the
-/// running byte total, and the last-declared working-range window) is guarded by an
-/// `OSAllocatedUnfairLock`, mirroring `DimensionCache`'s lock-based pattern (DimensionCache.swift)
-/// rather than `LayoutCache`'s actor isolation — actor isolation would force every read through
-/// an `await`, which the scroll path cannot afford.
-///
-/// Owned by `RenderEnvironment`, one instance per `AsyncFeed`. On env deinit, ARC releases this
-/// store, which releases every retained `CGImage` — no separate teardown call is required.
+/// - CACHE, not keep-forever: eviction drops only the bitmap. The caller's `Block`/`BlockKey`
+///   lives outside this type, so a re-entry just re-`freeze`s and re-`store`s cheaply.
+/// - `final class ... : Sendable`, not an actor: `bitmap(for:)` must be synchronous (no
+///   `await`) for the MainActor scroll path — state is guarded by `OSAllocatedUnfairLock`
+///   (like `DimensionCache`) instead of actor isolation.
+/// - Owned by `RenderEnvironment`, one per `AsyncFeed`. ARC releases every retained `CGImage`
+///   on env deinit — no separate teardown.
 public final class FrozenBitmapStore: Sendable {
 
-    /// Intrusive doubly-linked-list node: both the cached entry AND a link in the LRU order,
-    /// so a `bitmap(for:)` hit or a `store(...)` can relink in O(1) instead of scanning an array.
+    /// Intrusive doubly-linked-list node — both the cache entry and an LRU-order link, so a hit
+    /// or store relinks in O(1) instead of scanning an array.
     ///
-    /// `entries` (below) is the SOLE strong owner of every live node — `prev`/`next` (and
-    /// `State.head`/`State.tail`) are `weak`. Two strong link directions would form a retain
-    /// cycle between adjacent nodes (A.next retains B, B.prev retains A) that ARC cannot break
-    /// on its own, silently violating this file's own promise that "ARC releases this store...
-    /// releases every retained CGImage, no separate teardown call required." Weak links avoid
-    /// that: once `entries` releases a node, it deallocates immediately regardless of who else
-    /// was pointing at it.
-    ///
-    /// `@unchecked Sendable`: carries a `CGImage`, which CoreGraphics does not mark `Sendable`
-    /// in this SDK — same pattern as `FreezeState.frozen` and `ImageActor.DecodeResult`. Safety
-    /// holds because every `Node` is only ever created, read, or mutated while holding `state`'s
-    /// lock (`state.withLock`); it never escapes that protected section — `bitmap(for:)` copies
-    /// the `CGImage` reference OUT while locked and returns it, but the `Node` itself is never
-    /// handed to a caller or shared across isolation domains.
+    /// - `entries` is the sole strong owner of every node; `prev`/`next`/`State.head`/`.tail` are
+    ///   `weak` — two strong directions would form an A<->B retain cycle ARC can't break, which
+    ///   would break this store's "deinit releases every CGImage" guarantee.
+    /// - `@unchecked Sendable`: carries a `CGImage` (not `Sendable` in this SDK), same pattern as
+    ///   `FreezeState.frozen`/`ImageActor.DecodeResult`. Safe because every `Node` is only touched
+    ///   under `state.withLock` and never escapes that section — `bitmap(for:)` copies the `CGImage`
+    ///   reference out while locked, the `Node` itself is never exposed.
     private final class Node: @unchecked Sendable {
         let key: BlockKey
         var bitmap: CGImage
@@ -85,12 +70,10 @@ public final class FrozenBitmapStore: Sendable {
 
     /// Current byte budget for the LRU eviction triggered by every `store(...)` call.
     ///
-    /// Default sized from VelocityUI-6qd LB3 (measured on device): a text-block bitmap at 2x
-    /// scale costs ~0.5 MB, and LB5's working-range simulation observed a flat ~6 MB live-bitmap
-    /// footprint across a 50->500 message chat. 16 MB (~32 text blocks worth) gives ~2.5x
-    /// headroom above that observed footprint while still being a bounded, multi-MB default —
-    /// callers with a tighter or looser memory budget should pass their own, or let the driver
-    /// resize it via `sizeBudget(forWindowCount:)` once the real working range is known.
+    /// Default 16 MB from VelocityUI-6qd LB3: ~0.5 MB per text-block bitmap at 2x scale, LB5
+    /// observed a flat ~6 MB live footprint across a 50->500 message chat, so 16 MB gives ~2.5x
+    /// headroom. Pass a tighter/looser budget explicitly, or let the driver call
+    /// `sizeBudget(forWindowCount:)` once the real working range is known.
     public var byteBudget: Int {
         state.withLock { $0.byteBudget }
     }
@@ -114,40 +97,29 @@ public final class FrozenBitmapStore: Sendable {
     /// ~0.5 MB per text-block bitmap at 2x scale on device.
     public static let defaultPerBitmapCost: Int = 512 * 1024
 
-    /// Computes a byte budget sized from the real working-range footprint: `windowCount`
-    /// bitmaps at `perBitmapCost` bytes each, times `headroom` for slack.
+    /// Computes a byte budget from the real working-range footprint: `windowCount` bitmaps at
+    /// `perBitmapCost` bytes each, times `headroom` for slack.
     ///
-    /// `headroom` exists because the window's OWN footprint is not a safe budget by itself: a
-    /// hot-tail re-freeze briefly holds both the old and new bitmap for the same key before the
-    /// old one is evicted (`store(...)`'s re-store path subtracts the old cost first, but the
-    /// caller's `freeze(_:)` call that PRODUCES the new bitmap happens before `store` sees it),
-    /// and LRU churn at the window boundary (a key admitted just before another is evicted) can
-    /// transiently exceed the raw window total. A budget with `headroom <= 1.0` can evict an
-    /// in-window block the instant that happens — this bead's design section calls that out as
-    /// the re-freeze/jank failure mode to avoid. Default `1.5` gives 50% slack above the raw
-    /// window footprint.
-    ///
-    /// Returns `0` for a non-positive `windowCount` or `perBitmapCost` (nothing to size a
-    /// working-range budget from) — callers passing `0` before the working range is known get a
-    /// budget that evicts everything, never a negative or nonsensical value.
+    /// `headroom` exists because the raw window footprint isn't a safe budget on its own: a
+    /// hot-tail re-freeze briefly holds both old and new bitmaps for the same key, and LRU churn
+    /// at the window boundary can transiently exceed the raw total — `headroom <= 1.0` risks
+    /// evicting an in-window block the instant that happens (the re-freeze/jank failure mode).
+    /// Default `1.5` gives 50% slack. Returns `0` for a non-positive `windowCount`/
+    /// `perBitmapCost` — callers passing `0` before the working range is known get an
+    /// evict-everything budget, never a negative one.
     public static func budget(forWindowCount windowCount: Int, perBitmapCost: Int = defaultPerBitmapCost, headroom: Double = 1.5) -> Int {
         guard windowCount > 0, perBitmapCost > 0, headroom > 0 else { return 0 }
         return Int((Double(windowCount) * Double(perBitmapCost) * headroom).rounded(.up))
     }
 
-    /// Re-sizes the byte budget from the real working-range footprint the DRIVER discovers at
-    /// runtime (this store cannot know the window shape at construction — the env is built before
-    /// the feed). GROW-ONLY: the constructed budget (the `init(byteBudget:)` value, 16 MB by
-    /// default) is a FLOOR this method may only raise above, never lower below —
-    /// `budget(forWindowCount:perBitmapCost:headroom:)` sizes from `windowCount` ITEMS, but the
-    /// flagship scenario (one long streaming chat message) is a single item holding MANY frozen
-    /// text BLOCKS, so item count systematically underestimates the real block-count footprint.
-    /// A budget sized straight from a small item count (e.g. `windowCount: 1`) would fall well
-    /// below what one tall message actually needs, evicting still-live blocks mid-stream and
-    /// destroying the flat-per-update-cost invariant this store exists for. Since the budget
-    /// never decreases, `currentByteTotal` is always already within it — no eviction pass is
-    /// needed here. A caller passing a `windowCount` whose computed budget is below the current
-    /// floor is a safe no-op; the floor holds.
+    /// Re-sizes the byte budget from the real working-range footprint, discovered by the DRIVER
+    /// at runtime (this store can't know the window shape at construction — env is built before
+    /// the feed). GROW-ONLY: the constructed budget is a FLOOR this may only raise, never lower —
+    /// `windowCount` counts ITEMS, but one long streaming message holds MANY frozen BLOCKS, so
+    /// item count systematically underestimates the real footprint; sizing from a small
+    /// `windowCount` would evict still-live blocks mid-stream. Since the budget never decreases,
+    /// `currentByteTotal` stays within it automatically — a call whose computed budget is below
+    /// the current floor is a safe no-op.
     public func sizeBudget(forWindowCount windowCount: Int, perBitmapCost: Int = defaultPerBitmapCost, headroom: Double = 1.5) {
         let newBudget = Self.budget(forWindowCount: windowCount, perBitmapCost: perBitmapCost, headroom: headroom)
         state.withLock { st in
@@ -187,15 +159,12 @@ public final class FrozenBitmapStore: Sendable {
     // MARK: - Insert
 
     /// Caches `bitmap` under `key`. `cost` is the caller-computed byte cost — BGRA8888 at
-    /// `pixelWidth * pixelHeight * 4`, matching VelocityUI-6qd LB5's live-bitmap accounting
-    /// (the caller derives `pixelWidth`/`pixelHeight` as `width * scale`, `height * scale`).
+    /// `pixelWidth * pixelHeight * 4` (caller derives those as `width/height * scale`).
     ///
-    /// Re-storing an existing key updates its entry in place (old cost is first subtracted) and
-    /// refreshes its recency. If the resulting total exceeds `byteBudget`, evicts least-recently
-    /// -used entries — oldest first — until back within budget. `currentByteTotal` never exceeds
-    /// `byteBudget` immediately after this call returns (a single entry costing more than the
-    /// whole budget is still stored — this store never rejects a caller's insert, it only evicts
-    /// everything ELSE to make room).
+    /// Re-storing an existing key updates in place (old cost subtracted first) and refreshes
+    /// recency. Evicts least-recently-used entries, oldest first, until back within
+    /// `byteBudget` — never rejects the insert itself, even one entry costing more than the
+    /// whole budget; it only evicts everything else to make room.
     public func store(_ bitmap: CGImage, size: CGSize, cost: Int, for key: BlockKey) {
         state.withLock { st in
             if let existing = st.entries[key] {
@@ -236,14 +205,11 @@ public final class FrozenBitmapStore: Sendable {
         }
     }
 
-    /// Drops the bitmap for every currently cached key NOT in `keys`, and declares `keys` as the
-    /// new authoritative working-range window (replaces, not unions — `keys` is the caller's
-    /// full current window, not an incremental addition; use `admit(_:)` for incremental entries).
+    /// Drops the bitmap for every cached key NOT in `keys`, and REPLACES the tracked window with
+    /// `keys` (the caller's full current window — use `admit(_:)` for incremental entries).
     ///
-    /// Dropping an entry removes only its bitmap; the caller's `Block`/`BlockKey` descriptor is
-    /// untouched (this store never held it), so the entry can be cheaply re-`freeze`d and
-    /// re-`store`d if the key scrolls back into range. `currentByteTotal` drops by exactly the
-    /// evicted entries' summed cost.
+    /// Dropping only removes the bitmap; the caller's `Block`/`BlockKey` is untouched, so a
+    /// dropped key can be cheaply re-`freeze`d if it scrolls back into range.
     public func evict(outside keys: Set<BlockKey>) {
         state.withLock { st in
             st.window = keys
@@ -254,26 +220,18 @@ public final class FrozenBitmapStore: Sendable {
         }
     }
 
-    /// Removes exactly the entries for `keysThatLeft`, in O(k) via the store's existing O(1)
-    /// intrusive-list `remove` — the per-frame fast path a scroll-driven eviction should use
-    /// instead of `evict(outside:)`'s O(count) full sweep. This is the RecyclerView "you are
-    /// told what left, you don't scan" model: the caller (the scroll/bind driver) already knows
-    /// precisely which keys fell out of the working range this frame — no need to test every
-    /// cached key against a window `Set` to rediscover that.
+    /// Removes exactly the entries for `keysThatLeft`, in O(k) via the intrusive-list `remove` —
+    /// the per-frame fast path a scroll-driven eviction should use instead of `evict(outside:)`'s
+    /// O(count) sweep. RecyclerView model: the driver already knows what left, no need to test
+    /// every cached key against a window `Set`.
     ///
-    /// Also subtracts `keysThatLeft` from the tracked `window` — `admit(_:)` (union, entering)
-    /// and this method (subtract, leaving) are a symmetric incremental pair, unlike
-    /// `evict(outside:)` which replaces `window` wholesale with its argument. Without that
-    /// subtraction, a long-scrolling driver that only ever calls `admit`/`evict(_:)` would leave
-    /// `window` growing forever (every key ever admitted, never removed) — an unbounded leak,
-    /// and it would make `handleMemoryPressure()` a no-op once `window` becomes a superset of
-    /// every currently-cached key. Keeping `window` == the true live working set is what lets
-    /// `handleMemoryPressure()` still drop out-of-window entries after a long scroll.
+    /// Also subtracts `keysThatLeft` from `window` — `admit(_:)` (union, entering) and this
+    /// (subtract, leaving) are a symmetric incremental pair, unlike `evict(outside:)` which
+    /// replaces `window` wholesale. Without the subtraction, `window` would grow forever under
+    /// admit/evict-only usage and `handleMemoryPressure()` would become a no-op once `window`
+    /// supersets every cached key.
     ///
-    /// A key with no cached entry is silently ignored (nothing to remove) but is still
-    /// subtracted from `window` — the driver calls this exactly when a key left the working
-    /// range, whether or not it happened to have a live bitmap. `currentByteTotal` drops by
-    /// exactly the summed cost of the keys that WERE cached among `keysThatLeft`.
+    /// A key with no cached entry is silently ignored but still subtracted from `window`.
     public func evict(_ keysThatLeft: Set<BlockKey>) {
         guard !keysThatLeft.isEmpty else { return }
         state.withLock { st in
@@ -366,16 +324,12 @@ public final class FrozenBitmapStore: Sendable {
 
 #if canImport(XCTest)
 extension FrozenBitmapStore {
-    /// Test-only internal-consistency check for the intrusive linked list. Walks head -> tail
-    /// and verifies every invariant a broken unlink/relink could violate:
-    /// - the walk terminates cleanly at both ends (`head.prev == nil` is implied by starting the
-    ///   walk from `head`; explicitly checks the walk's last node IS `tail`)
-    /// - every `prev` pointer agrees with the node walked immediately before it
-    /// - the walked key set is EXACTLY `entries.keys` (no orphaned nodes, no missing ones)
-    /// - the summed cost of walked nodes equals `currentByteTotal`
+    /// Test-only consistency check for the intrusive linked list. Walks head -> tail and
+    /// verifies: the walk ends exactly at `tail`, every `prev` agrees with its predecessor, the
+    /// walked key set exactly matches `entries.keys`, and summed cost equals `currentByteTotal`.
     ///
-    /// Gated on `canImport(XCTest)`, NOT `#if DEBUG` — a Debug-configuration QA/TestFlight build
-    /// must not ship this. Used by `FrozenBitmapStoreTests` stress coverage.
+    /// Gated on `canImport(XCTest)`, not `#if DEBUG` — must not ship in a Debug QA/TestFlight
+    /// build. Used by `FrozenBitmapStoreTests` stress coverage.
     func debugValidateListInvariants() -> Bool {
         state.withLock { st in
             var walked: Set<BlockKey> = []

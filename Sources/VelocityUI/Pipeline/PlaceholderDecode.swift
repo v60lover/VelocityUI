@@ -5,26 +5,22 @@ import CoreGraphics
 import Foundation
 import ImageIO
 
-/// Shared upper bound (in pixels) for both placeholder decode paths. Placeholders are
-/// intentionally low-fidelity: CALayer's default contentsGravity (`.resize`) stretches any
-/// backing image to fill the fragment's frame via hardware compositing at render time, so
-/// decoding — or upscaling — either placeholder past this bound in software on the
-/// synchronous MainActor layout path would be pure waste. A prior revision of the BlurHash
-/// path normalised at the CALLER's full targetSize (e.g. 900x900px for 300pt@3x), measuring
-/// ~2-6ms on-device via CGContext.draw — the opposite of the sub-millisecond budget this
-/// exists for (VelocityUI-1su.3 AC3). Both decode functions are bounded by this constant so
-/// neither path can regress the same way independently.
+/// Shared upper bound (px) for both placeholder decode paths. Placeholders are intentionally
+/// low-fidelity: `CALayer`'s default `.resize` gravity stretches the backing image to fill the
+/// fragment's frame at render time, so decoding/upscaling past this bound on the synchronous
+/// MainActor layout path is pure waste. A prior BlurHash revision normalised at the caller's
+/// full `targetSize` (e.g. 900x900px for 300pt@3x) and measured ~2-6ms via `CGContext.draw` —
+/// the opposite of the sub-millisecond budget this exists for (VelocityUI-1su.3 AC3).
 private let placeholderMaxPixelSize = 32
 
 /// Decodes small (~4KB) JPEG bytes into a decode-guaranteed first-paint placeholder.
 ///
-/// Pure, nonisolated, synchronous — safe to call on MainActor. Decodes bounded by
-/// `placeholderMaxPixelSize` (aspect-preserving — ImageIO scales the LONGER side down to
-/// this bound, or up to it if the source is smaller, never beyond) regardless of the
-/// fragment's actual on-screen size; the result is normalised/clipped at that decoded size,
-/// not upscaled to `targetSize`. Pipes the decoded thumbnail through `normaliseAndRound` so
-/// the result satisfies the same BGRA8888-premultiplied / decode-time-rounding invariants as
-/// the real image path (ImageActor) — one CGContext-clip implementation, not two.
+/// Pure, nonisolated, synchronous — safe to call on MainActor. Bounded by
+/// `placeholderMaxPixelSize` (aspect-preserving, ImageIO scales the longer side to/toward this
+/// bound) regardless of the fragment's real on-screen size; result is normalised/clipped at
+/// that decoded size, not upscaled to `targetSize`. Piped through `normaliseAndRound` so it
+/// satisfies the same BGRA8888-premultiplied invariants as the real image path (`ImageActor`)
+/// — one CGContext-clip implementation, not two.
 nonisolated func decodeThumbnailPlaceholder(
     _ data: Data,
     targetSize: CGSize,

@@ -159,24 +159,18 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
             await waitForWorkingRangeCommit(feed, index: 0)
         }
 
-        // VelocityUI-x4q0: pure hot-tail growth (rounds 2-4) now routes ENTIRELY through
-        // `HotBlockRasterizerStore.append` — the OLD `_blockDiffMeasureCallCount`/
-        // `_blockDiffRasterizeCallCount` counters are no longer touched by this path at all, so
-        // their deltas must be EXACTLY zero (a strictly stronger assertion than the old `<=3`
-        // bound — it proves the O(block) measure/rasterize path is fully bypassed for pure
-        // hot-tail growth, not merely bounded, which is the actual point of this bead). The new
-        // `_blockDiffHotAppendCallCount` counter is the correct proxy for "C3's hot-tail path
-        // engaged" that the old counters used to (indirectly, and now incorrectly) serve as.
+        // VelocityUI-x4q0: pure hot-tail growth (rounds 2-4) routes ENTIRELY through
+        // `HotBlockRasterizerStore.append` — the old measure/rasterize call-count deltas must be
+        // EXACTLY zero (stronger than the old `<=3` bound: proves the O(block) path is fully
+        // bypassed, not merely bounded). `_blockDiffHotAppendCallCount` is the new proxy for
+        // "C3's hot-tail path engaged."
         //
-        // Upper bound, not exact equality, for the NEW counter: under full-suite system load,
-        // `waitForWorkingRangeCommit`'s poll can (rarely) observe a stale WorkingRange commit
-        // from a still-in-flight prior round and return early, causing THAT round's
-        // applyInPlaceBlockDiff to safely bail to the pre-existing fallback rather than engage
-        // the optimized path — a timing artifact, not a correctness regression (mirrors the
-        // documented HybridReuseSpikeTests wall-clock flake). The invariant that actually
-        // matters — "the hot tail engages at least once, no round contributes more than 1 call,
-        // and block0 (unchanged) never adds a call to ANY of these counters" — is what these
-        // assertions verify.
+        // Upper bound, not exact equality, for the new counter: under full-suite load,
+        // `waitForWorkingRangeCommit`'s poll can rarely observe a stale commit and bail that
+        // round to the fallback instead of the optimized path — a timing artifact, not a
+        // regression (mirrors the documented HybridReuseSpikeTests flake). What matters: hot
+        // tail engages at least once, no round contributes >1 call, and block0 (unchanged)
+        // never adds a call to any of these counters.
         let measureDelta = feed._blockDiffMeasureCallCount - measureCountAfterRound1
         let rasterizeDelta = feed._blockDiffRasterizeCallCount - rasterizeCountAfterRound1
         let hotAppendDelta = feed._blockDiffHotAppendCallCount - hotAppendCountAfterRound1
@@ -223,15 +217,12 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
     // MARK: - C4: suppressed redundant background re-measure
 
     /// Before this bead's C4 fix, `itemsDidChange` called `workingRange.invalidateAll()`
-    /// UNCONDITIONALLY whenever any item's layout changed — even when the C3 in-place block-diff
-    /// already resolved that item's new height/fragments synchronously. That wiped the WorkingRange
-    /// entries for EVERY item in the ring buffer (not just the one that changed), forcing
-    /// `RenderPipeline.onIndexBoundary`'s next boundary crossing to re-`measureNode` the entire
-    /// prefetch window on every single streaming token. Asserts the opposite: after a pure
-    /// same-position streaming update with no add/remove, EVERY item's WorkingRange entry
-    /// (including neighbors that never changed, and the streamed item itself) is still present —
-    /// zero misses — checked IMMEDIATELY after the one `layoutSubviews()` call that applied the
-    /// update, with no poll/wait for the async pipeline to refill anything.
+    /// UNCONDITIONALLY on any item layout change — even when C3's in-place block-diff already
+    /// resolved the new height/fragments synchronously — wiping WorkingRange for EVERY item and
+    /// forcing `RenderPipeline.onIndexBoundary`'s next crossing to re-measure the whole prefetch
+    /// window per streaming token. Asserts the opposite: after a pure same-position update with
+    /// no add/remove, every item's WorkingRange entry (neighbors and the streamed item) is still
+    /// present — zero misses — checked immediately after one `layoutSubviews()`, no poll.
     func testStreamingUpdate_PatchesWorkingRangeInPlace_NeighborsNeverInvalidated() async {
         let feed = makeChatFeed()
         let itemCount = 5
@@ -265,16 +256,13 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
         await drainFeedWork(feed)
     }
 
-    /// Companion to `testStreamingUpdate_PatchesWorkingRangeInPlace_NeighborsNeverInvalidated`,
-    /// which proves WorkingRange stays intact on the fast path — this proves the DOWNSTREAM
-    /// effect of that: `itemsDidChange` used to reset `lastNotifiedLeadingIndex = -1`
-    /// UNCONDITIONALLY, which forced `notifyPipelineIfNeeded`'s very next call (in the SAME
-    /// `layoutSubviews()` pass) to spawn a pipeline `Task` even though nothing needed
-    /// re-measuring — the fast path never invalidated anything, so that Task would immediately
-    /// early-return inside `onIndexBoundary`. Streams K same-position tokens into one item and
-    /// asserts `_taskSpawnCount` stays flat (no per-token Task), then confirms the slow path
-    /// (an added item) still spawns exactly as before — the fix must not silently swallow a
-    /// genuine notify.
+    /// Companion to `testStreamingUpdate_PatchesWorkingRangeInPlace_NeighborsNeverInvalidated`
+    /// (proves WorkingRange stays intact) — this proves the downstream effect: `itemsDidChange`
+    /// used to reset `lastNotifiedLeadingIndex = -1` UNCONDITIONALLY, forcing
+    /// `notifyPipelineIfNeeded`'s next call to spawn a pipeline `Task` that would just
+    /// early-return in `onIndexBoundary` since the fast path invalidated nothing. Streams K
+    /// same-position tokens and asserts `_taskSpawnCount` stays flat, then confirms the slow
+    /// path (an added item) still spawns as before — the fix must not swallow a genuine notify.
     func testStreamingFastPath_DoesNotReNotifyPipelinePerToken() async {
         let feed = makeChatFeed()
         let itemCount = 5
@@ -454,11 +442,17 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
     // MARK: - Flat per-update cost (anti-jank invariant)
 
     /// Streams a growing message through the PRODUCTION bind path and asserts the per-round
-    /// measure/rasterize call count (via `_blockDiffMeasureCallCount`/`_blockDiffRasterizeCallCount`)
-    /// stays bounded by a small constant (hot tail + at most one just-finalized block) — it must
-    /// NOT grow as the message accumulates more blocks. Mirrors HybridReuseSpikeTests'/
-    /// BlockReuseTests' trend shape, but through `FeedScrollView.itemsDidChange`'s real `.inPlace`
-    /// branch instead of calling `diff`/`freeze` directly.
+    /// measure/rasterize call count stays bounded by a small constant, NOT growing as the message
+    /// accumulates blocks. Mirrors HybridReuseSpikeTests'/BlockReuseTests' trend shape, but
+    /// through `FeedScrollView.itemsDidChange`'s real `.inPlace` branch, not `diff`/`freeze`
+    /// directly.
+    ///
+    /// Before `HotBlockRasterizerStore.catchUpAndFinalize` existed, finalizing a block cost "at
+    /// most one just-finalized block" full measure/rasterize call — this test originally asserted
+    /// that cost was bounded, not absent. `catchUpAndFinalize` closes the gap: a block that grew
+    /// within the same round it sealed now gets a cheap incremental hot-append instead of a full
+    /// re-measure, so `measureDeltas` must now be uniformly zero. The C3 path is still proven
+    /// engaged via `_blockDiffHotAppendCallCount`, not the (now silent) measure counter.
     func testFlatPerUpdateCost_StreamingBlocksDoesNotGrowMeasureRasterizeCalls() async {
         let feed = makeChatFeed()
         var blocksWords: [[String]] = [["seed"]]
@@ -474,7 +468,9 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
         await waitForWorkingRangeCommit(feed, index: 0)
 
         var previousMeasure = feed._blockDiffMeasureCallCount
+        var previousHotAppend = feed._blockDiffHotAppendCallCount
         var measureDeltas: [Int] = []
+        var hotAppendDeltas: [Int] = []
 
         for _ in 0..<rounds {
             for _ in 0..<wordsPerRound {
@@ -491,12 +487,22 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
             let now = feed._blockDiffMeasureCallCount
             measureDeltas.append(now - previousMeasure)
             previousMeasure = now
+
+            let nowHotAppend = feed._blockDiffHotAppendCallCount
+            hotAppendDeltas.append(nowHotAppend - previousHotAppend)
+            previousHotAppend = nowHotAppend
         }
 
         XCTAssertGreaterThan(blocksWords.count, 3,
             "Precondition: the message must have grown past a handful of blocks by the end")
-        XCTAssertTrue(measureDeltas.contains { $0 > 0 },
-            "Precondition: the C3 block-diff path must have engaged at least once")
+        XCTAssertTrue(hotAppendDeltas.contains { $0 > 0 },
+            "Precondition: the C3 block-diff path must have engaged at least once (proven via the "
+            + "hot-append counter now — see this test's doc for why the old measure-counter check "
+            + "no longer applies)")
+        XCTAssertTrue(measureDeltas.allSatisfy { $0 == 0 },
+            "catchUpAndFinalize must make sealing a block that was hot a moment ago ZERO-cost on "
+            + "the old full-measure path — any nonzero delta here means a hot block fell through "
+            + "to a full re-measure instead of being caught up incrementally; got \(measureDeltas)")
 
         // FLAT: every round's cost is bounded by a small constant (hot tail, plus at most one
         // just-finalized block) — never growing with the message's current block count.
@@ -677,13 +683,11 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
 
     // MARK: - FrozenBitmapStore budget: driver-sized, GROW-ONLY above the constructed floor
     //
-    // `updateVisibleCells` sizes the budget from `keepRange.count`, which counts ITEMS. The
-    // flagship scenario is one streaming chat message — ONE item holding many frozen text
-    // BLOCKS — so a small item-count window (e.g. a 3-item test feed) computes a budget far
-    // below the 16 MB constructed default. `FrozenBitmapStore.sizeBudget` is grow-only (see its
-    // docstring) specifically so this never starves a real message's live blocks: the wiring
-    // below must leave a small window's budget AT the floor, and only RAISE a floor that a real
-    // window's computed budget genuinely exceeds.
+    // `updateVisibleCells` sizes the budget from `keepRange.count` (ITEMS), but the flagship
+    // scenario is one streaming message — ONE item holding many frozen BLOCKS — so a small
+    // item-count window computes a budget far below the 16 MB default. `sizeBudget` is grow-only
+    // (see its docstring) so this never starves a real message's live blocks: below, a small
+    // window's budget must stay AT the floor, and only RAISE when a real window's budget exceeds it.
 
     /// With the default 16 MB floor, a small (3-item) window's computed budget is far below it —
     /// `updateVisibleCells`' `sizeBudget` call must be a no-op here. Proves the driver wiring

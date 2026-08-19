@@ -5,14 +5,14 @@ import XCTest
 @testable import VelocityUI
 
 /// Spike 8: validates masonry's two load-bearing mechanisms — per-column binary-search
-/// visibility lookup (reusing VerticalLayoutProvider's EXISTING firstIndex(maxYGreaterThan:)/
+/// visibility lookup (reusing VerticalLayoutProvider's existing firstIndex(maxYGreaterThan:)/
 /// firstIndex(minYNotLessThan:) primitives, one column at a time) and column-width text
-/// re-measurement — plus the seam GRID_LAYOUT_DESIGN.md surfaces: the masonry visible set is
-/// NON-CONTIGUOUS in index space, and the spread that non-contiguity produces is what decides
-/// whether WorkingRange needs per-column ring buffers or one widened ring (design §4).
+/// re-measurement. Also surfaces the seam from GRID_LAYOUT_DESIGN.md §4: the masonry visible
+/// set is NON-CONTIGUOUS in index space, and how far that spread goes decides whether
+/// WorkingRange needs per-column ring buffers or one widened ring.
 ///
 /// Standalone spike: the ColumnPartition-style model below is test-local, NOT a production
-/// LayoutProvider. See GRID_LAYOUT_DESIGN.md for the architecture this spike validates.
+/// LayoutProvider — see GRID_LAYOUT_DESIGN.md for the architecture this validates.
 final class Spike8Tests: XCTestCase {
 
     // MARK: - Synthetic masonry dataset

@@ -6,15 +6,10 @@ import UIKit
 
 /// SwiftUI entry point for VelocityUI feeds.
 ///
-/// AsyncFeed deliberately does NOT conform to Equatable.
-///
-/// The .equatable() skip path would mask closure-modifier changes:
-/// .onTap / .onReachEnd capture SwiftUI state but cannot participate in ==
-/// (closures are not Equatable). A skipped updateUIView leaves Coordinator
-/// slots stale, silently dropping the consumer's latest closure for one or
-/// more update cycles. The structural guard inside updateUIView makes the
-/// common "items unchanged" case cheap enough that the skip is not worth
-/// the staleness hazard.
+/// Deliberately not `Equatable`: `.equatable()`'s skip path would leave Coordinator's
+/// `onTap`/`onReachEnd` closures stale (closures aren't Equatable, so a skip can't detect
+/// a modifier-only change). `updateUIView`'s own structural guard already makes the
+/// "items unchanged" case cheap, so the skip isn't worth the staleness risk.
 @MainActor
 public struct AsyncFeed<
     Item: Identifiable & Sendable & Equatable,
@@ -37,13 +32,12 @@ public struct AsyncFeed<
     /// Creates a feed backed by the given items.
     ///
     /// - Parameters:
-    ///   - items: Ordered sequence of items to display. Updated on every parent body call;
-    ///     unchanged arrays skip rebuild via identity + equality guards in `updateUIView`.
-    ///   - environment: Composition root. Construct once (e.g. `@State`) and reuse across
-    ///     re-renders so `LayoutCache` and `DimensionCache` survive SwiftUI identity changes.
-    ///   - cellBuilder: Called on `@MainActor` to produce the DSL node tree for each item.
-    ///     Evaluated once per item change; the result is flattened to a `NodeTable` immediately
-    ///     and the existential does not escape Layer 1.
+    ///   - items: Updated on every parent body call; unchanged arrays skip rebuild via
+    ///     identity + equality guards in `updateUIView`.
+    ///   - environment: Composition root — construct once (e.g. `@State`) and reuse across
+    ///     re-renders so `LayoutCache`/`DimensionCache` survive SwiftUI identity changes.
+    ///   - cellBuilder: Runs on `@MainActor`, once per item change; result is flattened to a
+    ///     `NodeTable` immediately, so the existential never escapes Layer 1.
     public init(
         items: [Item],
         environment: RenderEnvironment,
@@ -56,15 +50,9 @@ public struct AsyncFeed<
 
     // MARK: - Modifiers
 
-    /// Sets the number of items to keep warm outside the visible area.
-    ///
-    /// Captured at view identity. Changing the values after mount has no effect
-    /// (debug builds assert; release builds silently ignore). Force a `.id()` rebuild to
-    /// change the prefetch window at runtime.
-    ///
-    /// - Parameters:
-    ///   - ahead: Items to prefetch ahead of the visible leading edge. Default: 10.
-    ///   - behind: Items to keep warm behind the visible trailing edge. Default: 3.
+    /// Sets the number of items to keep warm outside the visible area (ahead default 10,
+    /// behind default 3). Captured at view identity — changing after mount has no effect
+    /// (debug asserts, release ignores); force a `.id()` rebuild to change it at runtime.
     public func prefetchWindow(ahead: Int, behind: Int) -> Self {
         var copy = self
         copy.prefetchAhead = ahead
@@ -217,28 +205,18 @@ public struct AsyncFeed<
 
     // MARK: - warmUp
 
-    /// Warms the image and layout caches for the given items before first mount.
+    /// Warms `environment.layoutCache` (a `CellEntry` per item) and `environment.imageActor`'s
+    /// image cache before first mount. Call before assigning `items`, typically inside a `Task`
+    /// in the data-loading path; await the returned `Task` so both caches populate before
+    /// `layoutSubviews` fires.
     ///
-    /// Call before assigning `items` to `AsyncFeed` — typically inside a `Task` in the
-    /// view's data-loading path. Await the returned `Task` to ensure both caches are
-    /// populated before the view hierarchy is built and `layoutSubviews` fires.
+    /// `width`/`scale`/`contentSizeCategory` must match what `FeedScrollView` uses at mount — a
+    /// mismatch is a silent `CacheKey` miss (one gray frame, no crash), not an error. Pass a
+    /// bounded head-set (first 10–20 items); there's no internal fan-out cap.
     ///
-    /// Contract: `width`, `scale`, and `contentSizeCategory` must match what `FeedScrollView`
-    /// will use at mount time. A mismatch on any of these produces `CacheKey` misses and
-    /// silently falls back to the standard pipeline path — no crash, just one gray frame.
-    /// Pass a bounded head-set (typically the first 10–20 items); warmUp has no internal
-    /// fan-out cap and will decode every item's images regardless of list length.
-    ///
-    /// Side effects:
-    /// - Populates `environment.layoutCache` with a `CellEntry` for each item.
-    /// - Populates `environment.imageActor`'s image cache with decoded images for all
-    ///   image fragments at the fragment-computed target sizes.
-    ///
-    /// Cancellation: cancelling the returned `Task` stops new prefetches from being
-    /// issued. In-flight decode tasks inside `ImageActor` complete naturally.
-    ///
-    /// Idempotent: a second call for the same items, width, and scale hits
-    /// `LayoutCache` and `ImageActor`'s cache immediately and returns fast.
+    /// Cancelling the returned `Task` stops new prefetches; in-flight `ImageActor` decodes finish
+    /// naturally. Idempotent — a repeat call for the same items/width/scale hits both caches
+    /// immediately.
     @MainActor
     public static func warmUp(
         items: [Item],

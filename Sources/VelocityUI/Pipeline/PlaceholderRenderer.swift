@@ -4,64 +4,28 @@
 import CoreGraphics
 import Foundation
 
-/// A pluggable strategy for producing a fragment's first-paint image before its real
-/// image has finished decoding.
+/// Produces a fragment's first-paint image before the real image decodes.
 ///
-/// ## Read before implementing — MainActor / frame-budget contract
-/// `render(_:targetSize:cornerRadius:)` runs SYNCHRONOUSLY on the MainActor, inline in
-/// `RenderCell.applyLayout` — the scroll path, which never awaits. It is NOT called off
-/// the main thread. Every microsecond spent here lands directly on the current frame's
-/// budget and can drop frames while scrolling.
-///
-/// It runs once per fragment lifetime, gated by `contents == nil` at bind time — not once
-/// per frame — but a slow single call still stutters whichever bind frame it lands on.
-///
-/// Match the built-in decoders' budget: **p99 < 500us** (VelocityUI-1su.3 AC3). A solid-color
-/// fill is effectively free and beats BlurHash; a full-resolution decode inside `render` is
-/// an anti-pattern. Do heavy work off-main elsewhere (e.g. at fetch/cache time) and feed this
-/// method a small, pre-shrunk thumbnail.
-///
-/// Return a CHEAP, small bitmap: the result is hardware-composited up to the fragment's real
-/// on-screen size via `CALayer`'s default `.resize` content gravity, so producing anything
-/// larger than the built-in decoders' bound (32px, see `PlaceholderDecode.swift`) is pure
-/// waste — decode/draw small and let Core Animation scale it up.
-///
-/// The returned image MUST be BGRA8888-premultiplied and rounded/clipped for the given
-/// `cornerRadius` — the same invariant every `CALayer.contents` in VelocityUI satisfies. Call
-/// the public `normaliseAndRound(_:targetSize:cornerRadius:scale:)` to get this for free, or
-/// match its guarantees exactly. The call site does NOT re-normalise the result — an image
-/// that skips this contract paints a subtly wrong (wrong color space, unclipped corners)
-/// first frame.
-///
-/// ## Your renderer replaces ALL three cases, not just `.custom`
-/// Injecting a `PlaceholderRenderer` through `RenderEnvironment` replaces the renderer for
-/// EVERY fragment, including ones still using the built-in `.thumbnail`/`.blurHash` via
-/// `.placeholder(thumbnail:)`/`.placeholder(blurHash:)` — `RenderCell` has no separate path
-/// for those. A renderer written only to handle `.custom` and returning `nil` for the other
-/// two silently disables built-in first paint everywhere else in the app, dropping those
-/// fragments straight to the gray tint. To add a custom case while keeping the built-in
-/// behavior for everything else, delegate the cases you don't handle to a
-/// `DefaultPlaceholderRenderer` instance:
-/// ```swift
-/// struct MyRenderer: PlaceholderRenderer {
-///     let fallback = DefaultPlaceholderRenderer()
-///     func render(_ payload: PlaceholderPayload, targetSize: CGSize, cornerRadius: CGFloat) -> CGImage? {
-///         if case .custom(let box) = payload { return myDecode(box, targetSize, cornerRadius) }
-///         return fallback.render(payload, targetSize: targetSize, cornerRadius: cornerRadius)
-///     }
-/// }
-/// ```
+/// - Runs SYNCHRONOUSLY on MainActor, inline in `RenderCell.applyLayout` (scroll path,
+///   never awaits). Budget: p99 < 500us (VelocityUI-1su.3 AC3). Never full-res decode here —
+///   pre-shrink at fetch/cache time and hand this a small thumbnail.
+/// - Called once per fragment lifetime (gated by `contents == nil`), not once per frame.
+/// - Return a small bitmap — `CALayer`'s `.resize` gravity scales it up, so anything bigger
+///   than the built-in 32px bound (`PlaceholderDecode.swift`) is wasted work.
+/// - Must return BGRA8888-premultiplied, corner-clipped output (use `normaliseAndRound`) —
+///   the call site does not re-normalise.
+/// - Replaces ALL three payload cases, not just `.custom`. To add a custom case without
+///   losing built-in `.thumbnail`/`.blurHash` handling, delegate unhandled cases to
+///   `DefaultPlaceholderRenderer().render(payload, targetSize:, cornerRadius:)`.
 public protocol PlaceholderRenderer: Sendable {
     /// - Parameters:
-    ///   - payload: `.thumbnail`/`.blurHash` for the built-in cases; `.custom` for a
-    ///     payload set via `AsyncImageNode.placeholder(custom:)`.
-    ///   - targetSize: the fragment's on-screen point size. Most renderers should decode far
-    ///     smaller than this (see the performance contract above) and let Core Animation
-    ///     scale the result up.
+    ///   - payload: `.thumbnail`/`.blurHash` for built-in cases, `.custom` for a payload set
+    ///     via `AsyncImageNode.placeholder(custom:)`.
+    ///   - targetSize: fragment's on-screen point size — decode smaller and let Core Animation
+    ///     scale up (see performance contract above).
     ///   - cornerRadius: points, in `targetSize`'s coordinate space.
-    /// - Returns: a BGRA8888-premultiplied, decode-time-rounded `CGImage`, or `nil` if this
-    ///   payload can't produce a placeholder — the caller falls back to the next tier
-    ///   (another payload) or, if none remain, a plain gray tint.
+    /// - Returns: BGRA8888-premultiplied, decode-time-rounded `CGImage`, or `nil` if this
+    ///   payload can't produce one — caller falls back to the next tier or a plain gray tint.
     nonisolated func render(
         _ payload: PlaceholderPayload,
         targetSize: CGSize,
@@ -69,14 +33,14 @@ public protocol PlaceholderRenderer: Sendable {
     ) -> CGImage?
 }
 
-/// Reproduces VelocityUI's original built-in first-paint behavior: decodes `.thumbnail`
-/// via `decodeThumbnailPlaceholder` and `.blurHash` via `decodeBlurHashPlaceholder`, both
-/// bounded by the built-in `placeholderMaxPixelSize` and piped through `normaliseAndRound`.
-/// `RenderEnvironment`'s convenience init wires this in automatically — inject a different
-/// `PlaceholderRenderer` through the designated init to override.
+/// Reproduces VelocityUI's built-in first-paint behavior: `.thumbnail` via
+/// `decodeThumbnailPlaceholder`, `.blurHash` via `decodeBlurHashPlaceholder`, both bounded by
+/// `placeholderMaxPixelSize` and piped through `normaliseAndRound`. Wired in automatically by
+/// `RenderEnvironment`'s convenience init — inject a different `PlaceholderRenderer` through
+/// the designated init to override.
 ///
-/// `.custom` payloads are not this renderer's job — it returns `nil` for them, same as any
-/// payload it can't handle; a consumer wanting `.custom` support supplies their own renderer.
+/// `.custom` isn't this renderer's job — returns `nil` for it like any payload it can't handle;
+/// consumers wanting `.custom` support supply their own renderer.
 public struct DefaultPlaceholderRenderer: PlaceholderRenderer {
     public init() {}
 

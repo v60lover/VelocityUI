@@ -145,29 +145,24 @@ final class PlaceholderDecodeTests: XCTestCase {
 
     // MARK: - Decode p99 microbenchmarks (VelocityUI-1su.3 AC3)
 
-    /// AC3's <500us p99 budget is verified against `-O` (optimized) builds — see the design
-    /// notes on VelocityUI-1su.3 for the on-device measurement (median 95.8us, p99 215.3us at
-    /// this same 300x300pt input, run via `xcodebuild test ... SWIFT_OPTIMIZATION_LEVEL=-O`).
-    /// DeviceTestHost.xcodeproj's `VelocityUITests` target only enables `ENABLE_TESTABILITY`
-    /// (required for `@testable import`) in its Debug configuration, so this XCTest — like
-    /// every other test in this suite — always runs unoptimized (`-Onone`); no in-repo test
-    /// invocation can exercise the literal 500us bound. This assertion instead guards the
-    /// -Onone measurement with headroom, catching real regressions — e.g. the CGContext-upscale
-    /// bug this bead's implementation hit mid-development, which cost ~4.7-7.2ms here — while
-    /// not asserting a number this build configuration cannot legitimately produce. The 4.5ms
-    /// bound (rather than a tighter one closer to the ~2.5ms typical -Onone reading) has margin
-    /// for on-device thermal/contention variance observed across runs (2.5-3.5ms), while
-    /// staying well under the ~4.7ms floor of the actual regression this guards against.
+    /// AC3's <500us p99 budget is verified against `-O` builds (see VelocityUI-1su.3 design
+    /// notes: median 95.8us, p99 215.3us at this same 300x300pt input via
+    /// `SWIFT_OPTIMIZATION_LEVEL=-O`). DeviceTestHost's `VelocityUITests` target only enables
+    /// `ENABLE_TESTABILITY` in Debug, so this suite always runs `-Onone` — no in-repo test can
+    /// hit the literal 500us bound. This assertion instead guards the -Onone measurement with
+    /// headroom: catches real regressions (e.g. the CGContext-upscale bug that cost ~4.7-7.2ms
+    /// here) without asserting a number this build config can't legitimately produce. The 4.5ms
+    /// bound (looser than the ~2.5ms typical -Onone reading) leaves margin for observed
+    /// thermal/contention variance (2.5-3.5ms) while staying under the ~4.7ms floor of the
+    /// actual regression it guards against.
     ///
     /// Simulator flakiness (2026-07-26, VelocityUI-qrk review): this wall-clock assertion can
-    /// intermittently fail on the iOS **Simulator** even with no source changes — reproduced a
-    /// p99 of 10.5ms (vs the 4.5ms bound) in 1 of 4 back-to-back `xcodebuild test` runs on
-    /// iPhone 17 Pro Simulator (26.4.1), while the other 3 simulator runs and 4/4 runs on a
-    /// physical iPhone 13 Pro (same commit) passed comfortably (p99 ~2.9ms on device). Root
-    /// cause: the Simulator shares the host Mac's CPU scheduler with Xcode/other processes, so
-    /// wall-clock thresholds see contention a physical device does not. If this test fails only
-    /// on Simulator and passes on a physical device (or in isolation after the host is idle),
-    /// treat it as environmental noise, not a regression — re-run before investigating further.
+    /// intermittently fail on iOS **Simulator** with no source changes — reproduced p99=10.5ms
+    /// (vs the 4.5ms bound) in 1 of 4 back-to-back runs on iPhone 17 Pro Simulator (26.4.1),
+    /// while the other 3 simulator runs and 4/4 physical-device runs (iPhone 13 Pro, same
+    /// commit) passed comfortably (~2.9ms on device) — the Simulator shares the host Mac's CPU
+    /// scheduler with Xcode, so wall-clock thresholds see contention a device doesn't.
+    /// Fails-on-Simulator-only: environmental noise, not a regression — re-run before investigating.
     func testBlurHashDecodeP99RegressionGuard() {
         let target = CGSize(width: 300, height: 300)
         let iterations = 500

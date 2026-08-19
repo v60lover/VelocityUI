@@ -38,15 +38,13 @@ public struct VFontTraits: OptionSet, Sendable, Hashable {
 }
 
 /// Sendable substitute for UIContentSizeCategory — keeps TextDescriptor UIKit-free at the
-/// value-type layer. Converted to/from the real UIKit type only inside TextRasteriser.swift.
+/// value-type layer; converts to/from the real UIKit type only inside TextRasteriser.swift.
 ///
-/// `.unspecified` means "no Dynamic Type scaling requested": `TextRasteriser.resolvedFont`
-/// returns the descriptor's declared point size verbatim, skipping `UIFontMetrics` entirely.
-/// This matters beyond convenience — passing `UIContentSizeCategory.unspecified` itself INTO
-/// `UIFontMetrics` makes it silently fall back to `UIApplication.shared.preferredContentSizeCategory`,
-/// a hidden global read that would violate the "no global reads in nonisolated helpers" rule
-/// (CLAUDE.md §4). `.unspecified` short-circuits before that call is ever made, so every
-/// existing caller that never opts in keeps byte-identical behavior to before this type existed.
+/// `.unspecified` short-circuits before `UIFontMetrics` is ever called, so `resolvedFont`
+/// returns the declared point size verbatim. This matters because passing `.unspecified`
+/// itself INTO `UIFontMetrics` silently falls back to a hidden global read
+/// (`UIApplication.shared.preferredContentSizeCategory`), banned in nonisolated helpers
+/// (CLAUDE.md §4) — so every caller that never opts in stays byte-identical to before.
 public enum VContentSizeCategory: Sendable, Hashable {
     case unspecified
     case extraSmall
@@ -268,38 +266,32 @@ public enum NodeKind: Sendable {
 
 // MARK: - NodeTable
 
-/// Flat, index-based representation of a DSL node tree.
-/// Created once on @MainActor from a RenderNode tree; passed by value
-/// across all layer boundaries. No existentials past this point.
+/// Flat, index-based representation of a DSL node tree. Created once on @MainActor from a
+/// RenderNode tree; passed by value across all layer boundaries — no existentials past this point.
 ///
-/// itemID is AnyHashable (not `any Hashable & Sendable`) so it participates in
-/// Set membership and dictionary keying — required by the differ and cell-recycling layer.
-/// AnyHashable is NOT stdlib-Sendable (its box can hold non-Sendable payloads), so the
-/// stored property is annotated `nonisolated(unsafe)`. Safety holds because the generic
-/// init constrains ID to Hashable & Sendable — the boxed payload is always Sendable in
-/// practice. Do not remove the annotation without first making AnyHashable Sendable upstream.
+/// `itemID` is `AnyHashable` (not `any Hashable & Sendable`) so it can be a Set/Dictionary key
+/// for the differ and cell-recycling layer. `AnyHashable` isn't stdlib-Sendable (its box can hold
+/// non-Sendable payloads), hence `nonisolated(unsafe)` — safe because the generic init constrains
+/// ID to `Hashable & Sendable`, so the boxed payload is always Sendable in practice. Don't remove
+/// the annotation without first making `AnyHashable` Sendable upstream.
 public struct NodeTable: Sendable {
     // See struct-level doc for the full rationale on nonisolated(unsafe) here.
     nonisolated(unsafe) private let _itemID: AnyHashable
 
     #if canImport(XCTest)
-    // No-singletons exemption: gated test-only instrumentation. Dependency-injecting the
-    // counter through nonisolated pure helpers (classify, measureNode) would violate
-    // CLAUDE.md §4 ("pure — inputs in, value out, no implicit cache lookup"); static
-    // placement is the lesser violation.
+    // No-singletons exemption: test-only instrumentation. Injecting this through the nonisolated
+    // pure helpers (classify, measureNode) would violate their "no implicit cache lookup"
+    // contract (CLAUDE.md §4); static placement is the lesser violation.
     //
-    // Counts every .itemID read (not AnyHashable constructions). RenderDiffer.diff reads
-    // .itemID 4 times per surviving item (prevIndex build, lookup, removeValue, removed-check).
-    // itemsDidChange height-forwarding adds zero reads — it uses (prevIdx, nextIdx) pairs.
-    // A regression that rebuilds an [AnyHashable: _] dict for height-forwarding raises the
-    // count to 6×N; test assertions catch it.
+    // Counts every .itemID read, not AnyHashable constructions. RenderDiffer.diff reads it 4x
+    // per surviving item (prevIndex build, lookup, removeValue, removed-check); itemsDidChange
+    // height-forwarding adds zero (uses (prevIdx, nextIdx) pairs). A regression that rebuilds an
+    // [AnyHashable: _] dict for height-forwarding raises the count to 6×N — tests catch it.
     //
-    // Serial-access invariant: the per-update 4×N bound assumes no concurrent Task reads
-    // .itemID during the measurement window. This is NOT thread-safe by type — the caller
-    // must enforce serial access. testAppearanceOnlyUpdateAnyHashableAccessCountBounded
-    // achieves this by using frame.height=0, which prevents updateVisibleCells Task spawns.
-    // Any test that reads this counter while a concurrent Task could read .itemID will
-    // under-count and produce a false-passing result.
+    // NOT thread-safe: the 4×N bound assumes serial access, no concurrent Task reading .itemID
+    // during measurement. testAppearanceOnlyUpdateAnyHashableAccessCountBounded enforces this
+    // via frame.height=0 (blocks updateVisibleCells Task spawns) — without that guard a test
+    // would under-count and false-pass.
     nonisolated(unsafe) static var _itemIDCounter: Int = 0
     #endif
 

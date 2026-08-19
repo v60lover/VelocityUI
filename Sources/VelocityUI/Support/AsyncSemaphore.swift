@@ -3,14 +3,13 @@
 #if canImport(UIKit)
 import Foundation
 
-/// Priority-lane bounded semaphore for Swift concurrency.
+/// Priority-lane bounded semaphore for Swift concurrency. `wait()` acquires a slot,
+/// `signal()` releases one.
 ///
-/// `wait()` acquires a slot; `signal()` releases one.
 /// Contended waiters queue into a per-`DecodePriority` FIFO tier; `signal()` wakes the
-/// highest-priority (lowest `rawValue`) non-empty tier, FIFO within that tier. Tiers only
-/// affect admission ORDER — a slot already held is never preempted or cancelled.
-/// Cancellation-safe: `wait()` throws `CancellationError` if the task is cancelled
-/// while blocked; the slot is never consumed for a cancelled caller.
+/// highest-priority (lowest `rawValue`) non-empty tier, FIFO within that tier — tiers only
+/// affect admission order, a held slot is never preempted. Cancellation-safe: `wait()` throws
+/// `CancellationError` if cancelled while blocked, without consuming a slot.
 public actor AsyncSemaphore {
     private var count: Int
     // Indexed by DecodePriority.rawValue. One FIFO queue per tier; signal() scans tiers
@@ -27,20 +26,16 @@ public actor AsyncSemaphore {
         self.count = value
     }
 
-    /// Acquire a slot. Returns immediately when count > 0 (fast path — identical cost to a
-    /// single-lane semaphore regardless of `priority`; the tiered queue is only touched on
-    /// the contended path below).
-    /// Blocks in FIFO-within-tier order when count == 0, admitted by tier per `DecodePriority`
-    /// ordering. Throws `CancellationError` on cancellation — the slot is not consumed, and
-    /// the caller must NOT call `signal()`.
+    /// Acquires a slot. Returns immediately when count > 0 (fast path — same cost as a
+    /// single-lane semaphore regardless of `priority`; the tiered queue is touched only on the
+    /// contended path). Blocks in FIFO-within-tier order when count == 0, admitted by
+    /// `DecodePriority` tier. Throws `CancellationError` on cancellation — slot not consumed,
+    /// caller must NOT call `signal()`.
     ///
-    /// - Parameter id: Identity used to target this waiter from `elevate(id:to:)`. Defaults to
-    ///   `nil`, in which case a fresh `UUID()` is generated only on the contended path below
-    ///   (preserves prior behaviour — and prior COST — for every existing call site; the
-    ///   uncontended `count > 0` fast path never allocates a UUID, matching the pre-priority
-    ///   fast path exactly). Callers that want a later caller to be able to elevate this wait
-    ///   — e.g. `ImageActor` tracking a decode's admission record before it reaches this call
-    ///   — pass a stable id they already generated.
+    /// - Parameter id: Identity for `elevate(id:to:)` to target this waiter. Defaults to `nil`,
+    ///   generating a fresh `UUID()` only on the contended path (the uncontended fast path never
+    ///   allocates one). Pass a stable id if a later caller may need to elevate this wait — e.g.
+    ///   `ImageActor` tracking a decode's admission record before it reaches this call.
     public func wait(id: UUID? = nil, priority: DecodePriority = .visible) async throws {
         try Task.checkCancellation()
         if count > 0 { count -= 1; return }
@@ -78,21 +73,18 @@ public actor AsyncSemaphore {
         }
     }
 
-    /// Move a still-queued waiter to a higher-priority tier — used when a later, more
-    /// urgent caller joins work that an earlier, lower-priority caller already started
-    /// (e.g. a `.visible` `image()` call coalescing onto an in-flight `.behind` prefetch).
+    /// Moves a still-queued waiter to a higher-priority tier — used when a later, more urgent
+    /// caller joins work an earlier, lower-priority caller already started (e.g. a `.visible`
+    /// `image()` call coalescing onto an in-flight `.behind` prefetch).
     ///
-    /// Scans only tiers strictly lower-priority than `newPriority` (`rawValue >
-    /// newPriority.rawValue`); if `id` is found there, it is removed from that tier and
-    /// appended to the back of `newPriority`'s FIFO queue. `totalWaiterCount` is unchanged —
-    /// this is a move between tiers, not an add or a remove.
+    /// Scans only tiers strictly lower-priority than `newPriority`; if `id` is found there, it's
+    /// removed and appended to the back of `newPriority`'s FIFO queue. `totalWaiterCount` is
+    /// unchanged — this moves between tiers, it doesn't add or remove.
     ///
-    /// No-op — safe to call unconditionally — when `id` is not currently queued in any
-    /// lower tier. This covers: the waiter already acquired its slot, already completed,
-    /// was already cancelled, has not yet enqueued (still between `wait()`'s cancellation
-    /// check and the tier append — see the residual race noted at `ImageActor._decode`'s
-    /// admission read), or is already at/above `newPriority`. Never touches `count`, never
-    /// resumes a continuation — `elevate` only reorders queued waiters, it does not admit one.
+    /// No-op — safe to call unconditionally — when `id` isn't queued in any lower tier: already
+    /// acquired its slot, already completed/cancelled, not yet enqueued (race window noted at
+    /// `ImageActor._decode`'s admission read), or already at/above `newPriority`. Never touches
+    /// `count` or resumes a continuation — only reorders queued waiters, never admits one.
     public func elevate(id: UUID, to newPriority: DecodePriority) {
         for tier in waiterTiers.indices where tier > newPriority.rawValue {
             guard let idx = waiterTiers[tier].firstIndex(where: { $0.id == id }) else { continue }

@@ -4,31 +4,25 @@
 import UIKit
 
 /// Incremental rasterize path for ONE still-growing hot text block (VelocityUI-x4q0, direction
-/// (b) from TEXTKIT2_INCREMENTAL_RASTERIZATION_RESEARCH.md §4). Pairs with `HotBlockMeasurer`
-/// (VelocityUI-c1uc) by composition — this type owns one `HotBlockMeasurer` and reuses its
-/// persistent `NSTextLayoutManager` to draw only the newly appended tail fragments into a strip,
-/// compositing them over the retained previous `CGImage` instead of re-rasterizing the whole
-/// block from scratch every token.
+/// (b) from TEXTKIT2_INCREMENTAL_RASTERIZATION_RESEARCH.md §4). Owns one `HotBlockMeasurer`
+/// (VelocityUI-c1uc) and reuses its persistent `NSTextLayoutManager` to draw only newly appended
+/// tail fragments, compositing over the retained previous `CGImage` instead of re-rasterizing
+/// the whole block every token.
 ///
-/// Every edit still goes through `HotBlockMeasurer.measure(_:width:)` — this type never touches
-/// `NSTextContentStorage`/`NSTextStorage` directly, so `HotBlockMeasurer`'s own captured-storage
-/// contract (see its doc comment) cannot be reintroduced-as-a-bug here by accident.
+/// Every edit goes through `HotBlockMeasurer.measure(_:width:)` — never touches
+/// `NSTextContentStorage`/`NSTextStorage` directly, so its captured-storage contract can't be
+/// reintroduced as a bug here.
 ///
-/// On an append (`measure`'s `appended == true`), the previous LAST fragment is always redrawn in
-/// full alongside anything genuinely new — never a partial/sub-glyph redraw — so a ligature or
-/// emoji sequence that spans the append seam can never leave a stale half-glyph (research §6.5).
-/// The retained top region is CROPPED into the new composite, never scaled — `HotBlockRasterizerTests.
-/// testMultiFragmentBlit_GrowingLastLineMatchesGroundTruth` covers the case where that crop is a real
-/// sub-region of the previous image (`stableTopY` short of the previous image's full height), in
-/// addition to `testLigatureAndEmojiAtSeam`'s single-fragment (no-blit) seam case. On a non-append
-/// change (first call, width change, non-content attribute change, or a non-prefix content edit —
-/// `HotBlockMeasurer` classifies all of these as its own fallback), this type falls back to a full
-/// `rasterizeText` pass, matching the cold/first-paint path exactly.
+/// On an append (`measure`'s `appended == true`), the previous LAST fragment is always redrawn
+/// in full alongside anything new — never partial/sub-glyph — so a ligature/emoji spanning the
+/// append seam never leaves a stale half-glyph (research §6.5). The retained top region is
+/// CROPPED into the composite, never scaled (`testMultiFragmentBlit_GrowingLastLineMatchesGroundTruth`,
+/// `testLigatureAndEmojiAtSeam`). Any non-append change (first call, width change, attribute
+/// change, non-prefix edit) falls back to a full `rasterizeText` pass, matching cold/first-paint.
 ///
-/// Lifetime is ONE hot block, not the process — owned per-`BlockKey` by `HotBlockRasterizerStore`,
-/// which tears this (and its owned `HotBlockMeasurer`'s live `NSTextLayoutManager`) down once the
-/// block seals or scrolls out of the working range. No `static let shared`, no global lookup
-/// (CLAUDE.md: no singletons).
+/// Lifetime is ONE hot block, owned per-`BlockKey` by `HotBlockRasterizerStore`, which tears this
+/// (and its measurer's live `NSTextLayoutManager`) down once the block seals or scrolls out. No
+/// singletons (CLAUDE.md).
 final class HotBlockRasterizer {
     private let measurer = HotBlockMeasurer()
     private var image: CGImage?

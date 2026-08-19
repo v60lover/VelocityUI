@@ -6,18 +6,15 @@ import CoreGraphics
 
 // MARK: - ChangeKind
 
-/// Coarse classification of how two NodeTables for the same item differ.
+/// Coarse classification of how two NodeTables for the same item differ, picking the minimum
+/// re-work path: `.none` skips entirely; `.appearance` re-commits visual properties only
+/// (geometry/media unchanged); `.media` re-fetches image content (geometry unchanged, no
+/// re-layout); `.layout` does a full re-measure and re-commit.
 ///
-/// Consumers use ChangeKind to select the minimum re-work path:
-/// - `.none`: skip entirely — nothing changed.
-/// - `.appearance`: re-commit visual properties only; geometry and media unchanged.
-/// - `.media`: re-fetch image content; geometry unchanged (layout does not re-run).
-/// - `.layout`: full re-measure and re-commit.
-///
-/// Note on `.appearance` + cornerRadius: AsyncImageNode bakes corner rounding at
-/// decode time via CGContext clip (never on CALayer). A cornerRadius change classifies
-/// as `.appearance`, but the appearance consumer MUST re-request image content from
-/// ImageActor so the new rounded bitmap is decoded. See ImageDescriptor.cornerRadius.
+/// `cornerRadius` changes classify as `.appearance` (geometry unaffected), but since
+/// `AsyncImageNode` bakes rounding at decode time via `CGContext` clip, not on `CALayer`, the
+/// appearance consumer must still re-request image content from `ImageActor` for the new
+/// rounded bitmap (see `ImageDescriptor.cornerRadius`).
 public enum ChangeKind: Sendable {
     case none
     case appearance
@@ -27,21 +24,14 @@ public enum ChangeKind: Sendable {
 
 // MARK: - classify
 
-/// Compares two NodeTables for the same item and returns the minimum change tier.
+/// Compares two NodeTables for the same item, returning the minimum change tier via a
+/// three-tier, hash-first algorithm: (1) both hashes equal → `.none`, O(1); (2) layoutHash
+/// equal, appearanceHash differs → `.appearance`; (3) layoutHash differs → pairwise flat-array
+/// walk, `.media` if every differing node is an image whose only change is a URL with
+/// dimensions already in `dimensionCache`, else `.layout`.
 ///
-/// Three-tier, hash-first algorithm:
-/// 1. Both hashes equal → `.none` (O(1), zero node inspection).
-/// 2. layoutHash equal, appearanceHash different → `.appearance` (provable from hashes).
-/// 3. layoutHash different → pairwise flat-array walk. If every node with a differing
-///    layout hash is an image node where only the URL changed and the new URL's
-///    dimensions are already in `dimensionCache` → `.media`. Otherwise → `.layout`.
-///
-/// - Parameters:
-///   - prev: The previous NodeTable for this item.
-///   - next: The updated NodeTable for the same item (must carry the same itemID).
-///   - dimensionCache: The shared DimensionCache. Pass the same instance as ImageActor
-///     uses so decode-time stores are visible here (DimensionCache.swift DI contract).
-///     Pass `nil` to disable the `.media` fast-path (forces `.layout` when layout changes).
+/// - Parameter dimensionCache: pass the same instance `ImageActor` uses so decode-time stores
+///   are visible here; `nil` disables the `.media` fast-path (forces `.layout`).
 public nonisolated func classify(
     _ prev: NodeTable,
     _ next: NodeTable,
@@ -98,28 +88,17 @@ public struct LayoutSnapshot: Sendable {
 
 /// Flat description of differences between two LayoutSnapshots.
 ///
-/// All five change arrays carry full NodeTable references so consumers can
-/// route work without a second lookup. Each entry also carries (prevIdx,
-/// nextIdx) — the item's position in the prev and next snapshot respectively
-/// — so consumers can avoid O(N) AnyHashable dictionary rebuilds.
+/// All change arrays carry full NodeTable references plus `(prevIdx, nextIdx)` positions, so
+/// consumers can route work and forward heights without a second lookup or O(N) AnyHashable
+/// dict rebuild. `removed` carries the prev-state table so consumers can clean up media
+/// resources keyed by the old descriptor. `survived` holds `.none`-classified pairs (excluded
+/// from `hasChanges`) purely so `rebuildFrames` can forward known heights.
 ///
-/// `removed` carries the prev-state table (not the new state) so consumers
-/// can clean up media resources keyed by the old descriptor.
-///
-/// `survived` carries (prevIdx, nextIdx) pairs for items classified .none —
-/// unchanged items that still need their known heights forwarded to rebuildFrames.
-/// It does NOT contribute to `hasChanges`.
-///
-/// `layoutChanged` pairs are ordered: prev first, next second.
-///
-/// CoW lifetime contract: release the previous ChangeSet **before** calling
-/// `diff()` again. The scratch arrays backing the six result arrays are
-/// reused across calls via `removeAll(keepingCapacity: true)`. If a prior
-/// ChangeSet is still retained when `resetScratch()` runs, Swift's
-/// copy-on-write semantics will reallocate the backing buffer to give that
-/// ChangeSet its own copy — defeating the zero-allocation guarantee.
-/// `FeedScrollView` must not retain the prior ChangeSet across a call to
-/// `diff()`.
+/// CoW lifetime contract: release the previous `ChangeSet` **before** calling `diff()` again.
+/// The scratch arrays back all six result arrays and reuse storage via
+/// `removeAll(keepingCapacity: true)`; a still-retained prior `ChangeSet` forces Swift's CoW to
+/// reallocate a private copy on `resetScratch()`, defeating zero-allocation. `FeedScrollView`
+/// must not retain the prior `ChangeSet` across a `diff()` call.
 public struct ChangeSet: Sendable {
     public let layoutChanged:     [(prev: NodeTable, next: NodeTable, prevIdx: Int, nextIdx: Int)]
     public let appearanceChanged: [(prev: NodeTable, next: NodeTable, prevIdx: Int, nextIdx: Int)]
@@ -140,22 +119,17 @@ public struct ChangeSet: Sendable {
 
 // MARK: - RenderDiffer
 
-/// Allocation-free differ for consecutive LayoutSnapshots.
+/// Allocation-free differ for consecutive LayoutSnapshots. Scratch arrays pre-allocate on the
+/// first `diff()` call and reuse via `removeAll(keepingCapacity: true)` afterward — a diff
+/// touching k of n items only allocates the returned `ChangeSet` value types, no backing-buffer
+/// growth for the typical k << n append-page case.
 ///
-/// Scratch arrays are pre-allocated on first `diff()` call and reused on
-/// subsequent calls via `removeAll(keepingCapacity: true)`. After warm-up,
-/// a diff that touches k items of n allocates only the ChangeSet value
-/// types (copied on return) — no backing-buffer growth for the typical
-/// append-page case where k << n.
+/// DI contract: inject the **same** `DimensionCache` `ImageActor` uses, or `classify()`'s
+/// `.media` fast-path silently breaks.
 ///
-/// DI contract: inject the **same** `DimensionCache` that `ImageActor` uses
-/// so decode-time dimension stores are visible to `classify()` here.
-/// Separate instances defeat the `.media` fast-path.
-///
-/// Thread safety: `diff()` must not be called concurrently. In production
-/// `RenderDiffer` is owned by `FeedScrollView` (a @MainActor type); all calls
-/// are on the main actor. `@unchecked Sendable` lets it be passed into
-/// actor-isolated closures without copying — the single-owner contract is
+/// Thread safety: `diff()` must not be called concurrently. `RenderDiffer` is owned by
+/// `FeedScrollView` (`@MainActor`) in production, so all calls are main-actor. `@unchecked
+/// Sendable` lets it cross actor-isolated closures without copying — single-owner contract
 /// enforced by the owning isolation context, mirroring `TextMeasurementContext`.
 public final class RenderDiffer: @unchecked Sendable {
 
