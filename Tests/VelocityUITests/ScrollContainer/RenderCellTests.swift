@@ -23,11 +23,11 @@ final class RenderCellTests: XCTestCase {
     private let validBlurHash = "L6PZfSi_.AyE_3t7t7R**0o#DgR4"
 
     private func imageFragment(
-        id: Int, frame: CGRect, thumbnailData: Data? = nil, blurHash: String? = nil,
+        id: Int, blockID: BlockID? = nil, frame: CGRect, thumbnailData: Data? = nil, blurHash: String? = nil,
         customPlaceholderPayload: AnyPlaceholderPayload? = nil
     ) -> Fragment {
         Fragment(
-            id: id,
+            id: id, blockID: blockID,
             content: .image(ImageDescriptor(
                 url: nil, aspectRatio: 1.0, contentMode: 0,
                 cornerRadius: 0, layoutHash: id, appearanceHash: id,
@@ -104,6 +104,33 @@ final class RenderCellTests: XCTestCase {
 
         XCTAssertEqual((cl.sublayers ?? []).map { ObjectIdentifier($0) }, identitiesBefore,
             "Sublayer instances must be reused — no allocation on hot path")
+    }
+
+    func testBlockIdentityPreservesLayerWhenAnInsertionChangesNodeIndices() {
+        let cell = makeCell()
+        let first = imageFragment(id: 0, blockID: BlockID("a"), frame: CGRect(x: 0, y: 0, width: 320, height: 100))
+        let second = imageFragment(id: 1, blockID: BlockID("b"), frame: CGRect(x: 0, y: 100, width: 320, height: 100))
+
+        cell.updateBlockViewport(
+            fragments: [first, second], viewportInCell: CGRect(x: 0, y: 0, width: 320, height: 200), synchronousContent: [:]
+        )
+        guard let content = contentLayer(of: cell), let originalSecondLayer = content.sublayers?.last else {
+            XCTFail("Expected the second block layer")
+            return
+        }
+
+        let inserted = geometryFragment(id: 2, frame: CGRect(x: 0, y: 0, width: 320, height: 40))
+        let movedFirst = imageFragment(id: 3, blockID: BlockID("a"), frame: CGRect(x: 0, y: 40, width: 320, height: 100))
+        let movedSecond = imageFragment(id: 4, blockID: BlockID("b"), frame: CGRect(x: 0, y: 140, width: 320, height: 100))
+        cell.updateBlockViewport(
+            fragments: [inserted, movedFirst, movedSecond],
+            viewportInCell: CGRect(x: 0, y: 0, width: 320, height: 240),
+            synchronousContent: [:]
+        )
+
+        XCTAssertTrue(content.sublayers?.contains { $0 === originalSecondLayer } == true,
+            "Moving a stable block must keep its existing layer")
+        XCTAssertEqual(originalSecondLayer.frame, movedSecond.frame)
     }
 
     // MARK: - Test 2: Image sublayers carry gray placeholder; geometry sublayers do not

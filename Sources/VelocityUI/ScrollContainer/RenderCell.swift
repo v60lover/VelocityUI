@@ -39,6 +39,11 @@ public final class MediaHandle: Sendable {
 ///       └── sublayers keyed by fragment.id  [Int: CALayer]
 @MainActor
 public final class RenderCell {
+    private enum LayerIdentity: Hashable {
+        case block(BlockID)
+        case positional(Int)
+    }
+
     public let layer = CALayer()
     private let placeholderLayer: CAGradientLayer
     private let contentLayer = CALayer()
@@ -52,13 +57,22 @@ public final class RenderCell {
     /// so cell and environment agree on first-paint strategy.
     private let placeholderRenderer: any PlaceholderRenderer
 
-    private var sublayers: [Int: CALayer] = [:]
+    /// Layers follow an explicit block identity through insertions; positional fragments retain
+    /// the legacy node-index identity.
+    private var sublayers: [LayerIdentity: CALayer] = [:]
+    private var layerIdentityByFragmentID: [Int: LayerIdentity] = [:]
+    /// Ordered frame metadata survives while offscreen block layers are released.
+    /// It lets the scroll path find the next resident span without recreating the full cell.
+    private var blockFragments: [Fragment] = []
+    private var blockFrames: [CGRect] = []
+    private var activeBlockFragmentIDs: Set<Int> = []
     private var mediaFragmentIDs: Set<Int> = []
     /// Fragment ids whose sublayer currently shows a decode-guaranteed thumbnail/BlurHash
     /// placeholder (as opposed to real content or the systemGray5 tint). Consulted by
     /// applyContent to report which physics-fallback path a real-image delivery replaced.
     private var placeholderPaintedFragmentIDs: Set<Int> = []
     private var mediaHandles: [MediaHandle] = []
+    private var mediaHandlesByFragmentID: [Int: [MediaHandle]] = [:]
     /// Sticky true once all media has loaded for the current item; cleared on cross-item recycle.
     private var allMediaLoaded = false
     private(set) var currentItemID: AnyHashable?
@@ -133,6 +147,8 @@ public final class RenderCell {
 
         mediaHandles.forEach { $0.cancel() }
         mediaHandles.removeAll(keepingCapacity: true)
+        for handles in mediaHandlesByFragmentID.values { handles.forEach { $0.cancel() } }
+        mediaHandlesByFragmentID.removeAll(keepingCapacity: true)
 
         if !isSameItem {
             CATransaction.begin()
@@ -143,6 +159,9 @@ public final class RenderCell {
             }
             mediaFragmentIDs.removeAll(keepingCapacity: true)
             placeholderPaintedFragmentIDs.removeAll(keepingCapacity: true)
+            blockFragments.removeAll(keepingCapacity: true)
+            blockFrames.removeAll(keepingCapacity: true)
+            activeBlockFragmentIDs.removeAll(keepingCapacity: true)
             placeholderLayer.opacity = 1
             contentLayer.opacity = 0
             CATransaction.commit()
@@ -190,10 +209,21 @@ public final class RenderCell {
         // count alone can't catch this) — the one `Set` alloc lands only on cross-item mounts.
         // Same-item relayout (flag false): skip the id-diff unless count strictly shrinks.
         if needsSublayerReconcile || sublayers.count > fragments.count {
-            let incomingIDs = Set(fragments.map { $0.id })
-            for id in sublayers.keys.filter({ !incomingIDs.contains($0) }) {
-                sublayers[id]?.removeFromSuperlayer()
-                sublayers.removeValue(forKey: id)
+            let incomingIdentities = Set(fragments.map(layerIdentity(for:)))
+            let incomingIDs = Set(fragments.map(\.id))
+            for identity in sublayers.keys.filter({ !incomingIdentities.contains($0) }) {
+                sublayers[identity]?.removeFromSuperlayer()
+                sublayers.removeValue(forKey: identity)
+                let removedIDs = layerIdentityByFragmentID.keys.filter { layerIdentityByFragmentID[$0] == identity }
+                for id in removedIDs {
+                    layerIdentityByFragmentID.removeValue(forKey: id)
+                    mediaFragmentIDs.remove(id)
+                    placeholderPaintedFragmentIDs.remove(id)
+                }
+            }
+            let inactiveIDs = layerIdentityByFragmentID.keys.filter { !incomingIDs.contains($0) }
+            for id in inactiveIDs {
+                layerIdentityByFragmentID.removeValue(forKey: id)
                 mediaFragmentIDs.remove(id)
                 placeholderPaintedFragmentIDs.remove(id)
             }
@@ -201,15 +231,17 @@ public final class RenderCell {
         }
 
         for fragment in fragments {
+            let identity = layerIdentity(for: fragment)
+            layerIdentityByFragmentID[fragment.id] = identity
             let sub: CALayer
-            if let existing = sublayers[fragment.id] {
+            if let existing = sublayers[identity] {
                 sub = existing
             } else {
                 let l = CALayer()
                 l.masksToBounds = false
                 l.cornerRadius = 0
                 contentLayer.addSublayer(l)
-                sublayers[fragment.id] = l
+                sublayers[identity] = l
                 sub = l
             }
 
@@ -265,7 +297,7 @@ public final class RenderCell {
         // New unloaded fragments get per-sublayer gray tint (above); we intentionally do NOT
         // re-show the full placeholder gradient — hiding already-loaded content would be worse
         // UX than the per-sublayer tint for the new arrival.
-        if allMediaLoaded && mediaFragmentIDs.contains(where: { sublayers[$0]?.contents == nil }) {
+        if allMediaLoaded && mediaFragmentIDs.contains(where: { layer(for: $0)?.contents == nil }) {
             allMediaLoaded = false
         }
 
@@ -273,13 +305,52 @@ public final class RenderCell {
         // of the first rendered frame — no delay to mask, so no fade animation needed.
         // Must run inside setDisableActions(true) so the opacity changes are instant.
         if !allMediaLoaded && !mediaFragmentIDs.isEmpty
-            && mediaFragmentIDs.allSatisfy({ sublayers[$0]?.contents != nil }) {
+            && mediaFragmentIDs.allSatisfy({ layer(for: $0)?.contents != nil }) {
             allMediaLoaded = true
             placeholderLayer.opacity = 0
             contentLayer.opacity = 1
         }
 
         CATransaction.commit()
+    }
+
+    /// Reconciles only the ordered blocks intersecting `viewportInCell`.
+    /// Returns blocks that became active and may need an async image request.
+    @discardableResult
+    public func updateBlockViewport(
+        fragments: [Fragment],
+        viewportInCell: CGRect,
+        synchronousContent: [Int: CGImage]
+    ) -> [Fragment] {
+        blockFragments = fragments
+        blockFrames = fragments.map(\.frame)
+        activeBlockFragmentIDs.removeAll(keepingCapacity: true)
+        return updateBlockViewport(viewportInCell: viewportInCell, synchronousContent: synchronousContent)
+    }
+
+    /// Updates residency from already-recorded layout metadata. This is the scroll-path entry
+    /// point: binary search plus the newly active blocks, with no full-fragment scan.
+    @discardableResult
+    public func updateBlockViewport(
+        viewportInCell: CGRect,
+        synchronousContent: [Int: CGImage]
+    ) -> [Fragment] {
+        guard !blockFragments.isEmpty else { return [] }
+
+        let range = BlockViewportRange.activeRange(in: blockFrames, window: viewportInCell)
+        let active = Array(blockFragments[range])
+        let nextIDs = Set(active.map(\.id))
+        guard nextIDs != activeBlockFragmentIDs else { return [] }
+
+        let enteringIDs = nextIDs.subtracting(activeBlockFragmentIDs)
+        let leavingIDs = activeBlockFragmentIDs.subtracting(nextIDs)
+        cancelPendingMedia(for: leavingIDs)
+        activeBlockFragmentIDs = nextIDs
+
+        // The active set can change without changing its count, so force the exact id diff.
+        needsSublayerReconcile = true
+        applyLayout(active, synchronousContent: synchronousContent)
+        return active.filter { enteringIDs.contains($0.id) }
     }
 
     // MARK: - Content
@@ -317,7 +388,8 @@ public final class RenderCell {
     /// -socg C3 activation's "re-validate by pixels, not just frame height" checklist item).
     var _debugPaintedBitmaps: [Int: CGImage] {
         var result: [Int: CGImage] = [:]
-        for (id, layer) in sublayers {
+        for (id, identity) in layerIdentityByFragmentID {
+            guard let layer = sublayers[identity] else { continue }
             // `contents as? CGImage` always "succeeds" for any CF-bridged Any (compiler warning
             // treated as an error in the Xcode-project test target) — CFGetTypeID is the correct
             // way to check a CF type identity before the cast.
@@ -360,7 +432,7 @@ public final class RenderCell {
             #endif
             return nil
         }
-        guard let sub = sublayers[id] else { return nil }
+        guard let sub = layer(for: id) else { return nil }
 
         let transitionKind: ContentTransitionKind = placeholderPaintedFragmentIDs.remove(id) != nil
             ? .fromThumbnailPlaceholder
@@ -396,6 +468,11 @@ public final class RenderCell {
         mediaHandles.append(handle)
     }
 
+    /// Registers a fetch owned by one resident block so leaving that block cancels it eagerly.
+    func addMediaHandle(_ handle: MediaHandle, for fragmentID: Int) {
+        mediaHandlesByFragmentID[fragmentID, default: []].append(handle)
+    }
+
     /// Cancel all pending media fetch Tasks without clearing sublayer contents.
     /// Symmetric counterpart to `addMediaHandle`. Call at recycle time to release decode
     /// slots immediately — sublayers stay intact for pool reuse; `prepareForReuse` clears
@@ -403,6 +480,14 @@ public final class RenderCell {
     func cancelPendingMedia() {
         mediaHandles.forEach { $0.cancel() }
         mediaHandles.removeAll(keepingCapacity: true)
+        for handles in mediaHandlesByFragmentID.values { handles.forEach { $0.cancel() } }
+        mediaHandlesByFragmentID.removeAll(keepingCapacity: true)
+    }
+
+    private func cancelPendingMedia(for fragmentIDs: Set<Int>) {
+        for id in fragmentIDs {
+            mediaHandlesByFragmentID.removeValue(forKey: id)?.forEach { $0.cancel() }
+        }
     }
 
     // MARK: - Private
@@ -439,7 +524,7 @@ public final class RenderCell {
     private func fadeOutPlaceholderIfAllReady() {
         guard !allMediaLoaded else { return }  // already revealed — skip O(N) check
         guard !mediaFragmentIDs.isEmpty else { return }
-        guard mediaFragmentIDs.allSatisfy({ sublayers[$0]?.contents != nil }) else { return }
+        guard mediaFragmentIDs.allSatisfy({ layer(for: $0)?.contents != nil }) else { return }
 
         allMediaLoaded = true
 
@@ -456,6 +541,16 @@ public final class RenderCell {
         assert(l.cornerRadius == 0, "cornerRadius forbidden — round at decode time via CGContext")
         assert(!(l is CATextLayer), "CATextLayer forbidden — use NSTextLayoutManager → CGImage → plain CALayer")
     }
+
     #endif
+
+    private func layerIdentity(for fragment: Fragment) -> LayerIdentity {
+        fragment.blockID.map(LayerIdentity.block) ?? .positional(fragment.id)
+    }
+
+    private func layer(for fragmentID: Int) -> CALayer? {
+        guard let identity = layerIdentityByFragmentID[fragmentID] else { return nil }
+        return sublayers[identity]
+    }
 }
 #endif

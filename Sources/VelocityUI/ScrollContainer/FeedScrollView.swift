@@ -614,8 +614,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                         // a plain overwrite-merge is safe — the two maps are disjoint by key.
                         var syncMap = buildSyncMap(for: result.fragments)
                         for (id, bitmap) in result.textBitmaps { syncMap[id] = bitmap }
-                        cell.applyLayout(result.fragments, synchronousContent: syncMap)
-                        spawnMediaFetches(for: cell, fragments: result.fragments, itemID: inputs.newTable.itemID,
+                        let entering = cell.updateBlockViewport(
+                            fragments: result.fragments,
+                            viewportInCell: blockViewport(for: cell.layer.frame),
+                            synchronousContent: syncMap
+                        )
+                        spawnMediaFetches(for: cell, fragments: entering, itemID: inputs.newTable.itemID,
                                           syncMap: syncMap)
                         blockDiffResolvedIndices.insert(nextIdx)
                         if canDeferInvalidation {
@@ -1036,8 +1040,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
         var syncMap = buildSyncMap(for: result.fragments)
         for (id, bitmap) in result.textBitmaps { syncMap[id] = bitmap }
-        cell.applyLayout(result.fragments, synchronousContent: syncMap)
-        spawnMediaFetches(for: cell, fragments: result.fragments, itemID: newTable.itemID, syncMap: syncMap)
+        let entering = cell.updateBlockViewport(
+            fragments: result.fragments,
+            viewportInCell: blockViewport(for: cell.layer.frame),
+            synchronousContent: syncMap
+        )
+        spawnMediaFetches(for: cell, fragments: entering, itemID: newTable.itemID, syncMap: syncMap)
 
         // Keep `tables`/`WorkingRange` continuously in sync with what's on screen — see doc
         // comment above for why this is what makes the gesture-end reconcile free. Mirrors the
@@ -1149,8 +1157,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             if let cell = visibleCells[index], _pendingFragmentIndices.remove(index) != nil {
                 cell.layer.frame = resolvedFrames[index]
                 let syncMap = buildSyncMap(for: entry.fragments)
-                cell.applyLayout(entry.fragments, synchronousContent: syncMap)
-                spawnMediaFetches(for: cell, fragments: entry.fragments, itemID: tables[index].itemID,
+                let entering = cell.updateBlockViewport(
+                    fragments: entry.fragments,
+                    viewportInCell: blockViewport(for: cell.layer.frame),
+                    synchronousContent: syncMap
+                )
+                spawnMediaFetches(for: cell, fragments: entering, itemID: tables[index].itemID,
                                   syncMap: syncMap)
                 pendingRepositioned.insert(index)
             }
@@ -1288,6 +1300,14 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                     keptCell.layer.frame = resolvedFrames[index]
                     layer.addSublayer(keptCell.layer)
                 }
+                if let entry = workingRange.entry(at: index) {
+                    let syncMap = buildSyncMap(for: entry.fragments)
+                    let entering = keptCell.updateBlockViewport(
+                        viewportInCell: blockViewport(for: keptCell.layer.frame),
+                        synchronousContent: syncMap
+                    )
+                    spawnMediaFetches(for: keptCell, fragments: entering, itemID: tables[index].itemID, syncMap: syncMap)
+                }
                 continue
             }
 
@@ -1304,8 +1324,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             if let entry = workingRange.entry(at: index) {
                 cell.layer.frame = frame
                 let syncMap = buildSyncMap(for: entry.fragments)
-                cell.applyLayout(entry.fragments, synchronousContent: syncMap)
-                spawnMediaFetches(for: cell, fragments: entry.fragments, itemID: table.itemID,
+                let entering = cell.updateBlockViewport(
+                    fragments: entry.fragments,
+                    viewportInCell: blockViewport(for: frame),
+                    synchronousContent: syncMap
+                )
+                spawnMediaFetches(for: cell, fragments: entering, itemID: table.itemID,
                                   syncMap: syncMap)
             } else if let entry = environment.layoutCache.cachedEntry(
                 for: CacheKey(layoutHash: table.layoutHash, width: lastLayoutWidth)
@@ -1337,8 +1361,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
                 cell.layer.frame = mountFrame
                 let syncMap = buildSyncMap(for: entry.fragments)
-                cell.applyLayout(entry.fragments, synchronousContent: syncMap)
-                spawnMediaFetches(for: cell, fragments: entry.fragments, itemID: table.itemID,
+                let entering = cell.updateBlockViewport(
+                    fragments: entry.fragments,
+                    viewportInCell: blockViewport(for: mountFrame),
+                    synchronousContent: syncMap
+                )
+                spawnMediaFetches(for: cell, fragments: entering, itemID: table.itemID,
                                   syncMap: syncMap)
             } else {
                 // WorkingRange miss: placeholder gradient at estimated frame.
@@ -1369,6 +1397,18 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
         syncContentSize()
         return visRange
+    }
+
+    /// One viewport above and below the visible bounds keeps nearby blocks warm without making
+    /// a tall cell retain its entire layer tree.
+    private func blockViewport(for cellFrame: CGRect) -> CGRect {
+        let prefetch = bounds.height
+        return CGRect(
+            x: 0,
+            y: contentOffset.y - cellFrame.minY - prefetch,
+            width: cellFrame.width,
+            height: bounds.height + (2 * prefetch)
+        )
     }
 
     // MARK: - Pipeline notification
@@ -1525,7 +1565,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                     contentDeliveryObserver?(transition)
                 }
             }
-            cell.addMediaHandle(MediaHandle(task: task))
+            cell.addMediaHandle(MediaHandle(task: task), for: fragmentID)
         }
     }
 
