@@ -45,8 +45,8 @@ enum StreamDataset {
         chunks += literal("\n\n")
         chunks += prose(sentenceCount: 10, rng: &rng)
         chunks += literal("\n\n")
-//        chunks += codeFence(lineCount: codeLineCount, rng: &rng)
-//        chunks += literal("\n\n")
+        chunks += codeFence(lineCount: codeLineCount, rng: &rng)
+        chunks += literal("\n\n")
         return chunks
     }
 

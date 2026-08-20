@@ -19,6 +19,18 @@ final class RenderCellTests: XCTestCase {
         Fragment(id: id, content: .geometry, frame: frame)
     }
 
+    private func textFragment(id: Int, frame: CGRect) -> Fragment {
+        Fragment(
+            id: id,
+            content: .text(TextDescriptor(
+                content: "Visible text", font: VFontDescriptor(size: 14, weight: 0),
+                color: VColorDescriptor(red: 0, green: 0, blue: 0, alpha: 1),
+                lineLimit: nil, lineBreakMode: 0, layoutHash: id, appearanceHash: id
+            )),
+            frame: frame
+        )
+    }
+
     /// Known-valid canonical BlurHash string (public example from https://blurha.sh).
     private let validBlurHash = "L6PZfSi_.AyE_3t7t7R**0o#DgR4"
 
@@ -661,7 +673,45 @@ final class RenderCellTests: XCTestCase {
             "contentLayer must stay hidden when partial sync map does not cover all image fragments")
     }
 
-    // MARK: - Test 21: applyLayout(_:) wrapper produces same behavior as empty sync map
+    // MARK: - Test 21: painted text reveals without waiting for media
+
+    func testPaintedTextRevealsContentWithoutImageFragments() {
+        let cell = makeCell()
+        let text = makeCGImage()
+        let fragment = textFragment(id: 0, frame: CGRect(x: 0, y: 0, width: 320, height: 40))
+
+        cell.applyLayout([fragment], synchronousContent: [0: text])
+
+        guard let cl = contentLayer(of: cell), let pl = placeholderLayer(of: cell) else {
+            XCTFail("Expected cell layers")
+            return
+        }
+        XCTAssertEqual(cl.opacity, 1, "Painted text must be visible without an image delivery")
+        XCTAssertEqual(pl.opacity, 0, "Painted text must not be covered by the full-cell gradient")
+    }
+
+    func testPaintedTextRevealsWhileUnloadedImageKeepsGrayTint() {
+        let cell = makeCell()
+        let text = makeCGImage()
+        let fragments = [
+            textFragment(id: 0, frame: CGRect(x: 0, y: 0, width: 320, height: 40)),
+            imageFragment(id: 1, frame: CGRect(x: 0, y: 40, width: 320, height: 200)),
+        ]
+
+        cell.applyLayout(fragments, synchronousContent: [0: text])
+
+        guard let cl = contentLayer(of: cell), let pl = placeholderLayer(of: cell),
+              let imageLayer = cl.sublayers?.last else {
+            XCTFail("Expected cell layers")
+            return
+        }
+        XCTAssertEqual(cl.opacity, 1, "Text must not wait for the image request")
+        XCTAssertEqual(pl.opacity, 0, "The full-cell gradient must be hidden once text is painted")
+        XCTAssertNil(imageLayer.contents, "The image must remain pending")
+        XCTAssertNotNil(imageLayer.backgroundColor, "The pending image must retain its gray tint")
+    }
+
+    // MARK: - Test 22: applyLayout(_:) wrapper produces same behavior as empty sync map
 
     func testApplyLayoutNoArgWrapperPreservesGrayTintForNilContents() {
         let cell = makeCell()

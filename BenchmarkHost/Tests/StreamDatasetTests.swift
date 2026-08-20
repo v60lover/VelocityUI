@@ -32,6 +32,17 @@ final class StreamDatasetTests: XCTestCase {
             "the full canned stream must end with everything sealed, nothing left hot")
     }
 
+    func testCodeLineCountProducesOneDeterministicChunkPerHotLine() {
+        let lineCount = 17
+        let stream = StreamDataset.tokens(seed: 42, codeLineCount: lineCount)
+        let codeLines = stream.filter { $0.hasPrefix("let value") }
+
+        XCTAssertEqual(codeLines.count, lineCount,
+            "the benchmark must keep the code fence hot for every requested line")
+        XCTAssertTrue(stream.contains("```swift\n"), "the stream must open the code fence")
+        XCTAssertTrue(stream.contains("```\n"), "the stream must close the code fence")
+    }
+
     func testStreamProducesAtLeastFiveSealedBlocks() {
         // heading, paragraph, paragraph, code fence, closing paragraph.
         var parser = IncrementalMarkdownParser()

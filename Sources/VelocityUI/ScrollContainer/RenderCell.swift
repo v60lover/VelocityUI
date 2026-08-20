@@ -301,12 +301,23 @@ public final class RenderCell {
             allMediaLoaded = false
         }
 
-        // Fast-path reveal: when the sync map covers every image fragment, the image is part
-        // of the first rendered frame — no delay to mask, so no fade animation needed.
+        // Reveal any already-paintable text immediately. The full-cell gradient must not cover
+        // it while an unrelated image is still loading; that image keeps its own gray tint.
+        let hasPaintedText = fragments.contains { fragment in
+            if case .text = fragment.content {
+                return synchronousContent[fragment.id] != nil
+            }
+            return false
+        }
+        let allMediaReady = !mediaFragmentIDs.isEmpty
+            && mediaFragmentIDs.allSatisfy({ layer(for: $0)?.contents != nil })
+
+        // A fully synchronous image mount also reveals immediately, without a fade.
         // Must run inside setDisableActions(true) so the opacity changes are instant.
-        if !allMediaLoaded && !mediaFragmentIDs.isEmpty
-            && mediaFragmentIDs.allSatisfy({ layer(for: $0)?.contents != nil }) {
-            allMediaLoaded = true
+        if hasPaintedText || allMediaReady {
+            if allMediaReady {
+                allMediaLoaded = true
+            }
             placeholderLayer.opacity = 0
             contentLayer.opacity = 1
         }
@@ -372,14 +383,9 @@ public final class RenderCell {
     /// the nonisolated(unsafe) annotation is a formality for @testable cross-module access.
     nonisolated(unsafe) static var _privacyGuardFiredCount: Int = 0
 
-    /// True once every image fragment for the current item has non-nil sublayer contents —
-    /// i.e. `contentLayer` has been revealed. Path-independent: set by both the synchronous
-    /// `applyLayout(_:synchronousContent:)` fast path (image already cache-resident at mount
-    /// time) and the async `applyContent` path. Tests that need to observe "this cell is
-    /// showing real image content" must poll this, not `_debugApplyContentCount` or
-    /// `RenderEnvironment.contentDeliveryObserver` — either of those only fires on the async
-    /// path and misses mount-time synchronous delivery entirely.
-    var _debugIsContentRevealed: Bool { allMediaLoaded }
+    /// True once `contentLayer` is visible: all images have loaded, or a paintable text bitmap
+    /// arrived before a pending image. Tests must not infer this from async-delivery counters.
+    var _debugIsContentRevealed: Bool { contentLayer.opacity == 1 }
 
     /// Every fragment id currently painting a `CGImage` (image or text), mapped to that exact
     /// instance. Test-only — lets tests assert PIXEL identity (the same `CGImage` reference is
