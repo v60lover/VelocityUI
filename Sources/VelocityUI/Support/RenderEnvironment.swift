@@ -26,6 +26,10 @@ public final class RenderEnvironment: Sendable {
     /// the MainActor bind/scroll path reads it synchronously, with zero `await`.
     public let frozenBitmapStore: FrozenBitmapStore
 
+    /// Per-feed ownership for artifacts actively mounted by the scroll view. This deliberately
+    /// has no hard eviction ceiling; `FrozenBitmapStore` owns only inactive, reusable entries.
+    public let visibleBlockStore: VisibleBlockStore
+
     /// Per-`BlockKey` lifecycle owner for the incremental hot-tail text rasterizer
     /// (VelocityUI-x4q0). `@MainActor final class`, not `Sendable` — mirrors `videoController`'s
     /// treatment, since it is touched only from `FeedScrollView`'s synchronous MainActor
@@ -84,6 +88,7 @@ public final class RenderEnvironment: Sendable {
         videoController: VideoController,
         videoPreparation: VideoPreparationActor,
         frozenBitmapStore: FrozenBitmapStore,
+        visibleBlockStore: VisibleBlockStore = .init(),
         hotBlockRasterizerStore: HotBlockRasterizerStore,
         hotBlockRasterizeEnabled: Bool = true,
         placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer(),
@@ -106,6 +111,7 @@ public final class RenderEnvironment: Sendable {
         self.videoController = videoController
         self.videoPreparation = videoPreparation
         self.frozenBitmapStore = frozenBitmapStore
+        self.visibleBlockStore = visibleBlockStore
         self.hotBlockRasterizerStore = hotBlockRasterizerStore
         self.hotBlockRasterizeEnabled = hotBlockRasterizeEnabled
         self.placeholderRenderer = placeholderRenderer
@@ -132,6 +138,7 @@ public final class RenderEnvironment: Sendable {
         maxAttached: Int = 3,
         decodeScaleCeiling: CGFloat = 2.0,
         frozenBitmapStore: FrozenBitmapStore = .init(),
+        visibleBlockStore: VisibleBlockStore = .init(),
         hotBlockRasterizerStore: HotBlockRasterizerStore = .init(),
         hotBlockRasterizeEnabled: Bool = true,
         placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer(),
@@ -149,6 +156,7 @@ public final class RenderEnvironment: Sendable {
             videoController: VideoController(videoPreparation: videoPrep, maxAttached: maxAttached),
             videoPreparation: videoPrep,
             frozenBitmapStore: frozenBitmapStore,
+            visibleBlockStore: visibleBlockStore,
             hotBlockRasterizerStore: hotBlockRasterizerStore,
             hotBlockRasterizeEnabled: hotBlockRasterizeEnabled,
             placeholderRenderer: placeholderRenderer,

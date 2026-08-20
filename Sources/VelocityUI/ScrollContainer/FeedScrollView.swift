@@ -709,7 +709,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// `environment.frozenBitmapStore` once it's TEXT and done growing. Returns the item's new
     /// height, its repositioned `[Fragment]` list (so image blocks after a resized text block
     /// still land right), and a `fragment.id -> CGImage` map of every text block's current bitmap
-    /// (unchanged blocks hit `FrozenBitmapStore` verbatim; changed ones are freshly rasterized) —
+    /// (unchanged blocks hit the resident tier first, then `FrozenBitmapStore`; changed ones are freshly rasterized) —
     /// the caller merges this into `synchronousContent` so `RenderCell.applyLayout` paints real
     /// pixels instead of leaving text blank. `nil` when the update can't be optimized SAFELY —
     /// caller falls back to the `_pendingFragmentIndices` full-refresh path.
@@ -740,15 +740,16 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         let trailingIndex = newBlocks.count - 1
         let d = diff(previous: previousBlocks, new: newBlocks)
         let store = environment.frozenBitmapStore
+        let residentStore = environment.visibleBlockStore
 
-        // Measures (+ rasterizes, + freezes into `store` when `persist`) one TEXT block via the
-        // phase-A `freeze(_:)` primitive. `nil` return means `block` is not text — the caller
+        // Measures (+ rasterizes) one active TEXT block via the phase-A `freeze(_:)` primitive
+        // and keeps its artifact in the resident tier. `nil` return means `block` is not text — the caller
         // must bail the whole optimization (image/geometry reuse lives in ImageActor's decode
         // cache, never here — see FreezeState.swift's doc). A fresh, function-scoped `cache`
         // dict is passed on every call so `freeze(_:)` always recomputes here — the PERSISTENT
         // cache is `store`, consulted separately (below) for the genuinely-unchanged case, so
         // this always represents real new work, never a stale hit.
-        func measureAndMaybeFreeze(_ block: Block, persist: Bool) -> (height: CGFloat, bitmap: CGImage?)? {
+        func measureAndMaybeFreeze(_ block: Block) -> (height: CGFloat, bitmap: CGImage?)? {
             guard case .text(let descriptor) = block.fragment.content else { return nil }
             // VelocityUI-x4q0: on seal (fence closes / frontier advances over this block), reuse
             // the composited bitmap the hot-append path already produced instead of a fresh
@@ -761,12 +762,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             if let sealed = environment.hotBlockRasterizerStore.catchUpAndFinalize(
                 block.key, descriptor: descriptor, width: block.width, scale: scale, contentHash: block.contentHash
             ) {
-                if persist {
-                    let pixelW = sealed.size.width * scale
-                    let pixelH = sealed.size.height * scale
-                    let cost = Int((pixelW * pixelH * 4).rounded(.up))
-                    store.store(sealed.image, size: sealed.size, cost: cost, for: block.key)
-                }
+                residentStore.store(sealed.image, size: sealed.size, for: block.key)
                 return (sealed.size.height, sealed.image)
             }
             var localCache: [BlockKey: FreezeState] = [:]
@@ -792,12 +788,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             )
             switch state {
             case .frozen(let size, let bitmap):
-                if persist {
-                    let pixelW = size.width * scale
-                    let pixelH = size.height * scale
-                    let cost = Int((pixelW * pixelH * 4).rounded(.up))
-                    store.store(bitmap, size: size, cost: cost, for: block.key)
-                }
+                residentStore.store(bitmap, size: size, for: block.key)
                 return (size.height, bitmap)
             case .hot:
                 // Rasterization failed on a degenerate size — freeze() intentionally returns
@@ -811,8 +802,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         // VelocityUI-x4q0: the hot-append path for the trailing volatile block — routes through
         // `HotBlockRasterizerStore` for O(appended) cost instead of `measureAndMaybeFreeze`'s
         // O(block size) measure/rasterize. Never calls `store.store(...)` — a still-growing
-        // block is never persisted into `FrozenBitmapStore`, matching today's `persist = false`
-        // for the trailing volatile index.
+        // block is never persisted into `FrozenBitmapStore`; its current artifact remains in the
+        // resident tier until the block leaves the mounted range.
         func measureAndRasterizeHot(_ block: Block) -> (height: CGFloat, bitmap: CGImage?)? {
             guard case .text(let descriptor) = block.fragment.content else { return nil }
             #if canImport(XCTest)
@@ -821,6 +812,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             let result = environment.hotBlockRasterizerStore.append(
                 descriptor, width: block.width, scale: scale, contentHash: block.contentHash, for: block.key
             )
+            if let image = result.image {
+                residentStore.store(image, size: CGSize(width: block.width, height: result.height), for: block.key)
+            }
             return (result.height, result.image)
         }
 
@@ -835,16 +829,21 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                 continue
             }
             if case .text = block.fragment.content {
-                if let size = store.size(for: block.key) {
-                    // bump LRU recency — verbatim reuse — and thread the SAME CGImage
-                    // instance through so the caller paints it without a re-rasterize.
-                    textBitmaps[block.fragment.id] = store.bitmap(for: block.key)
+                if let size = residentStore.size(for: block.key), let bitmap = residentStore.bitmap(for: block.key) {
+                    textBitmaps[block.fragment.id] = bitmap
+                    heights[match.newIndex] = size.height
+                } else if let size = store.size(for: block.key) {
+                    // A cached inactive block becomes resident before a later token can make it
+                    // an LRU victim. The same bitmap instance is painted without re-rasterizing.
+                    let bitmap = store.bitmap(for: block.key)
+                    if let bitmap { residentStore.store(bitmap, size: size, for: block.key) }
+                    textBitmaps[block.fragment.id] = bitmap
                     heights[match.newIndex] = size.height
                 } else {
                     // Self-heal: logically unchanged per diff(), but the store has no entry
                     // yet (first pass through C3 for this block, or it was LRU/pressure-
                     // evicted) — recompute once and (re-)freeze it, same as a finalized tail.
-                    guard let result = measureAndMaybeFreeze(block, persist: true) else { return nil }
+                    guard let result = measureAndMaybeFreeze(block) else { return nil }
                     heights[match.newIndex] = result.height
                     textBitmaps[block.fragment.id] = result.bitmap
                 }
@@ -858,7 +857,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             let isHot = d.hot.contains(i)
             let result = (isHot && environment.hotBlockRasterizeEnabled)
                 ? measureAndRasterizeHot(newBlocks[i])
-                : measureAndMaybeFreeze(newBlocks[i], persist: !isHot)
+                : measureAndMaybeFreeze(newBlocks[i])
             guard let result else { return nil }
             heights[i] = result.height
             textBitmaps[newBlocks[i].fragment.id] = result.bitmap
@@ -867,6 +866,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         if !d.removed.isEmpty {
             let removed = Set(d.removed)
             store.evict(removed)
+            residentStore.evict(removed)
             environment.hotBlockRasterizerStore.evict(removed)
         }
 
@@ -1241,20 +1241,16 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         for index in visibleCells.keys where !keepRange.contains(index) {
             _recycleBuffer.append(index)
         }
-        // VelocityUI-socg C4: bound FrozenBitmapStore to the working range — this is the
-        // RecyclerView "you are told what left, you don't scan" model `evict(_ keysThatLeft:)`
-        // was built for (its own doc). Only pays the `flatBlockKeys` cost for items ACTUALLY
-        // leaving this frame (steady state: `_recycleBuffer` is empty, this is a no-op) — never
-        // a full-window scan. `flatBlockKeys` (not `flatBlocks`) — only `BlockKey`s are needed
-        // here, so there is no reason to build the full `Block`s (contentHash, Fragment, layout)
-        // just to immediately discard everything but the key.
+        // Leaving blocks transfer to the evictable cache instead of being discarded. The resident
+        // tier owns visible artifacts, so this avoids an LRU eviction/re-rasterize loop while a
+        // token stream keeps updating neighboring blocks.
         if !_recycleBuffer.isEmpty {
             var leavingKeys: Set<BlockKey> = []
             for index in _recycleBuffer where index < tables.count && index < items.count {
                 flatBlockKeys(for: tables[index], itemID: items[index].id, into: &leavingKeys)
             }
             if !leavingKeys.isEmpty {
-                environment.frozenBitmapStore.evict(leavingKeys)
+                environment.visibleBlockStore.demote(leavingKeys, to: environment.frozenBitmapStore)
                 // VelocityUI-x4q0: same `leavingKeys` set — a live hot rasterizer's
                 // `NSTextLayoutManager` must not leak when its cell recycles away.
                 environment.hotBlockRasterizerStore.evict(leavingKeys)
@@ -1274,11 +1270,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         // visibleCells[index] == nil gates re-entry) may need repositioning below.
         var didRefineDuringMount = false
 
-        // VelocityUI-socg C4: the entering-window counterpart to the eviction above — declares
-        // freshly-mounted items' blocks as (newly) in-window so FrozenBitmapStore's `window` set
-        // stays accurate for `handleMemoryPressure()`. Only pays `flatBlockKeys`' cost for items
-        // that are ACTUALLY newly mounted this pass (the `if let keptCell` branch below
-        // `continue`s before reaching this), never for already-resident cells.
+        // Keys of newly mounted cells are promoted after this pass. Existing cache entries move
+        // into the resident tier; a cache miss remains a normal pipeline/first-render path.
         var enteringKeys: Set<BlockKey> = []
 
         // Mount newly visible cells.
@@ -1360,7 +1353,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         }
 
         if !enteringKeys.isEmpty {
-            environment.frozenBitmapStore.admit(enteringKeys)
+            environment.visibleBlockStore.promote(enteringKeys, from: environment.frozenBitmapStore)
         }
 
         // A LayoutCache-hit refine above only shifts resolvedFrames for indices AFTER the
