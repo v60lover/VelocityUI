@@ -97,7 +97,8 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         var blocks: [Block] = []
         blocks.reserveCapacity(sealedBlocks.count + hotBlocksState.count)
         for (index, pair) in zip(sealedBlocks + hotBlocksState, sealedBlockIDs + hotBlockIDs).enumerated() {
-            blocks.append(Self.makeBlock(pair.0, itemID: itemID, index: index, blockID: pair.1, width: width))
+            let lifecycle: BlockLifecycle = index < sealedBlocks.count ? .sealed : .hot
+            blocks.append(Self.makeBlock(pair.0, itemID: itemID, index: index, blockID: pair.1, width: width, lifecycle: lifecycle))
         }
         return blocks
     }
@@ -105,12 +106,18 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
     // MARK: - Block construction
 
     private static func makeBlock<ID: Hashable & Sendable>(
-        _ parsed: ParsedMDBlock, itemID: ID, index: Int, blockID: BlockID, width: CGFloat
+        _ parsed: ParsedMDBlock, itemID: ID, index: Int, blockID: BlockID, width: CGFloat,
+        lifecycle: BlockLifecycle
     ) -> Block {
         let descriptor = makeDescriptor(parsed)
         let frame = CGRect(x: 0, y: 0, width: width, height: 0)
         let fragment = Fragment(id: index, blockID: blockID, content: .text(descriptor), frame: frame)
-        return Block(key: BlockKey(itemID: itemID, blockID: blockID), fragment: fragment, layout: ResolvedLayout(totalFrame: frame))
+        return Block(
+            key: BlockKey(itemID: itemID, blockID: blockID),
+            fragment: fragment,
+            layout: ResolvedLayout(totalFrame: frame),
+            lifecycle: lifecycle
+        )
     }
 
     private mutating func reconciledIDs(existing: [BlockID], count: Int) -> [BlockID] {

@@ -198,6 +198,8 @@ public struct TextNode: RenderNode {
     public let content: String
     /// Stable block identity used by parser-created text nodes; excluded from render hashes.
     public let blockID: BlockID?
+    /// Residency supplied by a block producer; excluded from render hashes.
+    public let blockLifecycle: BlockLifecycle
     public let font: VFontDescriptor
     public let color: VColorDescriptor
     public let lineLimit: Int?
@@ -219,10 +221,12 @@ public struct TextNode: RenderNode {
         strikethroughStyle: VUnderlineStyle = .none,
         kerning: CGFloat = 0,
         lineSpacing: CGFloat = 0,
-        blockID: BlockID? = nil
+        blockID: BlockID? = nil,
+        blockLifecycle: BlockLifecycle = .positional
     ) {
         self.content = content
         self.blockID = blockID
+        self.blockLifecycle = blockLifecycle
         self.font = font
         self.color = color
         self.lineLimit = lineLimit
@@ -263,7 +267,7 @@ public struct TextNode: RenderNode {
         TextNode(
             content, font: newFont, color: color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
             underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
-            kerning: kerning, lineSpacing: lineSpacing, blockID: blockID
+            kerning: kerning, lineSpacing: lineSpacing, blockID: blockID, blockLifecycle: blockLifecycle
         )
     }
 
@@ -271,7 +275,7 @@ public struct TextNode: RenderNode {
         TextNode(
             content, font: font, color: color, lineLimit: limit, lineBreakMode: lineBreakMode,
             underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
-            kerning: kerning, lineSpacing: lineSpacing, blockID: blockID
+            kerning: kerning, lineSpacing: lineSpacing, blockID: blockID, blockLifecycle: blockLifecycle
         )
     }
 
@@ -279,7 +283,7 @@ public struct TextNode: RenderNode {
         TextNode(
             content, font: font, color: color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
             underlineStyle: style, strikethroughStyle: strikethroughStyle,
-            kerning: kerning, lineSpacing: lineSpacing, blockID: blockID
+            kerning: kerning, lineSpacing: lineSpacing, blockID: blockID, blockLifecycle: blockLifecycle
         )
     }
 
@@ -287,7 +291,7 @@ public struct TextNode: RenderNode {
         TextNode(
             content, font: font, color: color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
             underlineStyle: underlineStyle, strikethroughStyle: style,
-            kerning: kerning, lineSpacing: lineSpacing, blockID: blockID
+            kerning: kerning, lineSpacing: lineSpacing, blockID: blockID, blockLifecycle: blockLifecycle
         )
     }
 
@@ -295,7 +299,7 @@ public struct TextNode: RenderNode {
         TextNode(
             content, font: font, color: color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
             underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
-            kerning: value, lineSpacing: lineSpacing, blockID: blockID
+            kerning: value, lineSpacing: lineSpacing, blockID: blockID, blockLifecycle: blockLifecycle
         )
     }
 
@@ -303,7 +307,7 @@ public struct TextNode: RenderNode {
         TextNode(
             content, font: font, color: color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
             underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
-            kerning: kerning, lineSpacing: value, blockID: blockID
+            kerning: kerning, lineSpacing: value, blockID: blockID, blockLifecycle: blockLifecycle
         )
     }
 }

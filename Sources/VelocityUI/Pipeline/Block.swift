@@ -69,14 +69,26 @@ public struct BlockKey: Hashable, Sendable {
 
 // MARK: - Block
 
+/// Rendering residency declared by the block producer.
+///
+/// `.positional` preserves the legacy fallback: only the trailing block is treated as hot.
+/// Producers with stable identities should emit `.sealed` or `.hot` directly so moving a block
+/// never changes its residency merely because its array index changed.
+public enum BlockLifecycle: Sendable, Equatable {
+    case sealed
+    case hot
+    case positional
+}
+
 /// One block of an item's ordered content, wrapping existing render vocabulary — no parallel
-/// content enum. A bound item is an ordered `[Block]`; while streaming, every block except the
-/// last is complete and frozen, and the last (`hot`) block may still grow.
+/// content enum. A bound item is an ordered `[Block]`; lifecycle is declared per block rather
+/// than inferred from its position when the producer supports it.
 public struct Block: Sendable {
     public let key: BlockKey
     public let blockID: BlockID?
     public let fragment: Fragment
     public let layout: ResolvedLayout
+    public let lifecycle: BlockLifecycle
 
     /// Cheap content-equality fingerprint for `diff(previous:new:)`. Reuses the layout/appearance
     /// hashes the Flattener already computes on `TextDescriptor`/`ImageDescriptor` (the same
@@ -87,11 +99,17 @@ public struct Block: Sendable {
     /// block-level content diff).
     public let contentHash: Int
 
-    public init(key: BlockKey, fragment: Fragment, layout: ResolvedLayout) {
+    public init(
+        key: BlockKey,
+        fragment: Fragment,
+        layout: ResolvedLayout,
+        lifecycle: BlockLifecycle = .positional
+    ) {
         self.key = key
         self.blockID = fragment.blockID
         self.fragment = fragment
         self.layout = layout
+        self.lifecycle = lifecycle
         switch fragment.content {
         case .text(let descriptor):
             self.contentHash = Block.combineHash(descriptor.layoutHash, descriptor.appearanceHash)

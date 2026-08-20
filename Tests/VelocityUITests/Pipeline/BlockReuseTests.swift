@@ -46,6 +46,24 @@ final class BlockReuseTests: XCTestCase {
         return Block(key: BlockKey(itemID: itemID, index: index), fragment: fragment, layout: ResolvedLayout(totalFrame: fragment.frame))
     }
 
+    private func identifiedTextBlock(
+        id: String, index: Int, content: String, lifecycle: BlockLifecycle
+    ) -> Block {
+        let blockID = BlockID(id)
+        let fragment = Fragment(
+            id: index,
+            blockID: blockID,
+            content: .text(textDescriptor(content)),
+            frame: CGRect(x: 0, y: 0, width: 300, height: 20)
+        )
+        return Block(
+            key: BlockKey(itemID: "msg", blockID: blockID),
+            fragment: fragment,
+            layout: ResolvedLayout(totalFrame: fragment.frame),
+            lifecycle: lifecycle
+        )
+    }
+
     private func imageBlock(itemID: String = "msg", index: Int, hash: Int) -> Block {
         let desc = ImageDescriptor(url: nil, aspectRatio: 1, contentMode: 0, cornerRadius: 0, layoutHash: hash, appearanceHash: hash)
         let frame = CGRect(x: 0, y: 0, width: 100, height: 100)
@@ -216,6 +234,97 @@ final class BlockReuseTests: XCTestCase {
         XCTAssertEqual(d.unchanged, [0])
         XCTAssertEqual(d.sealedChanged, [])
         XCTAssertEqual(d.volatile, 1..<2)
+    }
+
+    // MARK: - VelocityUI-mpz0: identity-aware lifecycle diff
+
+    func testIdentityDiff_InsertBeforeHotParagraph_MovesAndReusesIt() {
+        let previous = [
+            identifiedTextBlock(id: "paragraph", index: 0, content: "sealed", lifecycle: .sealed),
+            identifiedTextBlock(id: "hot", index: 1, content: "growing", lifecycle: .hot),
+        ]
+        let next = [
+            identifiedTextBlock(id: "title", index: 0, content: "inserted", lifecycle: .sealed),
+            identifiedTextBlock(id: "paragraph", index: 1, content: "sealed", lifecycle: .sealed),
+            identifiedTextBlock(id: "hot", index: 2, content: "growing", lifecycle: .hot),
+        ]
+
+        let result = diff(previous: previous, new: next)
+
+        XCTAssertEqual(result.inserted, [0])
+        XCTAssertEqual(result.moved, [BlockMatch(previousIndex: 0, newIndex: 1), BlockMatch(previousIndex: 1, newIndex: 2)])
+        XCTAssertEqual(result.updated, [])
+        XCTAssertEqual(result.volatile, 2..<3)
+    }
+
+    func testIdentityDiff_MovePreservesKeyAndExplicitLifecycle() {
+        let previous = [
+            identifiedTextBlock(id: "a", index: 0, content: "A", lifecycle: .sealed),
+            identifiedTextBlock(id: "hot", index: 1, content: "live", lifecycle: .hot),
+        ]
+        let next = [
+            identifiedTextBlock(id: "hot", index: 0, content: "live", lifecycle: .hot),
+            identifiedTextBlock(id: "a", index: 1, content: "A", lifecycle: .sealed),
+        ]
+
+        let result = diff(previous: previous, new: next)
+
+        XCTAssertEqual(result.moved, [BlockMatch(previousIndex: 1, newIndex: 0), BlockMatch(previousIndex: 0, newIndex: 1)])
+        XCTAssertEqual(next[0].key, previous[1].key)
+        XCTAssertEqual(next[0].lifecycle, .hot)
+    }
+
+    func testIdentityDiff_SameIDWithNewContentIsUpdated() {
+        let previous = [identifiedTextBlock(id: "paragraph", index: 0, content: "old", lifecycle: .sealed)]
+        let next = [identifiedTextBlock(id: "paragraph", index: 0, content: "new", lifecycle: .sealed)]
+
+        let result = diff(previous: previous, new: next)
+
+        XCTAssertEqual(result.updated, [0])
+        XCTAssertTrue(result.reused.isEmpty)
+        XCTAssertTrue(result.moved.isEmpty)
+    }
+
+    func testIdentityDiff_RemovedIDIsReportedOnce() {
+        let previous = [
+            identifiedTextBlock(id: "keep", index: 0, content: "A", lifecycle: .sealed),
+            identifiedTextBlock(id: "remove", index: 1, content: "B", lifecycle: .sealed),
+        ]
+        let next = [identifiedTextBlock(id: "keep", index: 0, content: "A", lifecycle: .sealed)]
+
+        let result = diff(previous: previous, new: next)
+
+        XCTAssertEqual(result.removed, [previous[1].key])
+    }
+
+    func testIdentityDiff_LifecycleIsPerBlockWhenSealedBlockFollowsHotBlock() {
+        let previous = [identifiedTextBlock(id: "hot", index: 0, content: "live", lifecycle: .hot)]
+        let next = [
+            identifiedTextBlock(id: "hot", index: 0, content: "live", lifecycle: .hot),
+            identifiedTextBlock(id: "non-text-placeholder", index: 1, content: "fixed", lifecycle: .sealed),
+        ]
+
+        let result = diff(previous: previous, new: next)
+
+        XCTAssertEqual(result.hot, [0])
+        XCTAssertEqual(result.inserted, [1])
+        XCTAssertFalse(result.hot.contains(1))
+    }
+
+    func testIdentityDiff_DuplicateOrMissingIDsUseConservativePositionalFallback() {
+        let duplicate = BlockID("duplicate")
+        let fragment = textFragment(index: 0, content: "same")
+        let duplicated = Block(
+            key: BlockKey(itemID: "msg", blockID: duplicate),
+            fragment: Fragment(id: 0, blockID: duplicate, content: fragment.content, frame: fragment.frame),
+            layout: .placeholder,
+            lifecycle: .sealed
+        )
+        let result = diff(previous: [duplicated, duplicated], new: [duplicated, duplicated])
+
+        XCTAssertEqual(result.unchanged, [0])
+        XCTAssertTrue(result.moved.isEmpty)
+        XCTAssertTrue(result.removed.isEmpty)
     }
 
     func testDiff_NewBlockSpawnedBeforeFrontier_DetectsSealedChanged() {

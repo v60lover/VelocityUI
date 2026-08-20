@@ -17,9 +17,11 @@ extension IncrementalMarkdownParser {
     /// already recognizes, so unchanged blocks reuse `FrozenBitmapStore` and only new/changed
     /// blocks re-measure per streaming update.
     public var renderNodes: [any RenderNode] {
-        zip(sealedBlocks + hotBlocksState, sealedBlockIDs + hotBlockIDs).map { parsed, blockID in
+        zip(sealedBlocks + hotBlocksState, sealedBlockIDs + hotBlockIDs).enumerated().map { index, pair in
+            let (parsed, blockID) = pair
             let styled = Self.style(parsed)
-            return TextNode(styled.content, font: styled.font, blockID: blockID)
+            let lifecycle: BlockLifecycle = index < sealedBlocks.count ? .sealed : .hot
+            return TextNode(styled.content, font: styled.font, blockID: blockID, blockLifecycle: lifecycle)
         }
     }
 }

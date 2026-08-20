@@ -308,6 +308,8 @@ public struct NodeTable: Sendable {
     public let appearanceHash: Int
     /// Optional stable identity for each flattened node, indexed identically to `nodes`.
     public let blockIDs: [BlockID?]
+    /// Per-node lifecycle metadata. `.positional` preserves legacy trailing-hot behavior.
+    public let blockLifecycles: [BlockLifecycle]
 
     /// Parallel array of per-node `.frame()` specs, indexed identically to `nodes`.
     /// `nil` (not an all-`.unspecified` array) whenever no node in the tree was framed —
@@ -335,7 +337,8 @@ public struct NodeTable: Sendable {
         layoutHash: Int,
         appearanceHash: Int,
         frames: [FrameSpec]? = nil,
-        blockIDs: [BlockID?]? = nil
+        blockIDs: [BlockID?]? = nil,
+        blockLifecycles: [BlockLifecycle]? = nil
     ) {
         self._itemID = AnyHashable(itemID)
         self.nodes = nodes
@@ -344,6 +347,7 @@ public struct NodeTable: Sendable {
         self.appearanceHash = appearanceHash
         self.frames = frames
         self.blockIDs = NodeTable.sanitizedBlockIDs(blockIDs, nodeCount: nodes.count)
+        self.blockLifecycles = NodeTable.sanitizedBlockLifecycles(blockLifecycles, nodeCount: nodes.count)
         (childRanges, childIndices) = NodeTable.buildChildIndex(parentIndices: parentIndices)
     }
 
@@ -366,6 +370,11 @@ public struct NodeTable: Sendable {
     public func blockID(at i: Int) -> BlockID? {
         guard i >= 0, i < blockIDs.count else { return nil }
         return blockIDs[i]
+    }
+
+    public func blockLifecycle(at i: Int) -> BlockLifecycle {
+        guard i >= 0, i < blockLifecycles.count else { return .positional }
+        return blockLifecycles[i]
     }
 
     // MARK: - Private
@@ -405,6 +414,15 @@ public struct NodeTable: Sendable {
             for index in proposed.indices where proposed[index].map(duplicateSet.contains) == true {
                 proposed[index] = nil
             }
+        }
+        return proposed
+    }
+
+    private static func sanitizedBlockLifecycles(
+        _ proposed: [BlockLifecycle]?, nodeCount: Int
+    ) -> [BlockLifecycle] {
+        guard let proposed, proposed.count == nodeCount else {
+            return [BlockLifecycle](repeating: .positional, count: nodeCount)
         }
         return proposed
     }

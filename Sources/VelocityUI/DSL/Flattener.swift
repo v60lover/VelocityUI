@@ -29,6 +29,7 @@ public func flatten<ID: Hashable & Sendable>(
     // to `nil` and NodeTable never allocates a [FrameSpec] for unframed cells.
     var frameByIndex: [Int: FrameSpec] = [:]
     var blockIDByIndex: [Int: BlockID] = [:]
+    var blockLifecycleByIndex: [Int: BlockLifecycle] = [:]
     // Set the first time a TextNode is visited. Gates whether contentSizeCategory folds into
     // the returned NodeTable's top-level layoutHash (see the call site below for why this
     // matters: unconditionally folding it in would make classify() misclassify category-blind,
@@ -86,6 +87,7 @@ public func flatten<ID: Hashable & Sendable>(
         case let n as TextNode:
             sawText = true
             blockID = blockID ?? n.blockID
+            if n.blockLifecycle != .positional { blockLifecycleByIndex[myIndex] = n.blockLifecycle }
             nodes.append(.text(TextDescriptor(
                 content: n.content, font: n.font, color: n.color,
                 lineLimit: n.lineLimit, lineBreakMode: n.lineBreakMode.rawValue,
@@ -117,6 +119,7 @@ public func flatten<ID: Hashable & Sendable>(
         ? nil
         : (0..<nodes.count).map { frameByIndex[$0] ?? .unspecified }
     let blockIDs = (0..<nodes.count).map { blockIDByIndex[$0] }
+    let blockLifecycles = (0..<nodes.count).map { blockLifecycleByIndex[$0] ?? .positional }
 
     // sawText gate: a category-blind (pure-image/spacer/container) tree must keep byte-identical
     // layoutHash across categories — folding it in unconditionally would make classify()'s
@@ -132,7 +135,8 @@ public func flatten<ID: Hashable & Sendable>(
         layoutHash: tableLayoutHash,
         appearanceHash: root.appearanceHash,
         frames: frames,
-        blockIDs: blockIDs
+        blockIDs: blockIDs,
+        blockLifecycles: blockLifecycles
     )
 }
 

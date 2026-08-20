@@ -737,14 +737,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
               !newBlocks.isEmpty
         else { return nil }
 
-        // frontier: new.count - 1 — the pre-split NodeTable path has no incremental-parser
-        // sealed/hot contract of its own, so every block except the trailing one is treated as
-        // sealed, matching the original single-hot-tail model EXCEPT that the trailing block is
-        // no longer eligible for verbatim frozen-store reuse even when it is byte-identical to
-        // `previous` — it always lands in `volatile` and gets re-measured, a safe-direction but
-        // real divergence (BlockDiff.swift's `diff(previous:new:frontier:)` doc explains why).
         let trailingIndex = newBlocks.count - 1
-        let d = diff(previous: previousBlocks, new: newBlocks, frontier: trailingIndex)
+        let d = diff(previous: previousBlocks, new: newBlocks)
         let store = environment.frozenBitmapStore
 
         // Measures (+ rasterizes, + freezes into `store` when `persist`) one TEXT block via the
@@ -832,56 +826,48 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
         var heights = [CGFloat](repeating: 0, count: newBlocks.count)
         var textBitmaps: [Int: CGImage] = [:]
-        for i in d.unchanged {
-            let block = newBlocks[i]
+        for match in d.reused + d.moved {
+            let block = newBlocks[match.newIndex]
+            if d.hot.contains(match.newIndex) {
+                guard let result = measureAndRasterizeHot(block) else { return nil }
+                heights[match.newIndex] = result.height
+                textBitmaps[block.fragment.id] = result.bitmap
+                continue
+            }
             if case .text = block.fragment.content {
                 if let size = store.size(for: block.key) {
                     // bump LRU recency — verbatim reuse — and thread the SAME CGImage
                     // instance through so the caller paints it without a re-rasterize.
                     textBitmaps[block.fragment.id] = store.bitmap(for: block.key)
-                    heights[i] = size.height
+                    heights[match.newIndex] = size.height
                 } else {
                     // Self-heal: logically unchanged per diff(), but the store has no entry
                     // yet (first pass through C3 for this block, or it was LRU/pressure-
                     // evicted) — recompute once and (re-)freeze it, same as a finalized tail.
                     guard let result = measureAndMaybeFreeze(block, persist: true) else { return nil }
-                    heights[i] = result.height
+                    heights[match.newIndex] = result.height
                     textBitmaps[block.fragment.id] = result.bitmap
                 }
             } else {
                 // Non-text, unchanged: trust the previous real fragment height directly —
                 // never frozen/measured here (image/geometry reuse lives in ImageActor).
-                heights[i] = previousFragments[i].frame.height
+                heights[match.newIndex] = previousFragments[match.previousIndex].frame.height
             }
         }
-        // `sealedChanged`: every index here is < frontier (== trailingIndex for this pre-split
-        // caller) by construction, so it always closed out this update — always persist.
-        // `volatile`: the still-growing region; persist only if a later index hasn't yet become
-        // the new trailing block ("persist = i != trailingIndex", applied uniformly to every
-        // non-unchanged index). Diverges from the original single-hot-tail behavior only for the
-        // trailing block: it no longer gets verbatim-frozen-store reuse even on a byte-for-byte
-        // match with `previous` — always lands in `volatile` and gets re-measured. Safe-direction
-        // (never stale), real divergence — see BlockDiff.swift's doc.
-        for i in d.sealedChanged {
-            guard let result = measureAndMaybeFreeze(newBlocks[i], persist: true) else { return nil }
-            heights[i] = result.height
-            textBitmaps[newBlocks[i].fragment.id] = result.bitmap
-        }
-        for i in d.volatile {
-            let persist = i != trailingIndex
-            // VelocityUI-x4q0: the trailing volatile index is always the still-growing hot block —
-            // route it through the O(appended) hot-append path instead of a full measure/rasterize.
-            // Every other volatile index (today-unreachable, kept for robustness against a future
-            // multi-index `volatile` range) keeps the existing `measureAndMaybeFreeze` path.
-            // `environment.hotBlockRasterizeEnabled` (VelocityUI-xxf7) exists solely so
-            // BenchmarkHost's `stream` scenario can run the same token stream ON vs OFF — every
-            // production caller leaves it at its `true` default.
-            let result = (i == trailingIndex && environment.hotBlockRasterizeEnabled)
+        for i in d.updated + d.inserted {
+            let isHot = d.hot.contains(i)
+            let result = (isHot && environment.hotBlockRasterizeEnabled)
                 ? measureAndRasterizeHot(newBlocks[i])
-                : measureAndMaybeFreeze(newBlocks[i], persist: persist)
+                : measureAndMaybeFreeze(newBlocks[i], persist: !isHot)
             guard let result else { return nil }
             heights[i] = result.height
             textBitmaps[newBlocks[i].fragment.id] = result.bitmap
+        }
+
+        if !d.removed.isEmpty {
+            let removed = Set(d.removed)
+            store.evict(removed)
+            environment.hotBlockRasterizerStore.evict(removed)
         }
 
         var cursor: CGFloat = 0
@@ -934,7 +920,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             let fragment = Fragment(id: nodeIndex, blockID: blockID, content: content, frame: frame)
             let key = blockID.map { BlockKey(itemID: itemID, blockID: $0) }
                 ?? BlockKey(itemID: itemID, index: position)
-            blocks.append(Block(key: key, fragment: fragment, layout: ResolvedLayout(totalFrame: frame)))
+            blocks.append(Block(
+                key: key,
+                fragment: fragment,
+                layout: ResolvedLayout(totalFrame: frame),
+                lifecycle: table.blockLifecycle(at: nodeIndex)
+            ))
         }
         return (blocks, vstackDescriptor.spacing)
     }
