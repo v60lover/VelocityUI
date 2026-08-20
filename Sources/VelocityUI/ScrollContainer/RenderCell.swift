@@ -269,12 +269,9 @@ public final class RenderCell {
                 mediaFragmentIDs.insert(fragment.id)
             } else if case .text = fragment.content {
                 // Text has no async delivery path (unlike images, no applyContent/fade-in) —
-                // the rasterized bitmap is either available now via synchronousContent (the
-                // VelocityUI-socg C3 in-place path, which always freezes+rasterizes before
-                // calling applyLayout) or it isn't produced yet (no general first-mount
-                // rasterizer wired — VelocityUI-3z4s). Set unconditionally (nil when absent) so
-                // a sublayer reused across a text->other->text reclassification within the same
-                // item never shows a stale bitmap from a previous fragment at this id.
+                // the pipeline or C3 in-place path must provide its bitmap synchronously. Set
+                // unconditionally so a text cache miss cannot retain pixels from a previous
+                // fragment after a text->other->text reclassification at the same id.
                 sub.contents = synchronousContent[fragment.id]
                 sub.backgroundColor = nil
                 mediaFragmentIDs.remove(fragment.id)

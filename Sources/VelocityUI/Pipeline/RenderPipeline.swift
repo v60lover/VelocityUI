@@ -38,6 +38,27 @@ private func prefetchRange(leadingIndex: Int, ahead: Int, behind: Int, count: In
     return start..<max(start, end)
 }
 
+private struct TextBitmapArtifact: @unchecked Sendable {
+    let key: BlockKey
+    let image: CGImage
+    let size: CGSize
+}
+
+private nonisolated func rasterizeTextArtifacts(
+    table: NodeTable,
+    fragments: [Fragment],
+    scale: CGFloat
+) -> [TextBitmapArtifact] {
+    let itemID = table.itemID
+    return fragments.enumerated().compactMap { position, fragment in
+        guard case .text(let descriptor) = fragment.content,
+              let image = rasterizeText(descriptor, size: fragment.frame.size, scale: scale)
+        else { return nil }
+        let key = BlockKey(boxedItemID: itemID, index: position, blockID: fragment.blockID)
+        return TextBitmapArtifact(key: key, image: image, size: fragment.frame.size)
+    }
+}
+
 /// Prefetch actor — runs off MainActor, writes back to WorkingRange via MainActor.run.
 /// Called by the scroll container on leading-index boundary crossings (not every frame).
 public actor RenderPipeline {
@@ -60,6 +81,7 @@ public actor RenderPipeline {
     private let textPool: TextMeasurementPool
     private let layoutCache: LayoutCache
     private let imageActor: ImageActor
+    private let frozenBitmapStore: FrozenBitmapStore
 
     private let prefetchAhead: Int
     private let prefetchBehind: Int
@@ -85,12 +107,14 @@ public actor RenderPipeline {
         textPool: TextMeasurementPool,
         layoutCache: LayoutCache,
         imageActor: ImageActor,
+        frozenBitmapStore: FrozenBitmapStore = FrozenBitmapStore(),
         prefetchAhead: Int = 10,
         prefetchBehind: Int = 3
     ) {
         self.textPool = textPool
         self.layoutCache = layoutCache
         self.imageActor = imageActor
+        self.frozenBitmapStore = frozenBitmapStore
         self.prefetchAhead = prefetchAhead
         self.prefetchBehind = prefetchBehind
     }
@@ -102,6 +126,7 @@ public actor RenderPipeline {
         self.textPool = TextMeasurementPool()
         self.layoutCache = LayoutCache()
         self.imageActor = ImageActor()
+        self.frozenBitmapStore = FrozenBitmapStore()
         self.prefetchAhead = 60
         self.prefetchBehind = 3
     }
@@ -156,6 +181,7 @@ public actor RenderPipeline {
         let cache = layoutCache
         let pool = textPool
         let actor = imageActor
+        let bitmapStore = frozenBitmapStore
         let capturedScale = scale
         let ahead = prefetchAhead
         let behind = prefetchBehind
@@ -180,34 +206,45 @@ public actor RenderPipeline {
             // Parallel: check LayoutCache first; fall back to measureNode on a miss.
             // The for-await consumer fires each item's image prefetches as fire-and-forget
             // Tasks immediately when that item's layout resolves — cache-hit items dispatch
-            // before cold-measure siblings finish. Prefetch Tasks are unstructured so commit
-            // latency stays on the measure-only critical path, not gated on network+decode.
-            var results: [(Int, ResolvedLayout, [Fragment])] = []
+            // before cold-measure siblings finish. Text rasterization completes before commit
+            // so the first mount has pixels; network/decode prefetch remains unstructured and
+            // does not gate that commit.
+            var results: [(Int, ResolvedLayout, [Fragment], [TextBitmapArtifact])] = []
             var localHits = 0
             var spawnedPrefetches: [Task<Void, Never>] = []
-            await withTaskGroup(of: (Int, ResolvedLayout, [Fragment], Bool).self) { group in
+            await withTaskGroup(of: (Int, ResolvedLayout, [Fragment], [TextBitmapArtifact], Bool).self) { group in
                 for index in needed {
                     let table = tables[index]
                     let key = CacheKey(layoutHash: table.layoutHash, width: availableWidth)
                     group.addTask {
                         if let entry = await cache.get(key) {
-                            return (index, entry.layout, entry.fragments, true)
+                            let artifacts = rasterizeTextArtifacts(
+                                table: table,
+                                fragments: entry.fragments,
+                                scale: capturedScale
+                            )
+                            return (index, entry.layout, entry.fragments, artifacts, true)
                         }
                         // Guard before the expensive path — exits quickly on cancellation.
-                        guard !Task.isCancelled else { return (index, .placeholder, [], false) }
+                        guard !Task.isCancelled else { return (index, .placeholder, [], [], false) }
                         let layout = await measureNode(
                             table, nodeIndex: 0,
                             width: availableWidth,
                             textPool: pool
                         )
                         let fragments = extractFragments(table: table, layout: layout)
+                        let artifacts = rasterizeTextArtifacts(
+                            table: table,
+                            fragments: fragments,
+                            scale: capturedScale
+                        )
                         await cache.set(CellEntry(layout: layout, fragments: fragments), for: key)
-                        return (index, layout, fragments, false)
+                        return (index, layout, fragments, artifacts, false)
                     }
                 }
                 // Consume results in completion order; spawn prefetch immediately per item.
                 // Cancelled results (isHit=false, fragments=[]) are skipped without spawning.
-                for await (i, layout, fragments, isHit) in group {
+                for await (i, layout, fragments, artifacts, isHit) in group {
                     guard !Task.isCancelled else { continue }
                     for fragment in fragments {
                         guard case .image(let d) = fragment.content, let url = d.url else { continue }
@@ -247,7 +284,7 @@ public actor RenderPipeline {
                         ))
                     }
                     if isHit { localHits += 1 }
-                    results.append((i, layout, fragments))
+                    results.append((i, layout, fragments, artifacts))
                 }
             }
             // Outer guard prevents any commit from a superseded prefetch. Cancelled subtasks
@@ -259,8 +296,19 @@ public actor RenderPipeline {
 
             cacheHitCount += localHits
 
+            for (_, _, _, artifacts) in results {
+                for artifact in artifacts {
+                    bitmapStore.store(
+                        artifact.image,
+                        size: artifact.size,
+                        cost: artifact.image.bytesPerRow * artifact.image.height,
+                        for: artifact.key
+                    )
+                }
+            }
+
             await MainActor.run {
-                for (i, layout, fragments) in results {
+                for (i, layout, fragments, _) in results {
                     workingRange.commit(layout, fragments, at: i)
                 }
             }

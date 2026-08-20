@@ -63,7 +63,6 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// still yields exactly one `itemsDidChange` call.
     public var items: [Item] = [] {
         didSet {
-            print("new items \(items)")
             if _pendingItemsDiffBase == nil {
                 _pendingItemsDiffBase = oldValue
             }
@@ -323,6 +322,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             textPool: environment.textPool,
             layoutCache: environment.layoutCache,
             imageActor: environment.imageActor,
+            frozenBitmapStore: environment.frozenBitmapStore,
             prefetchAhead: prefetchAheadCount,
             prefetchBehind: prefetchBehindCount
         )
@@ -440,7 +440,6 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     // MARK: - Items change
 
     private func itemsDidChange(from oldItems: [Item]) {
-        print("items did change")
         // Cleared unconditionally, regardless of call site (the `items` didSet's deferred drain
         // in `layoutSubviews`, or a direct call like `handleContentSizeCategoryChange`'s) — any
         // call fully resyncs `snapshot`/`tables` to the CURRENT `items`, so a pending marker from
@@ -547,7 +546,6 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         var tookInPlaceFastPath = false
 
         if needsFullInvalidation {
-            print("needs full invalidation")
             // reuseDecision(oldID:newID:) (Pipeline/ReuseDecision.swift, VelocityUI-0wi) gates recycling
             // here instead of the old unconditional pool-return of every visible cell. `survivors`
             // (built above) already guarantees every prevIdx in `survivorByPrevIdx` is bound to the
@@ -612,7 +610,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                         // that makes FrozenBitmapStore's cached bitmaps actually paint). Fragment
                         // ids never collide across content kinds within one item's NodeTable, so
                         // a plain overwrite-merge is safe — the two maps are disjoint by key.
-                        var syncMap = buildSyncMap(for: result.fragments)
+                        var syncMap = buildSyncMap(for: result.fragments, itemID: inputs.newTable.itemID)
                         for (id, bitmap) in result.textBitmaps { syncMap[id] = bitmap }
                         let entering = cell.updateBlockViewport(
                             fragments: result.fragments,
@@ -824,8 +822,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
         var heights = [CGFloat](repeating: 0, count: newBlocks.count)
         var textBitmaps: [Int: CGImage] = [:]
+        var resolvedIndices = Set<Int>()
         for match in d.reused + d.moved {
             let block = newBlocks[match.newIndex]
+            resolvedIndices.insert(match.newIndex)
             if d.hot.contains(match.newIndex) {
                 guard let result = measureAndRasterizeHot(block) else { return nil }
                 heights[match.newIndex] = result.height
@@ -833,7 +833,19 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                 continue
             }
             if case .text = block.fragment.content {
-                if let size = residentStore.size(for: block.key), let bitmap = residentStore.bitmap(for: block.key) {
+                if case .text(let descriptor) = block.fragment.content,
+                   let sealed = environment.hotBlockRasterizerStore.catchUpAndFinalize(
+                       block.key,
+                       descriptor: descriptor,
+                       width: block.width,
+                       scale: scale,
+                       contentHash: block.contentHash
+                   ) {
+                    residentStore.store(sealed.image, size: sealed.size, for: block.key)
+                    textBitmaps[block.fragment.id] = sealed.image
+                    heights[match.newIndex] = sealed.size.height
+                } else if let size = residentStore.size(for: block.key),
+                          let bitmap = residentStore.bitmap(for: block.key) {
                     textBitmaps[block.fragment.id] = bitmap
                     heights[match.newIndex] = size.height
                 } else if let size = store.size(for: block.key) {
@@ -858,8 +870,19 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             }
         }
         for i in d.updated + d.inserted {
+            resolvedIndices.insert(i)
             let isHot = d.hot.contains(i)
             let result = (isHot && environment.hotBlockRasterizeEnabled)
+                ? measureAndRasterizeHot(newBlocks[i])
+                : measureAndMaybeFreeze(newBlocks[i])
+            guard let result else { return nil }
+            heights[i] = result.height
+            textBitmaps[newBlocks[i].fragment.id] = result.bitmap
+        }
+        // Positional fallback exposes the volatile tail only through `hot`; unlike the
+        // identity-aware path, it does not also classify that index as updated or reused.
+        for i in d.hot where !resolvedIndices.contains(i) {
+            let result = environment.hotBlockRasterizeEnabled
                 ? measureAndRasterizeHot(newBlocks[i])
                 : measureAndMaybeFreeze(newBlocks[i])
             guard let result else { return nil }
@@ -879,7 +902,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         fragments.reserveCapacity(newBlocks.count)
         for (i, block) in newBlocks.enumerated() {
             let frame = CGRect(x: 0, y: cursor, width: width, height: heights[i])
-            fragments.append(Fragment(id: block.fragment.id, content: block.fragment.content, frame: frame))
+            fragments.append(Fragment(
+                id: block.fragment.id,
+                blockID: block.blockID,
+                content: block.fragment.content,
+                frame: frame
+            ))
             cursor += heights[i]
             if i < trailingIndex { cursor += spacing }
         }
@@ -1038,7 +1066,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         if delta != 0 { contentSize.height += delta }
         cell.layer.frame = resolvedFrames[lastIdx]
 
-        var syncMap = buildSyncMap(for: result.fragments)
+        var syncMap = buildSyncMap(for: result.fragments, itemID: newTable.itemID)
         for (id, bitmap) in result.textBitmaps { syncMap[id] = bitmap }
         let entering = cell.updateBlockViewport(
             fragments: result.fragments,
@@ -1156,7 +1184,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             // Check visibleCells first so the set is not mutated when no cell is present.
             if let cell = visibleCells[index], _pendingFragmentIndices.remove(index) != nil {
                 cell.layer.frame = resolvedFrames[index]
-                let syncMap = buildSyncMap(for: entry.fragments)
+                let syncMap = buildSyncMap(for: entry.fragments, itemID: tables[index].itemID)
                 let entering = cell.updateBlockViewport(
                     fragments: entry.fragments,
                     viewportInCell: blockViewport(for: cell.layer.frame),
@@ -1301,7 +1329,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                     layer.addSublayer(keptCell.layer)
                 }
                 if let entry = workingRange.entry(at: index) {
-                    let syncMap = buildSyncMap(for: entry.fragments)
+                    let syncMap = buildSyncMap(for: entry.fragments, itemID: tables[index].itemID)
                     let entering = keptCell.updateBlockViewport(
                         viewportInCell: blockViewport(for: keptCell.layer.frame),
                         synchronousContent: syncMap
@@ -1323,7 +1351,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
             if let entry = workingRange.entry(at: index) {
                 cell.layer.frame = frame
-                let syncMap = buildSyncMap(for: entry.fragments)
+                let syncMap = buildSyncMap(for: entry.fragments, itemID: table.itemID)
                 let entering = cell.updateBlockViewport(
                     fragments: entry.fragments,
                     viewportInCell: blockViewport(for: frame),
@@ -1360,7 +1388,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                 }
 
                 cell.layer.frame = mountFrame
-                let syncMap = buildSyncMap(for: entry.fragments)
+                let syncMap = buildSyncMap(for: entry.fragments, itemID: table.itemID)
                 let entering = cell.updateBlockViewport(
                     fragments: entry.fragments,
                     viewportInCell: blockViewport(for: mountFrame),
@@ -1569,22 +1597,46 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         }
     }
 
-    /// Probes the image cache synchronously for each image fragment with a non-nil URL.
-    /// Returns a map from fragment.id → CGImage for cache hits only; misses (including
-    /// in-flight decodes) are excluded — callers fall back to spawnMediaFetches for those.
+    /// Collects synchronously available image and text pixels for a mounted item. Text artifacts
+    /// are retained in the resident tier on a cache hit so viewport reconciliation cannot clear them.
     ///
     /// Scale caveat: if preload ran at a different displayScale (e.g. scale 1 in tests,
     /// scale 3 in production), cachedImage returns nil and the fragment is excluded from
     /// the map, silently falling back to the async path. Same constraint as image().
-    private func buildSyncMap(for fragments: [Fragment]) -> [Int: CGImage] {
+    private func buildSyncMap(for fragments: [Fragment], itemID: AnyHashable) -> [Int: CGImage] {
         let imageActor = environment.imageActor
+        let residentStore = environment.visibleBlockStore
+        let frozenStore = environment.frozenBitmapStore
         let scale = max(1, traitCollection.displayScale)
         var map: [Int: CGImage] = [:]
-        for fragment in fragments {
-            guard case .image(let d) = fragment.content, let url = d.url else { continue }
-            if let img = imageActor.cachedImage(for: url, targetSize: fragment.frame.size,
-                                                cornerRadius: d.cornerRadius, scale: scale) {
-                map[fragment.id] = img
+        for (position, fragment) in fragments.enumerated() {
+            switch fragment.content {
+            case .image(let descriptor):
+                guard let url = descriptor.url else { continue }
+                if let image = imageActor.cachedImage(
+                    for: url,
+                    targetSize: fragment.frame.size,
+                    cornerRadius: descriptor.cornerRadius,
+                    scale: scale
+                ) {
+                    map[fragment.id] = image
+                }
+            case .text:
+                let key = BlockKey(
+                    boxedItemID: itemID,
+                    index: position,
+                    blockID: fragment.blockID
+                )
+                if let image = residentStore.bitmap(for: key) {
+                    map[fragment.id] = image
+                } else if let size = frozenStore.size(for: key),
+                          let image = frozenStore.bitmap(for: key) {
+                    residentStore.store(image, size: size, for: key)
+                    frozenStore.evict([key])
+                    map[fragment.id] = image
+                }
+            case .geometry:
+                continue
             }
         }
         return map

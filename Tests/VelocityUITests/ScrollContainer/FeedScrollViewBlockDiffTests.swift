@@ -129,25 +129,24 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
         await waitForWorkingRangeCommit(feed, index: 0)
 
         let key0 = BlockKey(itemID: 0, index: 0)
-        guard let sizeAfterFreeze = feed.renderEnvironment.frozenBitmapStore.size(for: key0) else {
-            return XCTFail("block0 must be frozen into FrozenBitmapStore once it closes out")
+        guard let sizeAfterFreeze = feed.renderEnvironment.visibleBlockStore.size(for: key0) else {
+            return XCTFail("block0 must remain resident once it closes out while still visible")
         }
 
         let measureCountAfterRound1 = feed._blockDiffMeasureCallCount
         let rasterizeCountAfterRound1 = feed._blockDiffRasterizeCallCount
         let hotAppendCountAfterRound1 = feed._blockDiffHotAppendCallCount
 
-        // PIXELS, not just the cache: block0's frozen bitmap must actually be on screen — a
-        // sublayer's .contents must be the EXACT CGImage instance FrozenBitmapStore holds for
-        // key0, not merely a cache entry nothing ever reads (VelocityUI-socg C3 activation).
-        guard let expectedBlock0Bitmap = feed.renderEnvironment.frozenBitmapStore.bitmap(for: key0) else {
-            return XCTFail("block0 must have a cached bitmap once frozen")
+        // PIXELS, not just residency: block0's bitmap must actually be on screen — a sublayer's
+        // contents must be the exact CGImage instance the visible tier holds for key0.
+        guard let expectedBlock0Bitmap = feed.renderEnvironment.visibleBlockStore.bitmap(for: key0) else {
+            return XCTFail("block0 must have a resident bitmap once sealed")
         }
         let paintedAfterRound1 = feed._debugPaintedBitmaps(at: 0)
         XCTAssertEqual(paintedAfterRound1.count, 2,
             "both blocks (frozen block0 + hot block1) must be painting a real bitmap, not left blank")
         XCTAssertTrue(paintedAfterRound1.values.contains(where: { $0 === expectedBlock0Bitmap }),
-            "block0's FrozenBitmapStore bitmap must be the exact instance painted on its sublayer")
+            "block0's resident bitmap must be the exact instance painted on its sublayer")
 
         // Rounds 2-4: only the trailing block grows. block0's key is never touched again.
         for round in 0..<3 {
@@ -185,8 +184,8 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
         XCTAssertLessThanOrEqual(hotAppendDelta, 3,
             "Only the hot tail may be re-appended across the 3 follow-up rounds — at most 1 per round; got \(hotAppendDelta)")
 
-        guard let sizeFinal = feed.renderEnvironment.frozenBitmapStore.size(for: key0) else {
-            return XCTFail("block0's frozen entry must still exist")
+        guard let sizeFinal = feed.renderEnvironment.visibleBlockStore.size(for: key0) else {
+            return XCTFail("block0's resident entry must still exist")
         }
         XCTAssertEqual(sizeAfterFreeze, sizeFinal,
             "A frozen block's cached size must be invariant across later diffs (mirrors LB4)")
@@ -315,12 +314,8 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
         await drainFeedWork(feed)
     }
 
-    /// VelocityUI-socg C4: `FrozenBitmapStore.evict(_ keysThatLeft:)` (Phase B/C1) had no caller
-    /// until this bead wired it into `updateVisibleCells`'s per-scroll-step recycle loop. Streams
-    /// a second block into every item (freezing block0 of each into the store), scrolls far
-    /// enough that the early items fall out of the keep-range, and asserts their frozen entries
-    /// are gone — proving the wiring actually fires, not just that the underlying primitive
-    /// (already covered by FrozenBitmapStoreTests) is correct in isolation.
+    /// A mounted block belongs to `VisibleBlockStore`. Once its item leaves the keep range,
+    /// `updateVisibleCells` demotes the same artifact into the evictable frozen cache.
     func testScrollingPastFrozenBlocks_EvictsThemFromStore() async {
         let feed = makeChatFeed()
         let itemCount = 30
@@ -333,24 +328,23 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
             feed.layoutSubviews()
         }
 
-        // Finalize block0 for every item (append a second block) so it freezes into the store —
-        // first-mount alone never rasterizes text (VelocityUI-3z4s: no general-path rasterizer
-        // yet), only the in-place block-diff path does.
+        // Finalize block0 for every item so each visible artifact becomes resident.
         feed.items = (0..<itemCount).map { ChatItem(id: $0, blocks: ["seed \($0)", "block one"]) }
         feed.layoutSubviews()
 
         let earlyKey = BlockKey(itemID: 0, index: 0)
-        guard feed.renderEnvironment.frozenBitmapStore.size(for: earlyKey) != nil else {
-            return XCTFail("Precondition: item 0's block0 must be frozen before scrolling")
+        guard feed.renderEnvironment.visibleBlockStore.size(for: earlyKey) != nil else {
+            return XCTFail("Precondition: item 0's block0 must be resident before scrolling")
         }
 
         // Scroll far enough that item 0 falls outside keepRange (visRange.lowerBound - prefetchBehindCount).
         feed.contentOffset = CGPoint(x: 0, y: 100_000)
         feed.layoutSubviews()
 
-        XCTAssertNil(feed.renderEnvironment.frozenBitmapStore.size(for: earlyKey),
-            "Scrolling item 0 out of the keep-range must evict its frozen block via the per-scroll-step "
-            + "evict(_ keysThatLeft:) wiring — the store must not hold on to it forever")
+        XCTAssertNil(feed.renderEnvironment.visibleBlockStore.size(for: earlyKey),
+            "Scrolling item 0 out of the keep range must release its resident entry")
+        XCTAssertNotNil(feed.renderEnvironment.frozenBitmapStore.size(for: earlyKey),
+            "A leaving resident block must be demoted into the evictable frozen cache")
 
         await drainFeedWork(feed)
     }
@@ -586,8 +580,8 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
         await waitForWorkingRangeCommit(feed, index: 0)
 
         let key0 = BlockKey(itemID: 0, index: 0)
-        guard let originalSize = feed.renderEnvironment.frozenBitmapStore.size(for: key0) else {
-            return XCTFail("block0 must be frozen after closing out")
+        guard let originalSize = feed.renderEnvironment.visibleBlockStore.size(for: key0) else {
+            return XCTFail("block0 must be resident after closing out")
         }
 
         // Grow block1 a bit more first (block0 stays untouched — the normal streaming case).
@@ -607,8 +601,8 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
             "Editing an already-frozen block must trigger a re-measure — it must not silently "
             + "keep painting/serving the stale frozen entry")
 
-        guard let refreshedSize = feed.renderEnvironment.frozenBitmapStore.size(for: key0) else {
-            return XCTFail("block0's entry must still exist after the edit (re-frozen, not evicted-and-abandoned)")
+        guard let refreshedSize = feed.renderEnvironment.visibleBlockStore.size(for: key0) else {
+            return XCTFail("block0's resident entry must still exist after the edit")
         }
         XCTAssertNotEqual(refreshedSize, originalSize,
             "block0's cached size must reflect the EDITED (much longer) content, not the stale original")
@@ -645,11 +639,11 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
 
         let key0 = BlockKey(itemID: 0, index: 0)
         let key1 = BlockKey(itemID: 0, index: 1)
-        guard let block0BitmapBeforeEdit = feed.renderEnvironment.frozenBitmapStore.bitmap(for: key0) else {
-            return XCTFail("Precondition: block0 must be frozen before the edit")
+        guard let block0BitmapBeforeEdit = feed.renderEnvironment.visibleBlockStore.bitmap(for: key0) else {
+            return XCTFail("Precondition: block0 must be resident before the edit")
         }
-        guard let block1BitmapBeforeEdit = feed.renderEnvironment.frozenBitmapStore.bitmap(for: key1) else {
-            return XCTFail("Precondition: block1 (the mid block about to be edited) must be frozen before the edit")
+        guard let block1BitmapBeforeEdit = feed.renderEnvironment.visibleBlockStore.bitmap(for: key1) else {
+            return XCTFail("Precondition: block1 must be resident before the edit")
         }
         let paintedBeforeEdit = feed._debugPaintedBitmaps(at: 0)
         XCTAssertTrue(paintedBeforeEdit.values.contains(where: { $0 === block0BitmapBeforeEdit }),
@@ -663,8 +657,8 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
         feed.items = [ChatItem(id: 0, blocks: ["block zero text", "EDITED block one text", "block two text"])]
         feed.layoutSubviews()
 
-        guard let block1BitmapAfterEdit = feed.renderEnvironment.frozenBitmapStore.bitmap(for: key1) else {
-            return XCTFail("block1 must still have a cached bitmap after the edit (re-frozen, not evicted-and-abandoned)")
+        guard let block1BitmapAfterEdit = feed.renderEnvironment.visibleBlockStore.bitmap(for: key1) else {
+            return XCTFail("block1 must still have a resident bitmap after the edit")
         }
         XCTAssertFalse(block1BitmapAfterEdit === block1BitmapBeforeEdit,
             "block1's cached bitmap must be a NEW CGImage instance after the edit — re-rasterized, not stale")

@@ -115,15 +115,17 @@ final class StreamingMarkdownFeedIntegrationTests: XCTestCase {
 
         XCTAssertEqual(parser.frontier, 1, "Precondition: the blank line must have sealed exactly the first block")
 
-        let key0 = BlockKey(itemID: 0, index: 0)
-        guard let expectedBitmap = feed.renderEnvironment.frozenBitmapStore.bitmap(for: key0) else {
-            return XCTFail("the sealed first block must be frozen into FrozenBitmapStore")
+        guard let key0 = parser.blockList(itemID: 0, width: 375).first?.key else {
+            return XCTFail("the parser must expose the sealed first block")
+        }
+        guard let expectedBitmap = feed.renderEnvironment.visibleBlockStore.bitmap(for: key0) else {
+            return XCTFail("the sealed first block must remain resident while visible")
         }
 
         let painted = feed._debugPaintedBitmaps(at: 0)
         XCTAssertEqual(painted.count, 2, "both the frozen first block and the still-hot second block must paint real bitmaps")
         XCTAssertTrue(painted.values.contains(where: { $0 === expectedBitmap }),
-            "the frozen block's exact FrozenBitmapStore bitmap instance must be what's painted on screen")
+            "the sealed block's exact resident bitmap instance must be painted on screen")
 
         // Growing only the second (still-hot) paragraph must route through the hot-append path
         // and must NEVER touch block0's frozen entry again.
@@ -175,11 +177,9 @@ final class StreamingMarkdownFeedIntegrationTests: XCTestCase {
         feed.layoutSubviews()
         await waitForWorkingRangeCommit(feed, index: 0)
 
-        // The very first mount never synchronously rasterizes text (no general first-mount
-        // rasterizer — see RenderCell.applyLayout's doc on the text branch), so a hot bitmap only
-        // exists after at least one more append round routes through applyInPlaceBlockDiff's
-        // hot-append path. This round is itself the FINAL content block0 will have — the round
-        // after this one only appends the blank line, adding nothing to block0's own text.
+        // The pipeline paints the first mount, but the hot incremental rasterizer starts only
+        // after an append reaches applyInPlaceBlockDiff. This round is itself the FINAL content
+        // block0 will have — the next round only appends the blank line, adding no visible text.
         parser.append(", done growing")
         feed.items = [StreamingMessage(id: 0, markdownParser: parser)]
         feed.layoutSubviews()
@@ -210,9 +210,11 @@ final class StreamingMarkdownFeedIntegrationTests: XCTestCase {
 
         XCTAssertEqual(parser.frontier, 1, "Precondition: the blank line must have sealed exactly block0")
 
-        let key0 = BlockKey(itemID: 0, index: 0)
-        guard let sealedBitmap = feed.renderEnvironment.frozenBitmapStore.bitmap(for: key0) else {
-            return XCTFail("block0 must be frozen into FrozenBitmapStore once the blank line seals it")
+        guard let key0 = parser.blockList(itemID: 0, width: 375).first?.key else {
+            return XCTFail("the parser must expose the sealed first block")
+        }
+        guard let sealedBitmap = feed.renderEnvironment.visibleBlockStore.bitmap(for: key0) else {
+            return XCTFail("block0 must remain resident once the blank line seals it")
         }
         let sealedPixels = rawPixels(of: sealedBitmap)
 

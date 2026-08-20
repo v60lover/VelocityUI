@@ -46,6 +46,13 @@ public struct BlockKey: Hashable, Sendable {
         self.blockID = blockID
     }
 
+    /// Reuses the Sendable payload already validated and boxed by `NodeTable.init`.
+    init(boxedItemID: AnyHashable, index: Int, blockID: BlockID? = nil) {
+        self.itemID = boxedItemID
+        self.index = blockID == nil ? index : 0
+        self.blockID = blockID
+    }
+
     public static func == (lhs: BlockKey, rhs: BlockKey) -> Bool {
         guard lhs.itemID == rhs.itemID else { return false }
         switch (lhs.blockID, rhs.blockID) {

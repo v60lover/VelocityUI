@@ -65,7 +65,6 @@ public func flatten<ID: Hashable & Sendable>(
         let myIndex = nodes.count
         parentIndices.append(parent)
         if spec.isSpecified { frameByIndex[myIndex] = spec }
-        if let blockID { blockIDByIndex[myIndex] = blockID }
         switch node {
         case let n as VStackNode:
             nodes.append(.vstack(VStackDescriptor(
@@ -108,6 +107,7 @@ public func flatten<ID: Hashable & Sendable>(
             assertionFailure("flatten: unknown DSL node \(type(of: node)) — add a case to visit(_:parent:)")
             nodes.append(.spacer(0))
         }
+        if let blockID { blockIDByIndex[myIndex] = blockID }
     }
 
     visit(root, parent: -1)
