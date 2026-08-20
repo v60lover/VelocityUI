@@ -45,7 +45,7 @@ final class StreamingMarkdownFeedIntegrationTests: XCTestCase {
         let env = environment ?? makeEnvironment()
         let feed = FeedScrollView<StreamingMessage>(environment: env, frame: CGRect(x: 0, y: 0, width: 375, height: 812))
         feed.cellBuilder = { item in
-            VStackNode(alignment: .leading, spacing: 4) {
+            return VStackNode(alignment: .leading, spacing: 4) {
                 item.markdownParser.renderNodes
             }
         }
@@ -92,6 +92,66 @@ final class StreamingMarkdownFeedIntegrationTests: XCTestCase {
                 "height must never shrink while pure text keeps appending to the same paragraph")
             heightBefore = heightAfter
         }
+
+        await drainFeedWork(feed)
+    }
+
+    func testInterleavedImage_FirstInsertionMayFallback_ButLaterHotTokensStayInPlace() async {
+        let feed = FeedScrollView<StreamingMessage>(
+            environment: makeEnvironment(), frame: CGRect(x: 0, y: 0, width: 375, height: 812)
+        )
+        feed.cellBuilder = { item in
+            let nodes = item.markdownParser.renderNodes.enumerated().flatMap { index, node -> [any RenderNode] in
+                guard index == 0, item.markdownParser.frontier > 0 else { return [node] }
+                return [node, AsyncImageNode(url: nil, aspectRatio: 16.0 / 9.0)
+                    .renderID("image-after-first-sealed-block")]
+            }
+            return VStackNode(alignment: .leading, spacing: 4) {
+                nodes
+            }
+        }
+
+        var parser = IncrementalMarkdownParser()
+        parser.append("First block")
+        feed.items = [StreamingMessage(id: 0, markdownParser: parser)]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+
+        let cellBeforeImage = feed._cellLayer(at: 0)
+        let heightBeforeImage = feed._debugResolvedFrame(at: 0)?.height ?? -1
+        let spawnCountBeforeImage = feed._taskSpawnCount
+
+        // Sealing the first block introduces a 16:9 image before the hot text. Its deterministic
+        // leaf geometry must keep this update on the synchronous block-diff path.
+        parser.append("\n\nSecond block")
+        feed.items = [StreamingMessage(id: 0, markdownParser: parser)]
+        feed.layoutSubviews()
+
+        XCTAssertTrue(cellBeforeImage === feed._cellLayer(at: 0),
+            "image insertion must preserve the mounted cell")
+        XCTAssertEqual(feed._workingRangeMissCount(from: 0, to: 1), 0,
+            "known leaf geometry must patch WorkingRange in the insertion frame")
+        XCTAssertEqual(feed._taskSpawnCount, spawnCountBeforeImage,
+            "known leaf geometry must not restart RenderPipeline")
+        XCTAssertGreaterThan(feed._debugResolvedFrame(at: 0)?.height ?? -1, heightBeforeImage,
+            "the image slot and new hot text must contribute height synchronously")
+        let insertedImage = feed._debugExtractFragmentsFromWorkingRange(at: 0)?.first { fragment in
+            if case .image = fragment.content { return true }
+            return false
+        }
+        XCTAssertEqual(insertedImage?.frame.height ?? -1, 375 / (16.0 / 9.0), accuracy: 0.01,
+            "the insertion frame must contain the resolved 16:9 image fragment")
+
+        let spawnCountBeforeHotTokens = feed._taskSpawnCount
+        for token in [" grows", " without", " invalidating", " again"] {
+            parser.append(token)
+            feed.items = [StreamingMessage(id: 0, markdownParser: parser)]
+            feed.layoutSubviews()
+            XCTAssertEqual(feed._workingRangeMissCount(from: 0, to: 1), 0,
+                "hot-text growth after image insertion must keep patching WorkingRange in place")
+        }
+        XCTAssertEqual(feed._taskSpawnCount, spawnCountBeforeHotTokens,
+            "neither image insertion nor later hot-text tokens may restart RenderPipeline work")
 
         await drainFeedWork(feed)
     }

@@ -95,6 +95,74 @@ public enum BlockGeometryPolicy: Sendable {
     case spacer(CGFloat)
 }
 
+/// Synchronous geometry for a leaf whose size is fully described without measurement.
+struct LeafGeometryResolution: Sendable, Equatable {
+    let slotSize: CGSize
+    let contentFrame: CGRect
+}
+
+/// Mirrors `measureNode` + leaf `applyFrame` semantics for deterministic block policies.
+/// Returns `nil` when intrinsic measurement is still required.
+nonisolated func resolveLeafGeometry(
+    _ policy: BlockGeometryPolicy,
+    presentation: BlockPresentationPolicy,
+    frame: FrameSpec,
+    proposedWidth: CGFloat
+) -> LeafGeometryResolution? {
+    let measurementWidth = frame.width ?? proposedWidth
+    let intrinsic: CGSize
+    switch policy {
+    case .measured:
+        return nil
+    case .aspectRatio(let ratio):
+        intrinsic = CGSize(width: measurementWidth, height: measurementWidth / ratio)
+    case .fixed(let size):
+        intrinsic = size
+    case .spacer(let height):
+        intrinsic = CGSize(width: measurementWidth, height: height)
+    }
+
+    guard frame.isSpecified else {
+        return LeafGeometryResolution(
+            slotSize: intrinsic,
+            contentFrame: CGRect(origin: .zero, size: intrinsic)
+        )
+    }
+
+    let slot = CGSize(
+        width: frame.width ?? intrinsic.width,
+        height: frame.height ?? intrinsic.height
+    )
+    let fillsSlot: Bool = {
+        guard case .image(let descriptor) = presentation else { return false }
+        return descriptor.contentMode == VContentMode.fill.rawValue
+    }()
+    let content = fillsSlot
+        ? slot
+        : CGSize(width: min(intrinsic.width, slot.width), height: min(intrinsic.height, slot.height))
+    let dx = slot.width - content.width
+    let dy = slot.height - content.height
+
+    let x: CGFloat
+    switch frame.alignment {
+    case .topLeading, .leading, .bottomLeading: x = 0
+    case .top, .center, .bottom: x = dx / 2
+    case .topTrailing, .trailing, .bottomTrailing: x = dx
+    }
+
+    let y: CGFloat
+    switch frame.alignment {
+    case .topLeading, .top, .topTrailing: y = 0
+    case .leading, .center, .trailing: y = dy / 2
+    case .bottomLeading, .bottom, .bottomTrailing: y = dy
+    }
+
+    return LeafGeometryResolution(
+        slotSize: slot,
+        contentFrame: CGRect(origin: CGPoint(x: x, y: y), size: content)
+    )
+}
+
 /// Paint input a block contributes after its frame is resolved.
 public enum BlockPresentationPolicy: Sendable {
     case text(TextDescriptor)

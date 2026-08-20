@@ -745,9 +745,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         let residentStore = environment.visibleBlockStore
 
         // Measures (+ rasterizes) one active TEXT block via the phase-A `freeze(_:)` primitive
-        // and keeps its artifact in the resident tier. `nil` return means `block` is not text — the caller
-        // must bail the whole optimization (image/geometry reuse lives in ImageActor's decode
-        // cache, never here — see FreezeState.swift's doc). A fresh, function-scoped `cache`
+        // and keeps its artifact in the resident tier. A fresh, function-scoped `cache`
         // dict is passed on every call so `freeze(_:)` always recomputes here — the PERSISTENT
         // cache is `store`, consulted separately (below) for the genuinely-unchanged case, so
         // this always represents real new work, never a stale hit.
@@ -821,15 +819,38 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         }
 
         var heights = [CGFloat](repeating: 0, count: newBlocks.count)
+        var localFragmentFrames = [CGRect](repeating: .null, count: newBlocks.count)
         var textBitmaps: [Int: CGImage] = [:]
         var resolvedIndices = Set<Int>()
+
+        func resolveDeterministicGeometry(_ block: Block) -> LeafGeometryResolution? {
+            resolveLeafGeometry(
+                block.contract.geometry,
+                presentation: block.contract.presentation,
+                frame: newTable.frame(at: block.fragment.id),
+                proposedWidth: width
+            )
+        }
+
+        func recordTextResult(
+            _ result: (height: CGFloat, bitmap: CGImage?), for block: Block, at index: Int
+        ) {
+            heights[index] = result.height
+            localFragmentFrames[index] = CGRect(x: 0, y: 0, width: width, height: result.height)
+            textBitmaps[block.fragment.id] = result.bitmap
+        }
+
+        func recordGeometry(_ geometry: LeafGeometryResolution, at index: Int) {
+            heights[index] = geometry.slotSize.height
+            localFragmentFrames[index] = geometry.contentFrame
+        }
+
         for match in d.reused + d.moved {
             let block = newBlocks[match.newIndex]
             resolvedIndices.insert(match.newIndex)
-            if d.hot.contains(match.newIndex) {
+            if d.hot.contains(match.newIndex), case .text = block.fragment.content {
                 guard let result = measureAndRasterizeHot(block) else { return nil }
-                heights[match.newIndex] = result.height
-                textBitmaps[block.fragment.id] = result.bitmap
+                recordTextResult(result, for: block, at: match.newIndex)
                 continue
             }
             if case .text = block.fragment.content {
@@ -842,52 +863,69 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                        contentHash: block.contentHash
                    ) {
                     residentStore.store(sealed.image, size: sealed.size, for: block.key)
-                    textBitmaps[block.fragment.id] = sealed.image
-                    heights[match.newIndex] = sealed.size.height
+                    recordTextResult(
+                        (sealed.size.height, sealed.image), for: block, at: match.newIndex
+                    )
                 } else if let size = residentStore.size(for: block.key),
                           let bitmap = residentStore.bitmap(for: block.key) {
-                    textBitmaps[block.fragment.id] = bitmap
-                    heights[match.newIndex] = size.height
+                    recordTextResult((size.height, bitmap), for: block, at: match.newIndex)
                 } else if let size = store.size(for: block.key) {
                     // A cached inactive block becomes resident before a later token can make it
                     // an LRU victim. The same bitmap instance is painted without re-rasterizing.
                     let bitmap = store.bitmap(for: block.key)
                     if let bitmap { residentStore.store(bitmap, size: size, for: block.key) }
-                    textBitmaps[block.fragment.id] = bitmap
-                    heights[match.newIndex] = size.height
+                    recordTextResult((size.height, bitmap), for: block, at: match.newIndex)
                 } else {
                     // Self-heal: logically unchanged per diff(), but the store has no entry
                     // yet (first pass through C3 for this block, or it was LRU/pressure-
                     // evicted) — recompute once and (re-)freeze it, same as a finalized tail.
                     guard let result = measureAndMaybeFreeze(block) else { return nil }
-                    heights[match.newIndex] = result.height
-                    textBitmaps[block.fragment.id] = result.bitmap
+                    recordTextResult(result, for: block, at: match.newIndex)
                 }
             } else {
-                // Non-text, unchanged: trust the previous real fragment height directly —
-                // never frozen/measured here (image/geometry reuse lives in ImageActor).
-                heights[match.newIndex] = previousFragments[match.previousIndex].frame.height
+                if let geometry = resolveDeterministicGeometry(block) {
+                    recordGeometry(geometry, at: match.newIndex)
+                } else {
+                    // Measured non-text has no synchronous geometry contract. Preserve the real
+                    // prior fragment just as the pre-resolver path did for unchanged content.
+                    let previousFrame = previousFragments[match.previousIndex].frame
+                    heights[match.newIndex] = previousFrame.height
+                    localFragmentFrames[match.newIndex] = CGRect(
+                        x: previousFrame.minX, y: 0,
+                        width: previousFrame.width, height: previousFrame.height
+                    )
+                }
             }
         }
         for i in d.updated + d.inserted {
             resolvedIndices.insert(i)
-            let isHot = d.hot.contains(i)
-            let result = (isHot && environment.hotBlockRasterizeEnabled)
-                ? measureAndRasterizeHot(newBlocks[i])
-                : measureAndMaybeFreeze(newBlocks[i])
-            guard let result else { return nil }
-            heights[i] = result.height
-            textBitmaps[newBlocks[i].fragment.id] = result.bitmap
+            let block = newBlocks[i]
+            if case .text = block.fragment.content {
+                let isHot = d.hot.contains(i)
+                let result = (isHot && environment.hotBlockRasterizeEnabled)
+                    ? measureAndRasterizeHot(block)
+                    : measureAndMaybeFreeze(block)
+                guard let result else { return nil }
+                recordTextResult(result, for: block, at: i)
+            } else {
+                guard let geometry = resolveDeterministicGeometry(block) else { return nil }
+                recordGeometry(geometry, at: i)
+            }
         }
         // Positional fallback exposes the volatile tail only through `hot`; unlike the
         // identity-aware path, it does not also classify that index as updated or reused.
         for i in d.hot where !resolvedIndices.contains(i) {
-            let result = environment.hotBlockRasterizeEnabled
-                ? measureAndRasterizeHot(newBlocks[i])
-                : measureAndMaybeFreeze(newBlocks[i])
-            guard let result else { return nil }
-            heights[i] = result.height
-            textBitmaps[newBlocks[i].fragment.id] = result.bitmap
+            let block = newBlocks[i]
+            if case .text = block.fragment.content {
+                let result = environment.hotBlockRasterizeEnabled
+                    ? measureAndRasterizeHot(block)
+                    : measureAndMaybeFreeze(block)
+                guard let result else { return nil }
+                recordTextResult(result, for: block, at: i)
+            } else {
+                guard let geometry = resolveDeterministicGeometry(block) else { return nil }
+                recordGeometry(geometry, at: i)
+            }
         }
 
         if !d.removed.isEmpty {
@@ -901,7 +939,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         var fragments: [Fragment] = []
         fragments.reserveCapacity(newBlocks.count)
         for (i, block) in newBlocks.enumerated() {
-            let frame = CGRect(x: 0, y: cursor, width: width, height: heights[i])
+            let localFrame = localFragmentFrames[i].isNull
+                ? CGRect(x: 0, y: 0, width: width, height: heights[i])
+                : localFragmentFrames[i]
+            let frame = localFrame.offsetBy(dx: 0, dy: cursor)
             fragments.append(Fragment(
                 id: block.fragment.id,
                 blockID: block.blockID,

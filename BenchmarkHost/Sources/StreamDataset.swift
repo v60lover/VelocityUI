@@ -9,10 +9,8 @@ import VelocityUI
 /// byte-for-byte reproducible.
 enum StreamDataset {
 
-    /// Index (0-based, in the parser's combined sealed+hot block list) of the block after which
-    /// the interleaved `AsyncImageNode` is spliced in — once the two intro paragraphs have sealed,
-    /// before the fenced code block opens.
-    static let imageAfterBlockIndex = 0
+    /// First (0-based) odd markdown block index after which an image is interleaved.
+    static let imageAfterBlockIndex = 1
     /// Index after which the interleaved "rule" divider (`SpacerNode` — the DSL has no dedicated
     /// divider node; a fixed-height spacer stands in for one) is spliced in — right after the
     /// fenced code block closes and seals.
@@ -46,6 +44,20 @@ enum StreamDataset {
         chunks += prose(sentenceCount: 5, rng: &rng)
         chunks += literal("\n\n")
         chunks += prose(sentenceCount: 10, rng: &rng)
+        chunks += literal("\n\n")
+        chunks += prose(sentenceCount: 5, rng: &rng)
+        chunks += literal("\n\n")
+        chunks += prose(sentenceCount: 5, rng: &rng)
+        chunks += literal("\n\n")
+        chunks += prose(sentenceCount: 5, rng: &rng)
+        chunks += literal("\n\n")
+        chunks += prose(sentenceCount: 5, rng: &rng)
+        chunks += literal("\n\n")
+        chunks += prose(sentenceCount: 5, rng: &rng)
+        chunks += literal("\n\n")
+        chunks += prose(sentenceCount: 5, rng: &rng)
+        chunks += literal("\n\n")
+        chunks += prose(sentenceCount: 10, rng: &rng)
 //        chunks += literal("\n\n")
 //        chunks += codeFence(lineCount: codeLineCount, rng: &rng)
 //        chunks += literal("\n\n")
@@ -54,19 +66,13 @@ enum StreamDataset {
 
     /// Builds one cell's full child-node array: the parser's own `renderNodes` (all `TextNode`,
     /// one per sealed/hot block — VelocityUI-zuot) with a static `AsyncImageNode` spliced in after
-    /// `imageAfterBlockIndex` seals and a `SpacerNode` "rule" divider spliced in after
+    /// every odd sealed block and a `SpacerNode` "rule" divider spliced in after
     /// `ruleAfterBlockIndex` seals — exercising the C3 bind site's per-block diff and pooling
     /// against real non-text fragments, not just one growing text block.
     ///
-    /// Gated on `parser.frontier` (not raw block count): a block only becomes a stable insertion
-    /// anchor once it's provably sealed (parser contract — sealed blocks never move again), so the
-    /// interleaved node's own position in the flattened list is stable from the frame it first
-    /// appears. The insertion frame itself IS a one-time position shift for every later block —
-    /// `applyInPlaceBlockDiff`'s per-block diff treats that shifted position as a changed/non-text
-    /// sealed entry it can't freeze (image/geometry reuse lives in ImageActor's decode cache, not
-    /// this diff — see `FeedScrollView.applyInPlaceBlockDiff`'s doc) and safely falls back to a
-    /// full re-layout for that ONE update, same for both ON and OFF hot-rasterize runs, before
-    /// steady state (unchanged-by-position-and-hash) resumes.
+    /// Each insertion is gated on `parser.frontier`: only sealed blocks are stable anchors.
+    /// The first frame that inserts an image may use one full-layout fallback; its stable render
+    /// ID lets later hot-text updates return to the identity-aware in-place path.
     ///
     /// - Parameter includeInterleavedBlocks: When `false`, returns `parser.renderNodes` verbatim —
     ///   no `AsyncImageNode`/`SpacerNode` ever spliced in. `true` (the default) is what the
@@ -76,14 +82,17 @@ enum StreamDataset {
         let textNodes = parser.renderNodes
         guard includeInterleavedBlocks else { return textNodes }
         var result: [any RenderNode] = []
-        result.reserveCapacity(textNodes.count + 2)
+        result.reserveCapacity(textNodes.count + (parser.frontier / 2) + 1)
         for (index, node) in textNodes.enumerated() {
             result.append(node)
-            if index == imageAfterBlockIndex, parser.frontier > imageAfterBlockIndex {
-                result.append(AsyncImageNode(url: imageURL, aspectRatio: 16.0 / 9.0, contentMode: .fill))
+            if index >= imageAfterBlockIndex, index.isMultiple(of: 2) == false, parser.frontier > index {
+                result.append(
+                    AsyncImageNode(url: imageURL, aspectRatio: 16.0 / 9.0, contentMode: .fill)
+                        .renderID("stream-image-after-\(index)")
+                )
             }
             if index == ruleAfterBlockIndex, parser.frontier > ruleAfterBlockIndex {
-                result.append(SpacerNode(minLength: 12))
+                result.append(SpacerNode(minLength: 12).renderID("stream-rule-after-\(index)"))
             }
         }
         return result

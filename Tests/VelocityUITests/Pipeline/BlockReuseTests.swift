@@ -327,6 +327,26 @@ final class BlockReuseTests: XCTestCase {
         XCTAssertTrue(result.removed.isEmpty)
     }
 
+    func testPositionalFallback_PreservesExplicitHotTextBesideUnidentifiedImage() {
+        let previous = [
+            identifiedTextBlock(id: "sealed", index: 0, content: "fixed", lifecycle: .sealed),
+            imageBlock(index: 1, hash: 1),
+            identifiedTextBlock(id: "hot", index: 2, content: "growing", lifecycle: .hot),
+        ]
+        let next = [
+            identifiedTextBlock(id: "sealed", index: 0, content: "fixed", lifecycle: .sealed),
+            imageBlock(index: 1, hash: 1),
+            identifiedTextBlock(id: "hot", index: 2, content: "growing further", lifecycle: .hot),
+        ]
+
+        let result = diff(previous: previous, new: next)
+
+        XCTAssertEqual(result.hot, [2])
+        XCTAssertEqual(result.volatile, 2..<3)
+        XCTAssertEqual(result.reused, [BlockMatch(previousIndex: 0, newIndex: 0), BlockMatch(previousIndex: 1, newIndex: 1)])
+        XCTAssertFalse(result.hot.contains(1), "an unidentified image must not displace explicit hot-text lifecycle metadata")
+    }
+
     func testDiff_NewBlockSpawnedBeforeFrontier_DetectsSealedChanged() {
         let previous = [textBlock(index: 0, content: "frozen"), textBlock(index: 1, content: "final content")]
         let new = [

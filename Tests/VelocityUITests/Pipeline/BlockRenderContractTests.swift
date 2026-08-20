@@ -93,6 +93,65 @@ final class BlockRenderContractTests: XCTestCase {
         XCTAssertNotEqual(firstContract.contentRequest?.generation, secondContract.contentRequest?.generation)
     }
 
+    func testLeafGeometryResolver_AspectRatioUsesProposedWidth() throws {
+        let descriptor = ImageDescriptor(
+            url: nil, aspectRatio: 16.0 / 9.0, contentMode: VContentMode.fit.rawValue,
+            cornerRadius: 0, layoutHash: 1, appearanceHash: 1
+        )
+        let result = try XCTUnwrap(resolveLeafGeometry(
+            .aspectRatio(16.0 / 9.0), presentation: .image(descriptor),
+            frame: .unspecified, proposedWidth: 375
+        ))
+
+        XCTAssertEqual(result.slotSize.width, 375, accuracy: 0.001)
+        XCTAssertEqual(result.slotSize.height, 210.9375, accuracy: 0.001)
+        XCTAssertEqual(result.contentFrame, CGRect(x: 0, y: 0, width: 375, height: 210.9375))
+    }
+
+    func testLeafGeometryResolver_FrameMatchesFitAndFillSemantics() throws {
+        let fit = ImageDescriptor(
+            url: nil, aspectRatio: 2, contentMode: VContentMode.fit.rawValue,
+            cornerRadius: 0, layoutHash: 1, appearanceHash: 1
+        )
+        let fill = ImageDescriptor(
+            url: nil, aspectRatio: 2, contentMode: VContentMode.fill.rawValue,
+            cornerRadius: 0, layoutHash: 1, appearanceHash: 1
+        )
+        let frame = FrameSpec(width: 300, height: 300, alignment: .center)
+
+        let fitResult = try XCTUnwrap(resolveLeafGeometry(
+            .aspectRatio(2), presentation: .image(fit), frame: frame, proposedWidth: 375
+        ))
+        let fillResult = try XCTUnwrap(resolveLeafGeometry(
+            .aspectRatio(2), presentation: .image(fill), frame: frame, proposedWidth: 375
+        ))
+
+        XCTAssertEqual(fitResult.slotSize, CGSize(width: 300, height: 300))
+        XCTAssertEqual(fitResult.contentFrame, CGRect(x: 0, y: 75, width: 300, height: 150))
+        XCTAssertEqual(fillResult.slotSize, CGSize(width: 300, height: 300))
+        XCTAssertEqual(fillResult.contentFrame, CGRect(x: 0, y: 0, width: 300, height: 300))
+    }
+
+    func testLeafGeometryResolver_FixedAndSpacerRespectFrame() throws {
+        let fixed = try XCTUnwrap(resolveLeafGeometry(
+            .fixed(CGSize(width: 60, height: 40)), presentation: .geometry,
+            frame: FrameSpec(width: 100, height: 100, alignment: .bottomTrailing),
+            proposedWidth: 375
+        ))
+        let spacer = try XCTUnwrap(resolveLeafGeometry(
+            .spacer(12), presentation: .geometry,
+            frame: .unspecified, proposedWidth: 375
+        ))
+
+        XCTAssertEqual(fixed.slotSize, CGSize(width: 100, height: 100))
+        XCTAssertEqual(fixed.contentFrame, CGRect(x: 40, y: 60, width: 60, height: 40))
+        XCTAssertEqual(spacer.slotSize, CGSize(width: 375, height: 12))
+        XCTAssertEqual(spacer.contentFrame, CGRect(x: 0, y: 0, width: 375, height: 12))
+        XCTAssertNil(resolveLeafGeometry(
+            .measured, presentation: .geometry, frame: .unspecified, proposedWidth: 375
+        ))
+    }
+
     private func makeTable(nodes: [NodeKind], blockIDs: [BlockID?]? = nil) -> NodeTable {
         NodeTable(
             itemID: "item",

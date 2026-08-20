@@ -72,8 +72,12 @@ private nonisolated func diff(
     let hot = hotIndices(in: new, positionalFrontier: positionalFrontier)
     let volatile = volatileEnvelope(for: hot, count: new.count)
     guard let previousByID = uniqueBlocksByID(previous), uniqueBlocksByID(new) != nil else {
-        let fallbackStart = positionalFrontier.map { max(0, min($0, new.count)) } ?? max(0, new.count - 1)
-        return positionalDiff(previous: previous, new: new, volatile: fallbackStart..<new.count)
+        // A producer's explicit hot set remains authoritative even when one sibling lacks an
+        // identity. With no explicit hot block, preserve the legacy trailing-block fallback.
+        let fallbackHot = positionalFrontier == nil && hot.isEmpty && !new.isEmpty
+            ? Set([new.count - 1])
+            : hot
+        return positionalDiff(previous: previous, new: new, hot: fallbackHot)
     }
 
     var reused: [BlockMatch] = []
@@ -137,10 +141,11 @@ private nonisolated func volatileEnvelope(for hot: Set<Int>, count: Int) -> Rang
     return first..<(last + 1)
 }
 
-private nonisolated func positionalDiff(previous: [Block], new: [Block], volatile: Range<Int>) -> BlockDiff {
+private nonisolated func positionalDiff(previous: [Block], new: [Block], hot: Set<Int>) -> BlockDiff {
+    let volatile = volatileEnvelope(for: hot, count: new.count)
     var reused: [BlockMatch] = []
     var changed: [Int] = []
-    for index in new.indices where !volatile.contains(index) {
+    for index in new.indices where !hot.contains(index) {
         if index < previous.count,
            previous[index].key == new[index].key,
            previous[index].contentHash == new[index].contentHash {

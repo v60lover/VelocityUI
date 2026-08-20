@@ -62,24 +62,27 @@ final class StreamDatasetTests: XCTestCase {
             "no image/rule should be inserted before their anchor blocks have sealed")
     }
 
-    func testImageInsertedExactlyOnceOnceAnchorBlockSeals() {
+    func testOddAnchorImagesAppearOnlyAfterTheirBlocksSealAndKeepStableUniqueIDs() {
         var parser = IncrementalMarkdownParser()
-        // Seal three blocks (heading + 2 paragraphs) so frontier > imageAfterBlockIndex (2).
-        parser.append("Title\n===\n\n")
-        parser.append("First paragraph.\n\n")
-        parser.append("Second paragraph.\n\n")
-        XCTAssertGreaterThan(parser.frontier, StreamDataset.imageAfterBlockIndex,
-            "precondition: three blocks must have sealed")
+        parser.append("Block 0\n\nBlock 1")
+        XCTAssertEqual(parser.frontier, 1, "precondition: odd block 1 must still be hot")
+        XCTAssertFalse(StreamDataset.interleavedRenderNodes(for: parser).contains { $0 is RenderIDModifierNode },
+            "an image may not appear before its odd anchor seals")
+
+        parser.append("\n\nBlock 2\n\nBlock 3\n\nHot")
+        XCTAssertEqual(parser.frontier, 4, "precondition: blocks 0...3 must be sealed and block 4 hot")
 
         let nodes = StreamDataset.interleavedRenderNodes(for: parser)
-        let imageCount = nodes.filter { $0 is AsyncImageNode }.count
-        XCTAssertEqual(imageCount, 1, "exactly one interleaved AsyncImageNode once its anchor block sealed")
+        let imageIDs = nodes.compactMap { ($0 as? RenderIDModifierNode)?.blockID.rawValue as? String }
+            .filter { $0.hasPrefix("stream-image-after-") }
+        XCTAssertEqual(imageIDs.count, 2, "only odd sealed anchors 1 and 3 may emit images")
+        XCTAssertEqual(Set(imageIDs).count, imageIDs.count, "each generated image must have a unique stable render identity")
 
-        // Growing further must not insert a second one.
         parser.append("more text")
         let nodesAfter = StreamDataset.interleavedRenderNodes(for: parser)
-        XCTAssertEqual(nodesAfter.filter { $0 is AsyncImageNode }.count, 1,
-            "the interleaved image must not be re-inserted on later renders")
+        let imageIDsAfter = nodesAfter.compactMap { ($0 as? RenderIDModifierNode)?.blockID.rawValue as? String }
+            .filter { $0.hasPrefix("stream-image-after-") }
+        XCTAssertEqual(imageIDsAfter, imageIDs, "hot-text growth must not replace or duplicate interleaved images")
     }
 
     // MARK: - includeInterleavedBlocks: false (--stream-text-only)
