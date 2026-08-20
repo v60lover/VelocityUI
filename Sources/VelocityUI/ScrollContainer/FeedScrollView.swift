@@ -908,24 +908,11 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         var blocks: [Block] = []
         blocks.reserveCapacity(childIndices.count)
         for (position, nodeIndex) in childIndices.enumerated() {
-            let content: FragmentContent
-            switch table.nodes[nodeIndex] {
-            case .text(let d): content = .text(d)
-            case .image(let d): content = .image(d)
-            case .spacer, .hosting, .gif, .video, .customLayer: content = .geometry
-            case .vstack, .hstack, .zstack: return nil  // nested container — not flat, bail
-            }
+            guard let contract = table.blockRenderContract(
+                at: nodeIndex, itemID: itemID, positionalIndex: position
+            ) else { return nil }
             let frame = CGRect(x: 0, y: 0, width: width, height: 0)
-            let blockID = table.blockID(at: nodeIndex)
-            let fragment = Fragment(id: nodeIndex, blockID: blockID, content: content, frame: frame)
-            let key = blockID.map { BlockKey(itemID: itemID, blockID: $0) }
-                ?? BlockKey(itemID: itemID, index: position)
-            blocks.append(Block(
-                key: key,
-                fragment: fragment,
-                layout: ResolvedLayout(totalFrame: frame),
-                lifecycle: table.blockLifecycle(at: nodeIndex)
-            ))
+            blocks.append(Block(contract: contract, id: nodeIndex, frame: frame))
         }
         return (blocks, vstackDescriptor.spacing)
     }
@@ -951,14 +938,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         // discards a half-built `blocks` array). A second, allocation-free pass then inserts
         // directly into `keys` — no intermediate buffer needed since `childIndices` is already
         // materialized.
-        for nodeIndex in childIndices {
-            switch table.nodes[nodeIndex] {
-            case .text, .image, .spacer, .hosting, .gif, .video, .customLayer:
-                continue
-            case .vstack, .hstack, .zstack:
-                return false  // nested container — not flat, bail (matches flatBlocks)
-            }
-        }
+        for nodeIndex in childIndices where !table.isBlockLeaf(at: nodeIndex) { return false }
         for (position, nodeIndex) in childIndices.enumerated() {
             let key = table.blockID(at: nodeIndex).map { BlockKey(itemID: itemID, blockID: $0) }
                 ?? BlockKey(itemID: itemID, index: position)
