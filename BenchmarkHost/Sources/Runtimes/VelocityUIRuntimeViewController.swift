@@ -82,10 +82,18 @@ private struct VelocityUIFeedView: View {
 private struct VelocityUIBenchmarkCell: RenderView {
     let item: BenchmarkItem
 
-    var renderBody: AsyncImageNode {
-        AsyncImageNode(url: item.imageURL, aspectRatio: CGFloat(item.aspectRatio), contentMode: .fill)
-            .cornerRadius(CGFloat(item.cornerRadius))
-            .placeholder(thumbnail: item.thumbnailData)
-            .placeholder(blurHash: item.blurHash)
+    var renderBody: VStackNode {
+        VStackNode(alignment: .leading, spacing: 8) {
+            AsyncImageNode(url: item.imageURL, aspectRatio: CGFloat(item.aspectRatio), contentMode: .fill)
+                .cornerRadius(CGFloat(item.cornerRadius))
+                .placeholder(thumbnail: item.thumbnailData)
+                .placeholder(blurHash: item.blurHash)
+            TextNode("random string \n random string", font: .body).lineLimit(2)
+            HStackNode(spacing: 4) {
+                TextNode("jhon doe")
+                SpacerNode()
+                TextNode("11/12/12")
+            }
+        }
     }
 }
