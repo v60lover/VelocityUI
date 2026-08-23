@@ -22,6 +22,22 @@ public protocol LayoutProvider: Sendable {
 
     /// Total height of the content.
     nonisolated func contentHeight(for frames: [CGRect]) -> CGFloat
+
+    /// Width to measure each item's content at, given the layout's available (container) width.
+    /// Defaults to `availableWidth` verbatim via the extension below — override only when the
+    /// provider subdivides `availableWidth` into narrower measurement columns (e.g. a grid's
+    /// column width), so a cell's measured wrapping matches the width `frames(for:)` lays it out
+    /// at. Must stay in lockstep with any width arithmetic `frames(for:)` performs internally —
+    /// see `GridLayoutProvider.measureWidth(availableWidth:)`.
+    nonisolated func measureWidth(availableWidth: CGFloat) -> CGFloat
+}
+
+extension LayoutProvider {
+    /// Default: measure at the full available width — unchanged behavior for providers (like
+    /// `VerticalLayoutProvider`) that don't subdivide it into columns.
+    public nonisolated func measureWidth(availableWidth: CGFloat) -> CGFloat {
+        availableWidth
+    }
 }
 
 // MARK: - VerticalLayoutProvider

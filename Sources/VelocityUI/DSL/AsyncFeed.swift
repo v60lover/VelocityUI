@@ -20,6 +20,7 @@ public struct AsyncFeed<
 
     private let items: [Item]
     private let environment: RenderEnvironment
+    private let layout: GridLayout
     private let cellBuilder: @MainActor (Item) -> Cell
     private var prefetchAhead: Int = 10
     private var prefetchBehind: Int = 3
@@ -36,15 +37,20 @@ public struct AsyncFeed<
     ///     identity + equality guards in `updateUIView`.
     ///   - environment: Composition root — construct once (e.g. `@State`) and reuse across
     ///     re-renders so `LayoutCache`/`DimensionCache` survive SwiftUI identity changes.
+    ///   - layout: Layout strategy — `.vertical()` (default), `.grid(columns:spacing:)`, or
+    ///     `.custom(_:)`. Captured at view identity, like `prefetchWindow` — changing it after
+    ///     mount has no effect; force a `.id()` rebuild to change it at runtime.
     ///   - cellBuilder: Runs on `@MainActor`, once per item change; result is flattened to a
     ///     `NodeTable` immediately, so the existential never escapes Layer 1.
     public init(
         items: [Item],
         environment: RenderEnvironment,
+        layout: GridLayout = .vertical(),
         cellBuilder: @escaping @MainActor (Item) -> Cell
     ) {
         self.items = items
         self.environment = environment
+        self.layout = layout
         self.cellBuilder = cellBuilder
     }
 
@@ -143,7 +149,8 @@ public struct AsyncFeed<
             environment: environment,
             prefetchAheadCount: prefetchAhead,
             prefetchBehindCount: prefetchBehind,
-            reachEndThreshold: reachEndThreshold
+            reachEndThreshold: reachEndThreshold,
+            layoutProvider: layout.provider
         )
 
         // Route through coordinator rather than capturing self (a value type) in view-stored
@@ -210,19 +217,23 @@ public struct AsyncFeed<
     /// in the data-loading path; await the returned `Task` so both caches populate before
     /// `layoutSubviews` fires.
     ///
-    /// `width`/`scale`/`contentSizeCategory` must match what `FeedScrollView` uses at mount — a
-    /// mismatch is a silent `CacheKey` miss (one gray frame, no crash), not an error. Pass a
+    /// `width`/`scale`/`contentSizeCategory`/`layout` must match what `FeedScrollView` uses at
+    /// mount — a mismatch is a silent `CacheKey` miss (one gray frame, no crash), not an error.
+    /// `width` is always the raw container width (same contract as `FeedScrollView.init`'s
+    /// `layoutProvider`); this function derives the actual measure width from `layout` itself
+    /// (`layout.provider.measureWidth(availableWidth:)`) — e.g. column width for `.grid`. Pass a
     /// bounded head-set (first 10–20 items); there's no internal fan-out cap.
     ///
     /// Cancelling the returned `Task` stops new prefetches; in-flight `ImageActor` decodes finish
-    /// naturally. Idempotent — a repeat call for the same items/width/scale hits both caches
-    /// immediately.
+    /// naturally. Idempotent — a repeat call for the same items/width/scale/layout hits both
+    /// caches immediately.
     @MainActor
     public static func warmUp(
         items: [Item],
         width: CGFloat,
         scale: CGFloat,
         environment: RenderEnvironment,
+        layout: GridLayout = .vertical(),
         contentSizeCategory: VContentSizeCategory = .unspecified,
         cellBuilder: @escaping @MainActor (Item) -> Cell
     ) -> Task<Void, Never> {
@@ -238,7 +249,7 @@ public struct AsyncFeed<
         let cache = environment.layoutCache
         let pool = environment.textPool
         let actor = environment.imageActor
-        let capturedWidth = width
+        let capturedWidth = layout.provider.measureWidth(availableWidth: width)
 
         return Task {
             var allFragments: [[Fragment]] = []

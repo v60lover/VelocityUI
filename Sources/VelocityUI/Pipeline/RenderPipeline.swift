@@ -136,6 +136,11 @@ public actor RenderPipeline {
     ///
     /// - Parameters:
     ///   - tables: NodeTables in display order, parallel to the item array.
+    ///   - availableWidth: The MEASURE width — `layoutProvider.measureWidth(availableWidth:)`
+    ///     already applied by the caller (e.g. a grid's column width, not the raw container
+    ///     width). Keys both the `CacheKey` this function constructs and the `measureNode` call —
+    ///     must be the exact width every other read site (`FeedScrollView`'s own `CacheKey`
+    ///     lookups) uses for the same layout, or writes here silently miss those reads.
     ///   - scale: Captured at the `@MainActor` call site (e.g. `traitCollection.displayScale`)
     ///     so the `ImageCacheKey` matches the one mount-time `spawnMediaFetches` constructs.
     ///   - direction: Real scroll-travel direction from `FeedScrollView`'s `contentOffset` delta

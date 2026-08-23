@@ -118,6 +118,34 @@ final class GridLayoutProviderTests: XCTestCase {
         XCTAssertEqual(frames[5].height, 40, accuracy: 0.001)
     }
 
+    // MARK: - measureWidth(availableWidth:)
+
+    /// `measureWidth(availableWidth:)` must return the exact colWidth `frames(for:)` uses for
+    /// positioning — both go through the same `colWidth(availableWidth:columns:spacing:)` helper,
+    /// so this is really a same-source-of-truth check, not two independent formulas that happen
+    /// to agree.
+    func testMeasureWidth_equalsColWidthFramesActuallyUses() {
+        let provider = GridLayoutProvider(columns: 3, spacing: 8)
+        let layouts = [ResolvedLayout](repeating: layout(height: 100), count: 3)
+        let frames = provider.frames(for: layouts, availableWidth: 320)
+
+        let measureWidth = provider.measureWidth(availableWidth: 320)
+        XCTAssertEqual(measureWidth, frames[0].width, accuracy: 0.001)
+    }
+
+    func testMeasureWidth_narrowerThanAvailableWidth_whenColumnsGreaterThan1() {
+        let provider = GridLayoutProvider(columns: 3, spacing: 8)
+        let measureWidth = provider.measureWidth(availableWidth: 320)
+        XCTAssertLessThan(measureWidth, 320, "a 3-column grid must measure at a narrower width than the container")
+    }
+
+    /// `columns: 1` degenerates to the full available width (minus zero inter-column spacing) —
+    /// same identity `testColumns1_equalsVerticalLayoutProvider` proves for `frames(for:)`.
+    func testMeasureWidth_columns1_equalsAvailableWidth() {
+        let provider = GridLayoutProvider(columns: 1, spacing: 8)
+        XCTAssertEqual(provider.measureWidth(availableWidth: 320), 320, accuracy: 0.001)
+    }
+
     func testColWidthAndXMath() {
         let provider = GridLayoutProvider(columns: 4, spacing: 10)
         let layouts = [ResolvedLayout](repeating: layout(height: 50), count: 4)

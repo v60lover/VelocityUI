@@ -8,10 +8,11 @@ import CoreGraphics
 ///
 /// Pure arithmetic over `ResolvedLayout.totalFrame.height` — no re-measurement. Callers needing
 /// heights that reflect wrapping at the narrower column width must measure each cell at
-/// `colWidth` BEFORE calling `frames(for:)`; this type takes `totalFrame.height` verbatim.
+/// `measureWidth(availableWidth:)` BEFORE calling `frames(for:)`; this type takes
+/// `totalFrame.height` verbatim.
 ///
-/// Reached via `GridLayout.custom(GridLayoutProvider(columns:spacing:))` — there is no `.grid`
-/// case; see `GridLayout`'s doc comment on preferring `.custom` over dead layout stubs.
+/// Reached via `GridLayout.grid(columns:spacing:)`, or directly via
+/// `GridLayout.custom(GridLayoutProvider(columns:spacing:))` for a caller-owned instance.
 public struct GridLayoutProvider: LayoutProvider, Sendable {
     public let columns: Int
     public let spacing: CGFloat
@@ -25,7 +26,7 @@ public struct GridLayoutProvider: LayoutProvider, Sendable {
 
     public nonisolated func frames(for layouts: [ResolvedLayout], availableWidth: CGFloat) -> [CGRect] {
         guard !layouts.isEmpty else { return [] }
-        let colWidth = (availableWidth - spacing * CGFloat(columns - 1)) / CGFloat(columns)
+        let colWidth = Self.colWidth(availableWidth: availableWidth, columns: columns, spacing: spacing)
         var result = [CGRect]()
         result.reserveCapacity(layouts.count)
         var rowTop: CGFloat = 0
@@ -56,6 +57,19 @@ public struct GridLayoutProvider: LayoutProvider, Sendable {
     /// Same as the static `contentHeight(for:columns:)` below, using `self.columns`.
     public nonisolated func contentHeight(for frames: [CGRect]) -> CGFloat {
         Self.contentHeight(for: frames, columns: columns)
+    }
+
+    /// Cells must be measured at the same column width `frames(for:)` lays them out at — text
+    /// re-wraps narrower here than at the full container width, so height is not
+    /// `fullWidthHeight / columns`. See `GRID_LAYOUT_DESIGN.md` §D5.
+    public nonisolated func measureWidth(availableWidth: CGFloat) -> CGFloat {
+        Self.colWidth(availableWidth: availableWidth, columns: columns, spacing: spacing)
+    }
+
+    /// Single source of truth for the column-width formula — shared by `frames(for:)` and
+    /// `measureWidth(availableWidth:)` so positioning and measurement can never silently disagree.
+    fileprivate static func colWidth(availableWidth: CGFloat, columns: Int, spacing: CGFloat) -> CGFloat {
+        (availableWidth - spacing * CGFloat(columns - 1)) / CGFloat(columns)
     }
 }
 

@@ -581,7 +581,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             // `extractFragments` produces) — keeps a later appearanceChanged/mediaChanged
             // classification (which reads `wrEntry.layout`, not `wrEntry.fragments`) correct.
             var blockDiffWorkingRangeCommits: [Int: (layout: ResolvedLayout, fragments: [Fragment])] = [:]
-            let width = lastLayoutWidth > 0 ? lastLayoutWidth : bounds.width
+            let width = measureWidth(for: containerWidth)
             let scale = max(1, traitCollection.displayScale)
             for (prevIdx, cell) in visibleCells {
                 if let nextIdx = survivorByPrevIdx[prevIdx], nextIdx < tables.count,
@@ -1099,7 +1099,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         guard let builder = cellBuilder else { return false }
         guard let previousEntry = workingRange.entry(at: lastIdx) else { return false }
 
-        let width = lastLayoutWidth > 0 ? lastLayoutWidth : bounds.width
+        let width = measureWidth(for: containerWidth)
         let scale = max(1, traitCollection.displayScale)
         let previousTable = tables[lastIdx]
         let newTable = flatten(builder(item), itemID: item.id, contentSizeCategory: contentSizeCategory)
@@ -1157,13 +1157,32 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// survivor height — both intrinsic- and placeholder-seeded rows still need
     /// `refineKnownFrames` to reconcile against the real WorkingRange-committed layout.
     ///
+    /// Container width, honoring the first-layout fallback (`bounds.width` until
+    /// `lastLayoutWidth` is set by the first `layoutSubviews` pass). This is always the raw,
+    /// full width — pass it to `layoutProvider.frames(for:availableWidth:)` and to
+    /// `syncContentSize`'s `contentSize.width`, never directly to a measure/cache-key call
+    /// (route those through `measureWidth(for:)` instead).
+    private var containerWidth: CGFloat {
+        lastLayoutWidth > 0 ? lastLayoutWidth : bounds.width
+    }
+
+    /// The width to measure a cell's content at, and to key `CacheKey`/`measureNode` calls with —
+    /// `layoutProvider.measureWidth(availableWidth:)` applied to a container width. For
+    /// `VerticalLayoutProvider` this equals `containerWidth` verbatim (unchanged behavior); for
+    /// `GridLayoutProvider` it's the narrower column width. Every measure/
+    /// CacheKey call site must route through this so writers and readers never key-mismatch.
+    private func measureWidth(for containerWidth: CGFloat) -> CGFloat {
+        layoutProvider.measureWidth(availableWidth: containerWidth)
+    }
+
     /// Picking each item's height stays here, since it needs `tables`/`oldFrames`/measurement.
     /// Placing the frames (x/y/width, grid columns included) is handed off to
     /// `layoutProvider.frames(for:availableWidth:)` — we wrap each height in a bare
     /// `ResolvedLayout` and let the provider do the positioning. Safe because every provider's
     /// `frames(for:)` only reads `totalFrame.height` from its input.
     private func rebuildFrames(oldFrames: [CGRect], survivors: [(prevIdx: Int, nextIdx: Int)]) {
-        let w = lastLayoutWidth > 0 ? lastLayoutWidth : bounds.width
+        let w = containerWidth
+        let measureW = measureWidth(for: w)
         var knownHeight = [CGFloat?](repeating: nil, count: tables.count)
         for s in survivors where s.prevIdx < oldFrames.count {
             knownHeight[s.nextIdx] = oldFrames[s.prevIdx].height
@@ -1175,7 +1194,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             let h: CGFloat
             if let known = knownHeight[i] {
                 h = known
-            } else if let intrinsic = intrinsicHeight(for: tables[i], width: w) {
+            } else if let intrinsic = intrinsicHeight(for: tables[i], width: measureW) {
                 h = intrinsic
                 estimatedIndices.insert(i)
             } else {
@@ -1213,7 +1232,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                 entry = wrEntry
             } else if _pendingFragmentIndices.contains(index), index < tables.count,
                       let cacheEntry = environment.layoutCache.cachedEntry(
-                          for: CacheKey(layoutHash: tables[index].layoutHash, width: lastLayoutWidth)
+                          for: CacheKey(layoutHash: tables[index].layoutHash, width: measureWidth(for: lastLayoutWidth))
                       ) {
                 // WorkingRange still hasn't been populated by the pipeline for this index (e.g. a
                 // fast leading-index advance outran notifyPipelineIfNeeded), but LayoutCache
@@ -1263,8 +1282,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
     private func syncContentSize() {
         let height = layoutProvider.contentHeight(for: resolvedFrames)
-        let w = lastLayoutWidth > 0 ? lastLayoutWidth : bounds.width
-        let target = CGSize(width: w, height: height)
+        let target = CGSize(width: containerWidth, height: height)
         if contentSize != target { contentSize = target }
     }
 
@@ -1414,7 +1432,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                 spawnMediaFetches(for: cell, fragments: entering, itemID: table.itemID,
                                   syncMap: syncMap)
             } else if let entry = environment.layoutCache.cachedEntry(
-                for: CacheKey(layoutHash: table.layoutHash, width: lastLayoutWidth)
+                for: CacheKey(layoutHash: table.layoutHash, width: measureWidth(for: lastLayoutWidth))
             ) {
                 // WorkingRange miss, but LayoutCache already has the entry (prior pipeline pass at
                 // this width, or AsyncFeed.warmUp() before mount). Materialize inline so this cell
@@ -1508,7 +1526,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         lastNotifiedLeadingIndex = leading
 
         let capturedTables = tables
-        let capturedWidth  = bounds.width  // width contract: verbatim, no arithmetic
+        // The measure width, not the raw container width — RenderPipeline's CacheKey/measureNode
+        // calls must key on the same width `measureWidth(for:)` produces everywhere else (colWidth
+        // under a grid), or its writes silently miss every read site above.
+        let capturedWidth  = measureWidth(for: bounds.width)
         let capturedScale  = max(1, traitCollection.displayScale)  // same guard as spawnMediaFetches
         let capturedDirection = scrollDirection
 
