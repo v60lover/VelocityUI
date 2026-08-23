@@ -162,6 +162,11 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// Vertical gap between adjacent cells in scroll-content coordinates.
     public let layoutSpacing: CGFloat
 
+    /// Places every item's frame, and tells the scroll path what's visible and how tall the
+    /// content is. Defaults to `VerticalLayoutProvider(spacing: layoutSpacing)` — same behavior
+    /// as before this was added. Set at init, like `prefetchAheadCount` — doesn't change later.
+    public let layoutProvider: any LayoutProvider
+
     // MARK: - Debug hooks
 
     #if canImport(XCTest)
@@ -297,6 +302,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     ///   - estimatedItemHeight: Placeholder height (pt) for unmeasured items; affects initial
     ///     contentSize and visual jump when real layouts land.
     ///   - layoutSpacing: Vertical gap between cells (pt).
+    ///   - layoutProvider: Places item frames and drives visibility/content-height. `nil` (default)
+    ///     uses `VerticalLayoutProvider(spacing: layoutSpacing)` — today's behavior, unchanged.
+    ///     Pass `GridLayoutProvider(columns:spacing:)` for a grid instead.
     ///   - notificationCenter: Source of `UIContentSizeCategory.didChangeNotification` for
     ///     Dynamic Type invalidation (VelocityUI-ezo.2.5). Default `.default` is the one
     ///     system-API singleton exception in CLAUDE.md's no-singletons rule; tests inject a
@@ -309,6 +317,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         reachEndThreshold: Int = 3,
         estimatedItemHeight: CGFloat = 300,
         layoutSpacing: CGFloat = 8,
+        layoutProvider: (any LayoutProvider)? = nil,
         notificationCenter: NotificationCenter = .default
     ) {
         self.environment = environment
@@ -317,6 +326,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         self.reachEndThreshold = reachEndThreshold
         self.estimatedItemHeight = estimatedItemHeight
         self.layoutSpacing = layoutSpacing
+        self.layoutProvider = layoutProvider ?? VerticalLayoutProvider(spacing: layoutSpacing)
         self.notificationCenter = notificationCenter
         self.pipeline = RenderPipeline(
             textPool: environment.textPool,
@@ -1146,17 +1156,21 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// (VelocityUI-ksh). Populates `estimatedIndices` for any index not sourced from a known
     /// survivor height — both intrinsic- and placeholder-seeded rows still need
     /// `refineKnownFrames` to reconcile against the real WorkingRange-committed layout.
+    ///
+    /// Picking each item's height stays here, since it needs `tables`/`oldFrames`/measurement.
+    /// Placing the frames (x/y/width, grid columns included) is handed off to
+    /// `layoutProvider.frames(for:availableWidth:)` — we wrap each height in a bare
+    /// `ResolvedLayout` and let the provider do the positioning. Safe because every provider's
+    /// `frames(for:)` only reads `totalFrame.height` from its input.
     private func rebuildFrames(oldFrames: [CGRect], survivors: [(prevIdx: Int, nextIdx: Int)]) {
         let w = lastLayoutWidth > 0 ? lastLayoutWidth : bounds.width
-        let spacing = layoutSpacing
         var knownHeight = [CGFloat?](repeating: nil, count: tables.count)
         for s in survivors where s.prevIdx < oldFrames.count {
             knownHeight[s.nextIdx] = oldFrames[s.prevIdx].height
         }
-        resolvedFrames.removeAll(keepingCapacity: true)
         estimatedIndices.removeAll(keepingCapacity: true)
-        var cursor: CGFloat = 0
-        let last = tables.count - 1
+        var layouts = [ResolvedLayout]()
+        layouts.reserveCapacity(tables.count)
         for i in tables.indices {
             let h: CGFloat
             if let known = knownHeight[i] {
@@ -1168,10 +1182,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                 h = estimatedItemHeight
                 estimatedIndices.insert(i)
             }
-            resolvedFrames.append(CGRect(x: 0, y: cursor, width: w, height: h))
-            cursor += h
-            if i < last { cursor += spacing }
+            layouts.append(ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: 0, height: h)))
         }
+        resolvedFrames = layoutProvider.frames(for: layouts, availableWidth: w)
     }
 
     /// Refines heights for indices where WorkingRange has committed real layouts.
@@ -1249,7 +1262,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     }
 
     private func syncContentSize() {
-        let height = resolvedFrames.last.map(\.maxY) ?? 0
+        let height = layoutProvider.contentHeight(for: resolvedFrames)
         let w = lastLayoutWidth > 0 ? lastLayoutWidth : bounds.width
         let target = CGSize(width: w, height: height)
         if contentSize != target { contentSize = target }
@@ -1293,7 +1306,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         let viewportTop    = contentOffset.y
         let viewportBottom = viewportTop + bounds.height
 
-        let visRange = VerticalLayoutProvider.visibleIndexRange(
+        let visRange = layoutProvider.visibleIndexRange(
             in: resolvedFrames,
             viewportTop: viewportTop,
             viewportBottom: viewportBottom
@@ -1487,7 +1500,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
         let visTop    = contentOffset.y
         let visBottom = visTop + bounds.height
-        let visRange  = VerticalLayoutProvider.visibleIndexRange(
+        let visRange  = layoutProvider.visibleIndexRange(
             in: resolvedFrames, viewportTop: visTop, viewportBottom: visBottom)
         let leading   = visRange.lowerBound
 

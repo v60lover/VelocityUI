@@ -4,10 +4,24 @@ import CoreGraphics
 
 // MARK: - Protocol
 
-/// Converts a flat list of measured (or estimated) layouts into absolute content-coordinate frames.
-/// Implementations must be pure and nonisolated — called off-main during prefetch.
+/// Turns measured layouts into absolute frames, and answers two questions about those frames:
+/// what's visible, and how tall is the content. Must be pure and nonisolated.
+///
+/// `visibleIndexRange` and `contentHeight` run on `FeedScrollView`'s scroll path (every frame),
+/// so they must be fast — no allocations, no rebuilding `frames` from scratch.
 public protocol LayoutProvider: Sendable {
     nonisolated func frames(for layouts: [ResolvedLayout], availableWidth: CGFloat) -> [CGRect]
+
+    /// The contiguous range of indices visible within `[viewportTop, viewportBottom)`.
+    /// `frames` must already be in index order, as produced by this provider's own `frames(for:)`.
+    nonisolated func visibleIndexRange(
+        in frames: [CGRect],
+        viewportTop: CGFloat,
+        viewportBottom: CGFloat
+    ) -> Range<Int>
+
+    /// Total height of the content.
+    nonisolated func contentHeight(for frames: [CGRect]) -> CGFloat
 }
 
 // MARK: - VerticalLayoutProvider
@@ -34,6 +48,20 @@ public struct VerticalLayoutProvider: LayoutProvider, Sendable {
             if i < lastIndex { cursor += spacing }
         }
         return result
+    }
+
+    /// Same binary search as the static version below, just callable through `any LayoutProvider`.
+    public nonisolated func visibleIndexRange(
+        in frames: [CGRect],
+        viewportTop: CGFloat,
+        viewportBottom: CGFloat
+    ) -> Range<Int> {
+        Self.visibleIndexRange(in: frames, viewportTop: viewportTop, viewportBottom: viewportBottom)
+    }
+
+    /// The last item's bottom edge — items stack top to bottom, so that's the full height.
+    public nonisolated func contentHeight(for frames: [CGRect]) -> CGFloat {
+        frames.last.map(\.maxY) ?? 0
     }
 }
 

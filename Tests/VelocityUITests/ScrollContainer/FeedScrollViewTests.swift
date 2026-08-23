@@ -2258,5 +2258,74 @@ final class FeedScrollViewTests: XCTestCase {
 
         await drainFeedWork(feed)
     }
+
+    // MARK: - 30. Provider-driven read path: GridLayoutProvider positions cells in columns (VelocityUI-xhpu.2)
+
+    func testGridLayoutProvider_positionsCellsInColumns() {
+        let env = makeEnvironment()
+        let feed = FeedScrollView<TestItem>(
+            environment: env,
+            frame: CGRect(x: 0, y: 0, width: 375, height: 812),
+            layoutProvider: GridLayoutProvider(columns: 3, spacing: 8)
+        )
+        feed.cellBuilder = { item in AsyncImageNode(url: nil, aspectRatio: item.aspectRatio) }
+        feed.items = items(count: 6, aspectRatio: 1.0)
+        feed.layoutSubviews()
+
+        let colWidth: CGFloat = (375 - 8 * 2) / 3
+        for row in 0..<2 {
+            for col in 0..<3 {
+                let index = row * 3 + col
+                guard let frame = feed._debugResolvedFrame(at: index) else {
+                    XCTFail("expected a resolved frame at index \(index)")
+                    continue
+                }
+                let expectedX = CGFloat(col) * (colWidth + 8)
+                XCTAssertEqual(frame.origin.x, expectedX, accuracy: 0.01,
+                    "index \(index) should sit in column \(col), not at x==0")
+                XCTAssertEqual(frame.width, colWidth, accuracy: 0.01,
+                    "index \(index) should be colWidth-wide, not full-width")
+            }
+        }
+
+        // Row 1 starts below row 0's height + spacing, and contentSize.height must be the last
+        // row's bottom edge (GridLayoutProvider.contentHeight) — not the last item's maxY.
+        guard let row0Frame = feed._debugResolvedFrame(at: 0),
+              let row1Frame = feed._debugResolvedFrame(at: 3) else {
+            return XCTFail("expected row 0 and row 1 frames")
+        }
+        XCTAssertEqual(row1Frame.origin.y, row0Frame.maxY + 8, accuracy: 0.01)
+        XCTAssertEqual(feed.contentSize.height, row1Frame.maxY, accuracy: 0.01,
+            "contentSize.height must be driven by GridLayoutProvider.contentHeight")
+    }
+
+    // MARK: - 31. Default layoutProvider is byte-identical to an explicit VerticalLayoutProvider(spacing:) (VelocityUI-xhpu.2)
+
+    func testDefaultLayoutProvider_matchesExplicitVerticalLayoutProvider() {
+        let envA = makeEnvironment()
+        let feedDefault = FeedScrollView<TestItem>(
+            environment: envA, frame: CGRect(x: 0, y: 0, width: 375, height: 812), layoutSpacing: 12
+        )
+        feedDefault.cellBuilder = { item in AsyncImageNode(url: nil, aspectRatio: item.aspectRatio) }
+
+        let envB = makeEnvironment()
+        let feedExplicit = FeedScrollView<TestItem>(
+            environment: envB, frame: CGRect(x: 0, y: 0, width: 375, height: 812), layoutSpacing: 12,
+            layoutProvider: VerticalLayoutProvider(spacing: 12)
+        )
+        feedExplicit.cellBuilder = { item in AsyncImageNode(url: nil, aspectRatio: item.aspectRatio) }
+
+        let testItems = items(count: 8, aspectRatio: 1.5)
+        feedDefault.items = testItems
+        feedExplicit.items = testItems
+        feedDefault.layoutSubviews()
+        feedExplicit.layoutSubviews()
+
+        for i in 0..<8 {
+            XCTAssertEqual(feedDefault._debugResolvedFrame(at: i), feedExplicit._debugResolvedFrame(at: i),
+                "index \(i): omitting layoutProvider must be byte-identical to passing VerticalLayoutProvider(spacing:) explicitly")
+        }
+        XCTAssertEqual(feedDefault.contentSize, feedExplicit.contentSize)
+    }
 }
 #endif

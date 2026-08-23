@@ -43,6 +43,20 @@ public struct GridLayoutProvider: LayoutProvider, Sendable {
         }
         return result
     }
+
+    /// Same row-granular search as the static version below, using `self.columns`.
+    public nonisolated func visibleIndexRange(
+        in frames: [CGRect],
+        viewportTop: CGFloat,
+        viewportBottom: CGFloat
+    ) -> Range<Int> {
+        Self.visibleIndexRange(in: frames, columns: columns, viewportTop: viewportTop, viewportBottom: viewportBottom)
+    }
+
+    /// Same as the static `contentHeight(for:columns:)` below, using `self.columns`.
+    public nonisolated func contentHeight(for frames: [CGRect]) -> CGFloat {
+        Self.contentHeight(for: frames, columns: columns)
+    }
 }
 
 // MARK: - contentHeight
