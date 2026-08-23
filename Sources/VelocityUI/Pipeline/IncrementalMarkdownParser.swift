@@ -15,8 +15,8 @@ public enum MarkdownBlockKind: Sendable, Equatable, Hashable {
     case codeFence(language: String?)
     case listItem(ordered: Bool)
     case blockquote
-    /// GFM table row — `isHeader` is true only for the row that was retroactively joined with
-    /// its delimiter row (Hazard B). Body rows that follow the same table append with `false`.
+    /// GFM table row — `isHeader` is true only for the row retroactively joined with its
+    /// delimiter row. Body rows that follow append with `false`.
     case tableRow(isHeader: Bool)
 }
 
@@ -30,32 +30,19 @@ struct ParsedMDBlock: Equatable {
 
 // MARK: - IncrementalMarkdownParser
 
-/// Consumes an appended token/markdown stream and emits blocks split into two tiers at a
-/// monotonically non-decreasing frontier `F`: **sealed** blocks (`source[0..<F)`), guaranteed
-/// never to change, and **hot** blocks (the open right spine), which may still be retyped or
-/// absorb more lines. This is the contract VelocityUI-qc7.1's spike proved sufficient to keep
-/// `freeze()` valid under real streaming markdown (`INCREMENTAL_PARSER_STABILITY_SPIKE.md`) — a
-/// caller may `freeze()` sealed blocks, never the hot region. `frontier` (== `sealedBlocks.count`)
-/// is exactly `diff(previous:new:frontier:)`'s `frontier:` argument.
-///
-/// **Not a RenderEnvironment collaborator** — per-item streaming state, one instance per
-/// in-flight message, owned by whatever holds that message's accumulated source (same lifetime
-/// as `previousFragments`/`NodeTable`), not a composition-root collaborator.
-///
-/// **Deliberately simplified CommonMark subset, not full compliance:** list/blockquote
-/// continuation is line-shape heuristics, not full lazy-continuation; GFM tables render each row
-/// as one pipe-joined text line; fences don't nest inside list items. Guaranteed (tested by this
-/// bead's acceptance criteria): a sealed block never moves, `F` never decreases, a blank line
-/// inside an open fence never seals.
+/// Consumes an appended markdown stream and splits it into two tiers at a monotonically
+/// non-decreasing frontier `F`: **sealed** blocks (`source[0..<F)`), guaranteed never to
+/// change and safe to `freeze()`, and **hot** blocks (the open tail), which may still be
+/// retyped. A deliberately simplified CommonMark subset (heuristic list/blockquote
+/// continuation, no fence nesting), not full compliance.
 public struct IncrementalMarkdownParser: Sendable, Equatable {
 
     /// Finalized, immutable blocks — never touched again once appended here.
     private(set) var sealedBlocks: [ParsedMDBlock] = []
     private(set) var sealedBlockIDs: [BlockID] = []
 
-    /// The unsealed tail of the source since the last seal — re-scanned in full on every
-    /// `append(_:)` (bounded in size except during an open fence; see the spike's bounded-reach
-    /// theorem), never the whole message.
+    /// Unsealed tail of the source since the last seal — re-scanned in full on every
+    /// `append(_:)` (bounded except during an open fence), never the whole message.
     private var hotTail: String = ""
 
     /// The hot region's current parse, kept alongside `hotTail` so `blocks(itemID:width:)`
@@ -66,9 +53,8 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
 
     public init() {}
 
-    /// The sealed-block count — the frontier `F` a caller passes to
-    /// `diff(previous:new:frontier:)`. Monotonically non-decreasing across calls to
-    /// `append(_:)` by construction: `sealedBlocks` is only ever appended to, never truncated.
+    /// Sealed-block count — the frontier `F` passed to `diff(previous:new:frontier:)`.
+    /// Monotonically non-decreasing: `sealedBlocks` is only ever appended to.
     public var frontier: Int { sealedBlocks.count }
 
     /// Appends `text` to the accumulated stream and re-parses the hot tail. Any block that
@@ -129,17 +115,9 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         return ids
     }
 
-    /// A block's rendered text plus the font it renders with — the one place block-kind →
-    /// content-transform/font-size/weight is decided, shared by `makeDescriptor` (Layer 2's
-    /// `TextDescriptor`) and `renderNodes` (Layer 1's `TextNode`) so `content`/`font` can never
-    /// silently diverge between the two representations.
-    ///
-    /// Covers `content` + `font` only — color/line-break are each caller's own default
-    /// (`makeDescriptor`: opaque black + `lineBreakMode: 0`; `renderNodes`: `TextNode`'s
-    /// `.primary` + `.byWordWrapping`). Independent decisions that render identically today but
-    /// aren't a shared source of truth — harmless since the two paths never render the same
-    /// block side-by-side. Don't extend the "can never diverge" claim past `content`/`font`
-    /// without also unifying those.
+    /// A block's rendered text plus its font — shared by `makeDescriptor` and `renderNodes`
+    /// so the two representations can't silently diverge. Color/line-break are each
+    /// caller's own separate default.
     struct StyledText {
         var content: String
         var font: VFontDescriptor
@@ -156,13 +134,9 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         case .codeFence:
             size = 20
             weight = 4
-            // Strip the fence marker lines — they are syntax, not renderable content. The
-            // opening marker line always exists (a codeFence block can't be classified without
-            // one), so it is safe to drop unconditionally. The closing marker line is only
-            // present once the fence has actually closed — for a still-open (streaming) fence
-            // the last line is real code, and unconditionally dropping it would hide the most
-            // recently streamed line until the fence closes. Only drop the last line when it is
-            // actually shaped like a closing fence marker.
+            // Strip the fence marker lines. The opening line always exists; only drop the
+            // closing line when it's actually shaped like one — otherwise a still-streaming
+            // fence would hide its most recently typed line.
             var lines = content.split(separator: "\n", omittingEmptySubsequences: false)
             if !lines.isEmpty {
                 lines.removeFirst()
@@ -214,11 +188,8 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         return s.drop { $0 == " " }.description
     }
 
-    /// True when `line` is shaped like a closing fence marker — a run of backticks or tildes
-    /// (length >= 3, matching CommonMark's fence-marker minimum), optionally surrounded by
-    /// whitespace. Used by `makeDescriptor`'s `.codeFence` case to distinguish "this is the
-    /// closing ``` line, strip it" from "this is real streamed code that merely ends the still-
-    /// open fence's current content, keep it."
+    /// True when `line` is a run of >= 3 backticks or tildes (CommonMark's fence-marker
+    /// minimum), optionally padded with whitespace.
     private static func isFenceCloseShaped(_ line: Substring) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         guard trimmed.count >= 3 else { return false }
@@ -233,11 +204,9 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         var cutIndex: String.Index
     }
 
-    /// Pure line-by-line scan of `source` (the current hot tail). Implements the blank-line
-    /// seal lemma from the spike: everything before the last **unprotected** blank line (not
-    /// inside an open fence, and not while a list/blockquote container is open) is sealed. A
-    /// just-closed fence is an additional, unconditional seal point — CommonMark never reopens
-    /// a closed block, so there is no need to wait for a further blank line after one.
+    /// Line-by-line scan of the hot tail: everything before the last unprotected blank
+    /// line (not inside an open fence or container) is sealed. A just-closed fence is an
+    /// additional, unconditional seal point — CommonMark never reopens a closed block.
     private static func parseTail(_ source: String) -> TailParseResult {
         var blocks: [ParsedMDBlock] = []
         var pendingSealBlockCount = 0
@@ -437,9 +406,7 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             }
         }
 
-        // Whatever remains open (including an open fence/container/paragraph) stays hot — it is
-        // NOT finalized here, so it never leaks into `blocks[pendingSealBlockCount...]`'s hot
-        // slice as something that looks finalized.
+        // Whatever remains open stays hot — not finalized here, so it never looks sealed.
         let sealedCount = min(pendingSealBlockCount, blocks.count)
         let sealed = Array(blocks[0..<sealedCount])
         var hot = Array(blocks[sealedCount...])
@@ -452,10 +419,8 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
 
 #if canImport(XCTest)
 extension IncrementalMarkdownParser {
-    /// Test-only contract tripwire (design doc §5.4): a sealed block's key+content must never
-    /// differ from what an earlier snapshot already reported at the same index — the debug
-    /// assert `assert(sealed.contentHash == frozen)` the spike calls for. Not used on any
-    /// production path; gated on `canImport(XCTest)` (never `#if DEBUG`) per CLAUDE.md.
+    /// Test-only: a sealed block's key/content must never differ from what an earlier
+    /// snapshot already reported at the same index.
     func debugSealedPrefixMatches<ID: Hashable & Sendable>(_ previous: [Block], itemID: ID, width: CGFloat) -> Bool {
         let current = blockList(itemID: itemID, width: width)
         let count = min(previous.count, sealedBlocks.count)

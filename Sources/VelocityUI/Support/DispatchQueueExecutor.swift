@@ -7,14 +7,12 @@ import Dispatch
 /// execution context off the cooperative thread pool.
 ///
 /// Why: actors on the default executor share the cooperative pool with measureNode (Layer 2) —
-/// even microsecond-scale actor bookkeeping (cache lookup, semaphore await, dispatch enqueue)
-/// contends for slots that should be running layout. A dedicated executor removes that
-/// contention by construction (contract clause 3, "media never starves layout").
+/// even microsecond-scale actor bookkeeping contends for slots that should be running layout.
+/// A dedicated executor removes that contention by construction.
 ///
-/// Implements only the legacy `enqueue(_ job: UnownedJob)` requirement (SwiftStdlib 5.1 / iOS
-/// 13+), not the iOS 17+ `consuming ExecutorJob` one — the stdlib explicitly supports
-/// legacy-only without warnings on older targets (see swiftlang/swift
-/// `custom_executor_enqueue_availability.swift`). Prior art: `GRDB.swift/GRDB/Core/DispatchQueueActor.swift`.
+/// Implements only the legacy `enqueue(_ job: UnownedJob)` requirement (SwiftStdlib 5.1 / iOS 13+),
+/// not the iOS 17+ `consuming ExecutorJob` one — the stdlib explicitly supports legacy-only
+/// without warnings on older targets.
 public final class DispatchQueueExecutor: SerialExecutor {
     private let queue: DispatchQueue
 

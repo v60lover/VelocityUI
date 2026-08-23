@@ -7,9 +7,8 @@ import UIKit
 /// SwiftUI entry point for VelocityUI feeds.
 ///
 /// Deliberately not `Equatable`: `.equatable()`'s skip path would leave Coordinator's
-/// `onTap`/`onReachEnd` closures stale (closures aren't Equatable, so a skip can't detect
-/// a modifier-only change). `updateUIView`'s own structural guard already makes the
-/// "items unchanged" case cheap, so the skip isn't worth the staleness risk.
+/// `onTap`/`onReachEnd` closures stale, since closures aren't Equatable. `updateUIView`'s own
+/// structural guard already makes the "items unchanged" case cheap.
 @MainActor
 public struct AsyncFeed<
     Item: Identifiable & Sendable & Equatable,
@@ -32,15 +31,10 @@ public struct AsyncFeed<
     /// Creates a feed backed by the given items.
     ///
     /// - Parameters:
-    ///   - items: Updated on every parent body call; unchanged arrays skip rebuild via
-    ///     identity + equality guards in `updateUIView`.
-    ///   - environment: Composition root — construct once (e.g. `@State`) and reuse across
-    ///     re-renders so `LayoutCache`/`DimensionCache` survive SwiftUI identity changes.
-    ///   - layout: Layout strategy — `.vertical()` (default), `.grid(columns:spacing:)`, or
-    ///     `.custom(_:)`. Captured at view identity, like `prefetchWindow` — changing it after
-    ///     mount has no effect; force a `.id()` rebuild to change it at runtime.
-    ///   - cellBuilder: Runs on `@MainActor`, once per item change; result is flattened to a
-    ///     `NodeTable` immediately, so the existential never escapes Layer 1.
+    ///   - items: Updated on every parent body call; unchanged arrays skip rebuild via identity + equality guards.
+    ///   - environment: Composition root — construct once (e.g. `@State`) and reuse across re-renders.
+    ///   - layout: Layout strategy. Captured at view identity — changing after mount needs a `.id()` rebuild.
+    ///   - cellBuilder: Runs on `@MainActor` once per item change; flattened to a `NodeTable` immediately.
     public init(
         items: [Item],
         environment: RenderEnvironment,
@@ -55,63 +49,47 @@ public struct AsyncFeed<
 
     // MARK: - Modifiers
 
-    /// Sets a fixed-item-count warm window, opting out of the default screens-based window.
-    /// Only correct when items-per-screen is roughly constant and known (e.g. a fixed
-    /// single-column list) — under a grid or masonry layout, prefer `prefetchScreens(leading:trailing:)`,
-    /// which is the default. Captured at view identity — changing after mount has no effect
-    /// (debug asserts, release ignores); force a `.id()` rebuild to change it at runtime.
-    /// Last-modifier-wins if chained with `prefetchScreens(leading:trailing:)`.
+    /// Sets a fixed-item-count warm window, opting out of the default screens-based window. Only
+    /// correct when items-per-screen is roughly constant — under a grid or masonry layout, prefer
+    /// `prefetchScreens(leading:trailing:)`. Captured at view identity; last-modifier-wins if chained
+    /// with `prefetchScreens`.
     public func prefetchWindow(ahead: Int, behind: Int) -> Self {
         var copy = self
         copy.warmWindow = .items(ahead: ahead, behind: behind)
         return copy
     }
 
-    /// Sets the warm window geometrically, in screens (viewport-height multiples) — the
-    /// recommended path, and the default (`leading: 2, trailing: 1`) even without calling this.
-    /// `leading` = screens to warm ahead in the scroll direction; `trailing` = screens to keep
-    /// warm behind. The same setting works for vertical, grid, and masonry layouts, because the
-    /// window is a rectangle, not an item count — a grid packing many tiles per screen still
-    /// gets a warm window that actually covers a full screen ahead, unlike a fixed item count.
-    /// Captured at view identity, same rules as `prefetchWindow(ahead:behind:)`.
-    /// Last-modifier-wins if chained with `prefetchWindow(ahead:behind:)`.
+    /// Sets the warm window geometrically, in screens (viewport-height multiples) — the recommended
+    /// path and the default (`leading: 2, trailing: 1`). Works uniformly across vertical, grid, and
+    /// masonry layouts since the window is a rectangle, not an item count. Captured at view identity;
+    /// last-modifier-wins if chained with `prefetchWindow`.
     public func prefetchScreens(leading: CGFloat, trailing: CGFloat) -> Self {
         var copy = self
         copy.warmWindow = .screens(leading: leading, trailing: trailing)
         return copy
     }
 
-    /// Sets how many items from the end of the list trigger `onReachEnd`.
-    ///
-    /// In `prefetchWindow(ahead:behind:)` (item-count) mode, must be ≤ the `behind` count
-    /// (asserted in debug builds) — a threshold larger than the behind-window fires inside the
-    /// evictable range, potentially loading a page that is immediately purged before reaching the
-    /// visible viewport. Not checked in the default `prefetchScreens` (screens) mode.
-    ///
-    /// Default: 3. Captured at view identity (same rules as `prefetchWindow`).
+    /// Sets how many items from the end of the list trigger `onReachEnd`. In `prefetchWindow`
+    /// (item-count) mode, must be ≤ the `behind` count (asserted in debug) — a larger threshold
+    /// fires inside the evictable range, loading a page that's purged before reaching the viewport.
+    /// Default: 3. Captured at view identity.
     public func reachEndThreshold(_ count: Int) -> Self {
         var copy = self
         copy.reachEndThreshold = count
         return copy
     }
 
-    /// Registers a handler invoked on `@MainActor` when the user taps a cell.
-    ///
-    /// The handler receives the tapped item and its frame in scroll-content coordinates.
-    /// The Coordinator always holds the latest closure — no staleness window regardless
-    /// of SwiftUI update batching.
+    /// Registers a handler invoked on `@MainActor` when the user taps a cell, receiving the item and
+    /// its frame in scroll-content coordinates. The Coordinator always holds the latest closure.
     public func onTap(_ handler: @escaping @MainActor (Item, CGRect) -> Void) -> Self {
         var copy = self
         copy.onTap = handler
         return copy
     }
 
-    /// Registers an async handler invoked on `@MainActor` when the visible trailing edge
-    /// nears the end of the item list.
-    ///
-    /// Fires at most once per page; the gate resets when `items.count` grows. Extend the
-    /// list inside this handler to implement infinite scroll. The Coordinator always holds
-    /// the latest closure — no staleness window regardless of SwiftUI update batching.
+    /// Registers an async handler invoked on `@MainActor` when the visible trailing edge nears the end
+    /// of the item list. Fires at most once per page; the gate resets when `items.count` grows. Extend
+    /// the list inside this handler to implement infinite scroll.
     public func onReachEnd(_ handler: @escaping @MainActor () async -> Void) -> Self {
         var copy = self
         copy.onReachEnd = handler
@@ -120,12 +98,9 @@ public struct AsyncFeed<
 
     // MARK: - Coordinator
 
-    /// Internal trampoline target managed by SwiftUI. Do not interact directly.
-    ///
-    /// Holds the latest closure values from the parent body so `updateUIView` can refresh
-    /// them without re-wiring the UIView's stored callbacks on every struct recreation.
-    /// Created once per `FeedScrollView` instance; survives struct recreation; torn down
-    /// with the UIView on `.id()` changes.
+    /// Internal trampoline target managed by SwiftUI. Holds the latest closure values from the parent
+    /// body so `updateUIView` can refresh them without re-wiring the UIView's stored callbacks. Created
+    /// once per `FeedScrollView` instance; survives struct recreation.
     @MainActor
     public final class Coordinator {
         var cellBuilder: (@MainActor (Item) -> Cell)?
@@ -146,9 +121,8 @@ public struct AsyncFeed<
 
     public func makeUIView(context: Context) -> FeedScrollView<Item> {
         #if DEBUG
-        // Only meaningful in item-count mode, where "behind" is a concrete item count to compare
-        // reachEndThreshold against. Screens mode has no direct item-behind count — the trigger
-        // still fires safely, just without this specific footgun check.
+        // Only meaningful in item-count mode, where "behind" is a concrete item count to compare against.
+        // Screens mode has no direct item-behind count — the trigger still fires, just without this check.
         if case .items(_, let behind) = warmWindow {
             assert(reachEndThreshold <= behind,
                    "AsyncFeed: reachEndThreshold > prefetchWindow(behind:) — page-load trigger fires inside the evictable window.")
@@ -158,9 +132,8 @@ public struct AsyncFeed<
         return buildUIView(coordinator: context.coordinator)
     }
 
-    /// Shared body of `makeUIView(context:)`, factored out so it can be exercised without a
-    /// SwiftUI `Context` (which has no public initializer and cannot be constructed outside
-    /// SwiftUI's own runtime — see `_testMakeUIView(coordinator:)`).
+    /// Shared body of `makeUIView(context:)`, factored out so it can be exercised without a SwiftUI
+    /// `Context` (no public initializer, can't be constructed outside SwiftUI's runtime).
     private func buildUIView(coordinator: Coordinator) -> FeedScrollView<Item> {
         coordinator.cellBuilder = cellBuilder
         coordinator.onTap = onTap
@@ -230,21 +203,16 @@ public struct AsyncFeed<
 
     // MARK: - warmUp
 
-    /// Warms `environment.layoutCache` (a `CellEntry` per item) and `environment.imageActor`'s
-    /// image cache before first mount. Call before assigning `items`, typically inside a `Task`
-    /// in the data-loading path; await the returned `Task` so both caches populate before
-    /// `layoutSubviews` fires.
+    /// Warms `environment.layoutCache` and `environment.imageActor`'s image cache before first mount.
+    /// Call before assigning `items`, typically inside a `Task` in the data-loading path; await the
+    /// returned `Task` so both caches populate before `layoutSubviews` fires.
     ///
-    /// `width`/`scale`/`contentSizeCategory`/`layout` must match what `FeedScrollView` uses at
-    /// mount — a mismatch is a silent `CacheKey` miss (one gray frame, no crash), not an error.
-    /// `width` is always the raw container width (same contract as `FeedScrollView.init`'s
-    /// `layoutProvider`); this function derives the actual measure width from `layout` itself
-    /// (`layout.provider.measureWidth(availableWidth:)`) — e.g. column width for `.grid`. Pass a
-    /// bounded head-set (first 10–20 items); there's no internal fan-out cap.
+    /// `width`/`scale`/`contentSizeCategory`/`layout` must match what `FeedScrollView` uses at mount —
+    /// a mismatch is a silent `CacheKey` miss (one gray frame, no crash). Pass a bounded head-set
+    /// (first 10–20 items); there's no internal fan-out cap.
     ///
-    /// Cancelling the returned `Task` stops new prefetches; in-flight `ImageActor` decodes finish
-    /// naturally. Idempotent — a repeat call for the same items/width/scale/layout hits both
-    /// caches immediately.
+    /// Cancelling the returned `Task` stops new prefetches; in-flight decodes finish naturally.
+    /// Idempotent for the same items/width/scale/layout.
     @MainActor
     public static func warmUp(
         items: [Item],
@@ -257,9 +225,8 @@ public struct AsyncFeed<
     ) -> Task<Void, Never> {
         guard !items.isEmpty else { return Task {} }
 
-        // Mirror the scale floor in FeedScrollView.spawnMediaFetches: a sub-1 or zero
-        // scale produces a different ImageCacheKey than the one mount-time uses, so the
-        // warmUp hit never lands. Floor to 1 matches the mount-path floor exactly.
+        // Mirror the scale floor in FeedScrollView.spawnMediaFetches — a sub-1 or zero scale would
+        // produce a different ImageCacheKey than mount-time uses, so the warmUp hit never lands.
         let capturedScale = max(1, scale)
         let tables = items.map { item in
             flatten(cellBuilder(item).renderBody, itemID: item.id, contentSizeCategory: contentSizeCategory)
@@ -346,11 +313,9 @@ public struct AsyncFeed<
     // MARK: - Test hooks
 
     #if canImport(XCTest)
-    /// Test-only: exercises the same coordinator-wiring path as `makeUIView(context:)` without
-    /// requiring a SwiftUI `Context` (no public initializer; cannot be constructed in a unit
-    /// test host). Callers pass the same `Coordinator` instance across repeated calls to
-    /// simulate SwiftUI re-invoking `makeUIView` for one view identity — SwiftUI always supplies
-    /// the same coordinator via `context.coordinator` for the lifetime of that identity.
+    /// Test-only: exercises the same coordinator-wiring path as `makeUIView(context:)` without a
+    /// SwiftUI `Context` (no public initializer). Pass the same `Coordinator` across repeated calls
+    /// to simulate SwiftUI re-invoking `makeUIView` for one view identity.
     func _testMakeUIView(coordinator: Coordinator) -> FeedScrollView<Item> {
         buildUIView(coordinator: coordinator)
     }

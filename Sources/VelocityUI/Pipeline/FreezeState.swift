@@ -5,13 +5,12 @@ import CoreGraphics
 
 // MARK: - FreezeState
 
-/// A block's freeze state: `.hot` (last block, may still grow, never cached) or `.frozen`
-/// (measured + rasterized exactly once, immutable from then on — VelocityUI-6qd LB4).
+/// A block's freeze state: `.hot` (may still grow, never cached) or `.frozen`
+/// (measured + rasterized once, immutable after that).
 ///
-/// `@unchecked Sendable`: `.frozen` carries a `CGImage`, which CoreGraphics doesn't mark
-/// `Sendable` (same pattern as `ImageActor.DecodeResult`). Safe because a frozen `CGImage` is
-/// produced exactly once by `freeze(_:)` and never mutated after — immutable, single-produce/
-/// multi-read values are safe to share across isolation domains.
+/// `@unchecked Sendable` because `.frozen` carries a `CGImage`, which CoreGraphics doesn't
+/// mark `Sendable`. Safe here since the image is produced once by `freeze(_:)` and never
+/// mutated — an immutable, write-once value is safe to share across isolation domains.
 public enum FreezeState: @unchecked Sendable {
     case hot
     case frozen(size: CGSize, bitmap: CGImage)
@@ -19,10 +18,9 @@ public enum FreezeState: @unchecked Sendable {
 
 // MARK: - Injected measure/rasterize collaborators
 
-/// Signature of `TextMeasurementContext.measure(_:width:)`. Injected rather than depending on
-/// the concrete (UIKit-gated) type, so `freeze(_:)` stays pure/nonisolated and testable without
-/// linking UIKit (CLAUDE.md: nonisolated helpers take their pool/context as an argument, never
-/// a global lookup).
+/// Signature of `TextMeasurementContext.measure(_:width:)`. Injected instead of taking the
+/// concrete UIKit-gated type directly, so `freeze(_:)` stays pure/nonisolated and testable
+/// without linking UIKit.
 public typealias TextMeasure = (TextDescriptor, CGFloat) -> CGSize
 
 /// Signature of `rasterizeText(_:size:scale:)`. Injected for the same reason as `TextMeasure`.
@@ -30,16 +28,14 @@ public typealias TextRasterize = (TextDescriptor, CGSize, CGFloat) -> CGImage?
 
 // MARK: - freeze
 
-/// Measures + rasterizes `block`'s text content exactly once, caching the result under
-/// `block.key`. If already `.frozen`, returns it verbatim — zero `measure`/`rasterize` calls
-/// (VelocityUI-6qd LB4: a frozen block is never re-touched).
+/// Measures + rasterizes `block`'s text content once, caching the result under `block.key`.
+/// If already `.frozen`, returns it as-is with no re-measure/rasterize.
 ///
-/// Precondition: `block.fragment.content` must be `.text` — image/geometry blocks aren't frozen
-/// here, their reuse lives in the content-addressed `ImageActor` decode cache instead
-/// (VelocityUI-qc7: diff only earns its keep on content overlap, which images never have).
+/// Precondition: `block.fragment.content` must be `.text`. Image/geometry blocks aren't
+/// frozen here — their reuse goes through `ImageActor`'s decode cache instead.
 ///
-/// - Returns: `.frozen` on success; `.hot` (uncached) if rasterization fails on a degenerate
-///   size, so a later call can retry instead of caching a bogus empty result.
+/// - Returns: `.frozen` on success; `.hot` (uncached) if rasterization fails, so a later
+///   call can retry instead of caching a bad empty result.
 @discardableResult
 public nonisolated func freeze(
     _ block: Block,

@@ -76,12 +76,10 @@ public struct VColorDescriptor: Sendable, Hashable {
     }
 }
 
-/// flatten() always passes the real layoutHash/appearanceHash from the corresponding DSL
-/// node. There is no defaulted-zero init — hand-built test fixtures that don't care about
-/// the hash value must go through the explicit `.test(...)` factory in the test target
-/// (Tests/VelocityUITests/Support/DescriptorTestFactories.swift) so the sentinel is visible
-/// and greppable at the call site, never silently reachable from production code.
-/// Phase 2+ subtree-level classifier will rely on these — do not remove.
+/// flatten() always passes the real layoutHash/appearanceHash from the corresponding DSL node.
+/// There is no defaulted-zero init — hand-built test fixtures must go through the explicit
+/// `.test(...)` factory in the test target so the sentinel stays greppable, never silently
+/// reachable from production code.
 public struct VStackDescriptor: Sendable {
     public let alignment: Int  // raw HorizontalAlignment
     public let spacing: CGFloat
@@ -137,21 +135,16 @@ public struct TextDescriptor: Sendable {
     public let kerning: CGFloat
     /// Extra spacing between lines, in points. 0 = no adjustment.
     public let lineSpacing: CGFloat
-    /// Dynamic Type category `resolvedFont` scales against via `UIFontMetrics`.
-    /// `.unspecified` (the default) skips scaling entirely — see `VContentSizeCategory`'s doc.
-    /// `flatten()` is the only production writer of a non-default value (VelocityUI-ezo.2.5) —
-    /// it also folds this into `layoutHash` so a category change misses `LayoutCache` and
-    /// reclassifies as `.layout`/re-freezes, the same way any other geometry-affecting
-    /// attribute does.
+    /// Dynamic Type category `resolvedFont` scales against via `UIFontMetrics`. `.unspecified` (the
+    /// default) skips scaling entirely. `flatten()` is the only production writer of a non-default
+    /// value, and folds it into `layoutHash` so a category change misses `LayoutCache` and re-measures.
     public let contentSizeCategory: VContentSizeCategory
     public let layoutHash: Int
     public let appearanceHash: Int
 
     /// Public and memberwise on purpose: `rasterizeText(_:size:scale:)` and
-    /// `TextMeasurementContext.measure(_:width:)` are both public entry points that take a
-    /// TextDescriptor as their argument, so callers outside this module need a way to build
-    /// one directly — this init is that contract, not an accident of Sendable-struct synthesis.
-    /// Keep its parameter list in sync with those two entry points' needs.
+    /// `TextMeasurementContext.measure(_:width:)` are public entry points taking a TextDescriptor,
+    /// so callers outside this module need a way to build one directly.
     public init(
         content: String,
         font: VFontDescriptor,
@@ -269,29 +262,22 @@ public enum NodeKind: Sendable {
 /// Flat, index-based representation of a DSL node tree. Created once on @MainActor from a
 /// RenderNode tree; passed by value across all layer boundaries — no existentials past this point.
 ///
-/// `itemID` is `AnyHashable` (not `any Hashable & Sendable`) so it can be a Set/Dictionary key
-/// for the differ and cell-recycling layer. `AnyHashable` isn't stdlib-Sendable (its box can hold
-/// non-Sendable payloads), hence `nonisolated(unsafe)` — safe because the generic init constrains
-/// ID to `Hashable & Sendable`, so the boxed payload is always Sendable in practice. Don't remove
-/// the annotation without first making `AnyHashable` Sendable upstream.
+/// `itemID` is `AnyHashable` so it can be a Set/Dictionary key for the differ and cell-recycling
+/// layer. `AnyHashable` isn't stdlib-Sendable, hence `nonisolated(unsafe)` — safe because the
+/// generic init constrains ID to `Hashable & Sendable`, so the boxed payload is always Sendable.
 public struct NodeTable: Sendable {
     // See struct-level doc for the full rationale on nonisolated(unsafe) here.
     nonisolated(unsafe) private let _itemID: AnyHashable
 
     #if canImport(XCTest)
     // No-singletons exemption: test-only instrumentation. Injecting this through the nonisolated
-    // pure helpers (classify, measureNode) would violate their "no implicit cache lookup"
-    // contract (CLAUDE.md §4); static placement is the lesser violation.
+    // pure helpers would violate their "no implicit cache lookup" contract; static placement is
+    // the lesser violation.
     //
-    // Counts every .itemID read, not AnyHashable constructions. RenderDiffer.diff reads it 4x
-    // per surviving item (prevIndex build, lookup, removeValue, removed-check); itemsDidChange
-    // height-forwarding adds zero (uses (prevIdx, nextIdx) pairs). A regression that rebuilds an
-    // [AnyHashable: _] dict for height-forwarding raises the count to 6×N — tests catch it.
+    // Counts every .itemID read. RenderDiffer.diff reads it 4x per surviving item — a regression
+    // that rebuilds an [AnyHashable: _] dict for height-forwarding raises the count to 6×N.
     //
-    // NOT thread-safe: the 4×N bound assumes serial access, no concurrent Task reading .itemID
-    // during measurement. testAppearanceOnlyUpdateAnyHashableAccessCountBounded enforces this
-    // via frame.height=0 (blocks updateVisibleCells Task spawns) — without that guard a test
-    // would under-count and false-pass.
+    // NOT thread-safe: assumes serial access, no concurrent Task reading .itemID during measurement.
     nonisolated(unsafe) static var _itemIDCounter: Int = 0
     #endif
 
@@ -311,20 +297,16 @@ public struct NodeTable: Sendable {
     /// Per-node lifecycle metadata. `.positional` preserves legacy trailing-hot behavior.
     public let blockLifecycles: [BlockLifecycle]
 
-    /// Parallel array of per-node `.frame()` specs, indexed identically to `nodes`.
-    /// `nil` (not an all-`.unspecified` array) whenever no node in the tree was framed —
-    /// that is the zero-cost unframed path: no `[FrameSpec]` allocation, and `frame(at:)`
-    /// takes a single predicted `nil`-check branch instead of an array bounds check.
-    /// Populated by `flatten()` (VelocityUI-dv7) at the wrapped node's index — see
-    /// `FrameModifierNode`'s doc comment for why framing folds in rather than becoming
-    /// its own `NodeKind`.
+    /// Parallel array of per-node `.frame()` specs, indexed identically to `nodes`. `nil` (not an
+    /// all-`.unspecified` array) whenever no node in the tree was framed — the zero-cost unframed
+    /// path: no allocation, and `frame(at:)` takes a single predicted `nil`-check branch. Populated
+    /// by `flatten()` at the wrapped node's index.
     public let frames: [FrameSpec]?
 
-    // Precomputed in init — turns the old O(n) scan in children(of:) into O(k).
-    // childIndices is a contiguous array of child node indices grouped by parent.
-    // childRanges[i] is the slice in childIndices that holds the children of node i.
-    // Insertion order (= DSL child order = z-order) is preserved because buildChildIndex
-    // iterates parentIndices in node-index order, which equals DFS pre-order.
+    // Precomputed in init — turns the old O(n) scan in children(of:) into O(k). childIndices is a
+    // contiguous array of child node indices grouped by parent; childRanges[i] is its slice for node i.
+    // Insertion order (= DSL child order = z-order) is preserved because buildChildIndex iterates
+    // parentIndices in node-index order, which equals DFS pre-order.
     private let childRanges: [Range<Int>]
     private let childIndices: [Int]
 
@@ -358,10 +340,9 @@ public struct NodeTable: Sendable {
         return childIndices[childRanges[nodeIndex]]
     }
 
-    /// Returns the `.frame()` spec recorded for `i`, or `.unspecified` when this table has
-    /// no frames at all (the common unframed case) or `i` is out of bounds. Callers on the
-    /// measure path (`measureNode`) branch on `spec.isSpecified` rather than on `frames == nil`
-    /// directly so a bounds-safe default reads identically to "never framed".
+    /// Returns the `.frame()` spec recorded for `i`, or `.unspecified` when this table has no frames
+    /// at all or `i` is out of bounds. Callers branch on `spec.isSpecified` rather than `frames == nil`
+    /// so a bounds-safe default reads identically to "never framed".
     public func frame(at i: Int) -> FrameSpec {
         guard let frames, i >= 0, i < frames.count else { return .unspecified }
         return frames[i]

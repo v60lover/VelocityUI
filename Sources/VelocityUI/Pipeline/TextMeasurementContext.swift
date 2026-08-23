@@ -20,22 +20,16 @@ public final class TextMeasurementContext: @unchecked Sendable {
 
     /// Synchronous measurement — called from within a pool checkout.
     public func measure(_ descriptor: TextDescriptor, width: CGFloat) -> CGSize {
-        // Built from TextDescriptor.attributedString (TextRasteriser.swift) — the single
-        // attribute-building source shared with rasterizeText, so measured size can never
-        // drift from rendered pixels on font/paragraph/color attributes.
+        // Uses the same attributedString builder as rasterizeText, so measured size never
+        // drifts from rendered pixels.
         contentStorage.performEditingTransaction {
             contentStorage.attributedString = descriptor.attributedString
         }
 
         container.size = CGSize(width: width, height: .greatestFiniteMagnitude)
         container.maximumNumberOfLines = descriptor.lineLimit ?? 0
-        // Mirrors rasterizeText's container setup (TextRasteriser.swift) for defensive
-        // symmetry between the two NSTextContainer configurations. Has no effect on the
-        // CGSize returned below: line-breaking geometry (wrap points, fragment frames) is
-        // driven by the paragraphStyle.lineBreakMode already carried on descriptor.attributedString
-        // (see TextRasteriser.makeAttributes()), not by this container-level property, which
-        // only selects the truncation glyph (ellipsis vs. clip) rasterizeText draws for the
-        // last line -- a rendering concern measure() never observes since it returns only a size.
+        // Only affects the truncation glyph drawn by rasterizeText; wrap geometry comes from
+        // paragraphStyle on the attributed string, not this property, so it doesn't change the size below.
         container.lineBreakMode = NSLineBreakMode(rawValue: descriptor.lineBreakMode) ?? .byWordWrapping
 
         var totalHeight: CGFloat = 0

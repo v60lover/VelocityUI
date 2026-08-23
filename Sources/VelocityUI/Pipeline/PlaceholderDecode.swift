@@ -5,22 +5,16 @@ import CoreGraphics
 import Foundation
 import ImageIO
 
-/// Shared upper bound (px) for both placeholder decode paths. Placeholders are intentionally
-/// low-fidelity: `CALayer`'s default `.resize` gravity stretches the backing image to fill the
-/// fragment's frame at render time, so decoding/upscaling past this bound on the synchronous
-/// MainActor layout path is pure waste. A prior BlurHash revision normalised at the caller's
-/// full `targetSize` (e.g. 900x900px for 300pt@3x) and measured ~2-6ms via `CGContext.draw` —
-/// the opposite of the sub-millisecond budget this exists for (VelocityUI-1su.3 AC3).
+/// Shared upper bound (px) for both placeholder decode paths. Placeholders are
+/// intentionally low-fidelity: `CALayer`'s default `.resize` gravity stretches the backing
+/// image to fill the frame at render time, so decoding past this bound on the synchronous
+/// MainActor layout path is pure waste.
 private let placeholderMaxPixelSize = 32
 
-/// Decodes small (~4KB) JPEG bytes into a decode-guaranteed first-paint placeholder.
-///
-/// Pure, nonisolated, synchronous — safe to call on MainActor. Bounded by
-/// `placeholderMaxPixelSize` (aspect-preserving, ImageIO scales the longer side to/toward this
-/// bound) regardless of the fragment's real on-screen size; result is normalised/clipped at
-/// that decoded size, not upscaled to `targetSize`. Piped through `normaliseAndRound` so it
-/// satisfies the same BGRA8888-premultiplied invariants as the real image path (`ImageActor`)
-/// — one CGContext-clip implementation, not two.
+/// Decodes small (~4KB) JPEG bytes into a decode-guaranteed first-paint placeholder. Pure,
+/// nonisolated, synchronous — safe on MainActor. Bounded by `placeholderMaxPixelSize`
+/// (aspect-preserving), never upscaled to `targetSize`. Piped through `normaliseAndRound`
+/// so it satisfies the same BGRA8888 invariants as the real image path.
 nonisolated func decodeThumbnailPlaceholder(
     _ data: Data,
     targetSize: CGSize,
@@ -38,13 +32,9 @@ nonisolated func decodeThumbnailPlaceholder(
     return normaliseAndRound(thumb, targetSize: decodedSize, cornerRadius: gridCornerRadius, scale: 1)
 }
 
-/// Decodes a BlurHash string into a decode-guaranteed first-paint placeholder.
-///
-/// Pure, nonisolated, synchronous CPU work (no I/O) — decodes into a fixed
-/// `placeholderMaxPixelSize`-square internal grid, then normalises/clips at THAT grid's own
-/// size (not `targetSize`). See `placeholderMaxPixelSize`'s docstring for why. `cornerRadius`
-/// (given in points against `targetSize`) is scaled proportionally into the small grid's
-/// coordinate space.
+/// Decodes a BlurHash string into a decode-guaranteed first-paint placeholder — a fixed
+/// `placeholderMaxPixelSize`-square grid, normalised/clipped at that grid's own size, not
+/// `targetSize`. `cornerRadius` is scaled proportionally into the grid's coordinate space.
 nonisolated func decodeBlurHashPlaceholder(
     _ hash: String,
     targetSize: CGSize,
@@ -64,10 +54,8 @@ nonisolated func decodeBlurHashPlaceholder(
 
 // MARK: - BlurHash algorithm (public-domain — https://blurha.sh)
 //
-// Shared base83/color-space primitives (blurHashDigits, base83Decode, sRGBToLinear,
-// linearToSRGB, signPow, decodeDC, decodeAC) live in BlurHashMath.swift — no
-// CoreGraphics/UIKit dependency, so PlaceholderEncode.swift's macOS-buildable offline
-// tooling path can reuse the exact same math instead of a second implementation.
+// Shared base83/color-space primitives live in BlurHashMath.swift, reused by
+// PlaceholderEncode.swift's offline tooling path.
 
 /// Decodes a BlurHash string into an RGBA8 (non-premultiplied, alpha always 255) pixel
 /// buffer at the given grid size. Returns nil for malformed hashes (wrong length,
@@ -97,12 +85,9 @@ private nonisolated func blurHashDecodePixels(_ hash: String, width: Int, height
         colors[i] = decodeAC(acValue, maxValue: maxValue)
     }
 
-    // Separable cosine basis: cos(pi*x*i/width) depends only on (x,i), never (y,j), and vice
-    // versa. Precomputing both tables turns the decode from O(W*H*numX*numY) cos() calls into
-    // O(W*numX + H*numY) — the per-pixel loop below is then plain float multiply-adds. This is
-    // the standard optimization used by reference BlurHash decoders; without it, decode cost is
-    // dominated almost entirely by redundant cos() evaluations (measured ~4.5ms vs ~100us at a
-    // 300x300pt target on-device — see VelocityUI-1su.3 AC3's <500us p99 budget).
+    // Separable cosine basis: cos(pi*x*i/width) depends only on (x,i), not (y,j). Precomputing
+    // both tables turns the decode from O(W*H*numX*numY) cos() calls into O(W*numX + H*numY)
+    // — measured ~4.5ms vs ~100us at a 300x300pt target without this.
     var cosX = [Float](repeating: 0, count: width * numX)
     for x in 0..<width {
         for i in 0..<numX {

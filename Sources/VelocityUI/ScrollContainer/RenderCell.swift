@@ -28,15 +28,10 @@ public final class MediaHandle: Sendable {
 
 // MARK: - RenderCell
 
-/// CALayer-backed cell with two-phase commit:
-/// • geometry: applyLayout(_:)  — synchronous, hot path, never awaits
-/// • media:    applyContent(id:image:) — called async when image is decoded
-///
-/// Layer tree:
-///   layer (root, frame owned by scroll container)
-///   ├── placeholderLayer  (CAGradientLayer, systemGray5→6, opacity 1 until all media loads)
-///   └── contentLayer      (opacity 0 until all media loads)
-///       └── sublayers keyed by fragment.id  [Int: CALayer]
+/// CALayer-backed cell with two-phase commit: `applyLayout` sets geometry synchronously on the
+/// hot path, `applyContent` paints media asynchronously once decoded. Layer tree: a
+/// placeholder gradient and a content layer (fragment sublayers keyed by id), opacity-swapped
+/// once all media loads.
 @MainActor
 public final class RenderCell {
     private enum LayerIdentity: Hashable {
@@ -51,10 +46,8 @@ public final class RenderCell {
     /// Set at init; stored as let so future per-kind pools can dispatch on this value.
     public let kind: CellKind
 
-    /// Produces each image fragment's first-paint placeholder. Defaults to
-    /// `DefaultPlaceholderRenderer` (this cell's original thumbnail/BlurHash behavior).
-    /// Callers that own a `RenderEnvironment` should pass `environment.placeholderRenderer`
-    /// so cell and environment agree on first-paint strategy.
+    /// Produces each image fragment's first-paint placeholder. Callers that own a
+    /// `RenderEnvironment` should pass `environment.placeholderRenderer` to keep strategy in sync.
     private let placeholderRenderer: any PlaceholderRenderer
 
     /// Layers follow an explicit block identity through insertions; positional fragments retain
@@ -76,13 +69,9 @@ public final class RenderCell {
     /// Sticky true once all media has loaded for the current item; cleared on cross-item recycle.
     private var allMediaLoaded = false
     private(set) var currentItemID: AnyHashable?
-    /// Set by `prepareForReuse`'s cross-item branch; consumed by the next `applyLayout` call.
-    /// `fragment.id` is positional (== nodeIndex), so a cross-item recycle where the new item's
-    /// id SET differs from the retained one (not just count) can't be caught by the cheap
-    /// `sublayers.count > fragments.count` check — e.g. an image-only cell (ids {0}) recycled
-    /// into a VStack{image,text} cell (ids {1,2}): count 1→2 passes the guard, but id 0 orphans
-    /// forever. When true, `applyLayout` runs the full id-diff prune unconditionally, then clears
-    /// the flag. See VelocityUI-ksh.
+    /// Set by `prepareForReuse`'s cross-item branch; forces `applyLayout`'s next call to run the
+    /// full id-diff prune unconditionally, since a same-count id-set change (e.g. an image-only
+    /// cell recycled into an image+text cell) can't be caught by a count comparison alone.
     private var needsSublayerReconcile = false
 
     public init(kind: CellKind = .standard, placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer()) {
@@ -122,26 +111,10 @@ public final class RenderCell {
 
     // MARK: - Lifecycle
 
-    /// Compares newItemID against currentItemID to pick the correct recycle mode, then rebinds.
-    ///
-    /// Same item  → cancel pending fetches only; contents stay (stale-until-replaced).
-    /// Cross item → cancel fetches + hard-cut contents/background + reset opacities. Stale
-    ///              content from another item is a UX and privacy bug — always hard-cut on
-    ///              cross-item recycle.
-    ///
-    /// Cross-item recycle keeps the existing sublayer CALayer instances (and the `sublayers`
-    /// map) instead of removing them — only `contents`/`backgroundColor` are cleared, inside
-    /// the same disabled-actions transaction that resets the placeholder/content opacities, so
-    /// the hard privacy cut still lands atomically. `applyLayout`'s `if let existing =
-    /// sublayers[fragment.id]` path then reuses these cleared layers for the next item's
-    /// fragments instead of forcing a fresh `CALayer()` alloc on every cross-item mount — the
-    /// "20/37 CALayer" allocation smell from VelocityUI-ksh. Safe against stale PIXELS because
-    /// every fragment whose `sub.contents == nil` unconditionally re-derives its content in
-    /// `applyLayout` (sync paint, decode placeholder, or gray tint). It is NOT by itself safe
-    /// against stale/orphaned LAYERS when the new item's fragment id set differs from the
-    /// retained one (not just its count) — `needsSublayerReconcile` is set here so the next
-    /// `applyLayout` call runs the full id-diff prune unconditionally and reconciles the
-    /// `sublayers` map to the new item's exact id set.
+    /// Same item: cancel pending fetches only, contents stay. Cross item: also hard-cut
+    /// contents/background and reset opacities (stale content from another item is a privacy
+    /// bug). Cross-item recycle keeps the sublayer CALayer instances rather than reallocating
+    /// them — `applyLayout` re-derives each cleared layer's content on the next call.
     public func prepareForReuse(for newItemID: AnyHashable) {
         let isSameItem = (currentItemID == newItemID)
 
@@ -180,16 +153,9 @@ public final class RenderCell {
         applyLayout(fragments, synchronousContent: [:])
     }
 
-    /// Geometry phase with optional synchronous content paint.
-    ///
-    /// For image fragments whose id is in `synchronousContent`, the decoded CGImage is applied
-    /// inline — no Task spawn, no fade, no gray tint. If the map covers every image fragment,
-    /// `contentLayer` is revealed and `placeholderLayer` hidden in the same CATransaction (sync
-    /// paint = image is part of the first rendered frame).
-    ///
-    /// Callers must obtain `synchronousContent` via `ImageActor.cachedImage` (nonisolated) — on a
-    /// scale mismatch it returns nil and the fragment falls back to the async `spawnMediaFetches`
-    /// path. Extra keys not matching any fragment id are silently ignored.
+    /// Geometry phase with optional synchronous content paint: image fragments whose id is in
+    /// `synchronousContent` get their decoded CGImage applied inline (no Task, no fade, no gray
+    /// tint), and if every image fragment is covered, contentLayer is revealed immediately.
     public func applyLayout(_ fragments: [Fragment], synchronousContent: [Int: CGImage]) {
         let cellBounds = CGRect(origin: .zero, size: layer.bounds.size)
 
@@ -202,12 +168,8 @@ public final class RenderCell {
             contentLayer.frame = cellBounds
         }
 
-        // Prune sublayers no longer in the fragment set.
-        //
-        // `needsSublayerReconcile` forces the id-diff unconditionally on a cross-item recycle
-        // whose fragment id SET differs from the retained one (see the property's doc for why
-        // count alone can't catch this) — the one `Set` alloc lands only on cross-item mounts.
-        // Same-item relayout (flag false): skip the id-diff unless count strictly shrinks.
+        // Prune sublayers no longer in the fragment set. Skip the id-diff (and its Set alloc)
+        // unless forced by needsSublayerReconcile or the count strictly shrinks.
         if needsSublayerReconcile || sublayers.count > fragments.count {
             let incomingIdentities = Set(fragments.map(layerIdentity(for:)))
             let incomingIDs = Set(fragments.map(\.id))
@@ -268,10 +230,8 @@ public final class RenderCell {
                 }
                 mediaFragmentIDs.insert(fragment.id)
             } else if case .text = fragment.content {
-                // Text has no async delivery path (unlike images, no applyContent/fade-in) —
-                // the pipeline or C3 in-place path must provide its bitmap synchronously. Set
-                // unconditionally so a text cache miss cannot retain pixels from a previous
-                // fragment after a text->other->text reclassification at the same id.
+                // Text has no async delivery path — set unconditionally so a cache miss can't
+                // retain a previous fragment's pixels after reclassification at the same id.
                 sub.contents = synchronousContent[fragment.id]
                 sub.backgroundColor = nil
                 mediaFragmentIDs.remove(fragment.id)
@@ -363,39 +323,30 @@ public final class RenderCell {
 
     // MARK: - Content
 
-    /// Which physics-fallback path a real-image `applyContent` delivery replaced.
-    /// Reported so callers (FeedScrollView) can distinguish a true gray→image transition
-    /// (prefetch never landed a placeholder either) from a thumbnail/BlurHash→image
-    /// transition (the decode-guaranteed placeholder engaged before the real image arrived).
+    /// Which placeholder a real-image `applyContent` delivery replaced — lets callers
+    /// distinguish a gray→image transition from a thumbnail/BlurHash→image one.
     public enum ContentTransitionKind: Sendable, Equatable {
         case fromGrayPlaceholder
         case fromThumbnailPlaceholder
     }
 
     #if canImport(XCTest)
-    /// Counts applyContent privacy-guard rejections (stale itemID deliveries).
-    /// In normal fast-scroll operation this should be zero — cancelled Tasks return nil before
-    /// reaching applyContent. Non-zero counts indicate a cancellation-propagation gap.
-    /// Serial-access invariant: reads/writes happen on @MainActor only (RenderCell is @MainActor);
-    /// the nonisolated(unsafe) annotation is a formality for @testable cross-module access.
+    /// Counts applyContent privacy-guard rejections (stale itemID deliveries). Should stay zero
+    /// in normal operation; nonzero indicates a cancellation-propagation gap.
     nonisolated(unsafe) static var _privacyGuardFiredCount: Int = 0
 
     /// True once `contentLayer` is visible: all images have loaded, or a paintable text bitmap
     /// arrived before a pending image. Tests must not infer this from async-delivery counters.
     var _debugIsContentRevealed: Bool { contentLayer.opacity == 1 }
 
-    /// Every fragment id currently painting a `CGImage` (image or text), mapped to that exact
-    /// instance. Test-only — lets tests assert PIXEL identity (the same `CGImage` reference is
-    /// still on screen = zero re-rasterize/re-decode) instead of only frame height, without the
-    /// test needing to know `Fragment.id`'s `NodeTable` nodeIndex mapping ahead of time (VelocityUI
-    /// -socg C3 activation's "re-validate by pixels, not just frame height" checklist item).
+    /// Every fragment id currently painting a `CGImage`, mapped to that exact instance.
+    /// Test-only — lets tests assert pixel identity, not just frame height.
     var _debugPaintedBitmaps: [Int: CGImage] {
         var result: [Int: CGImage] = [:]
         for (id, identity) in layerIdentityByFragmentID {
             guard let layer = sublayers[identity] else { continue }
-            // `contents as? CGImage` always "succeeds" for any CF-bridged Any (compiler warning
-            // treated as an error in the Xcode-project test target) — CFGetTypeID is the correct
-            // way to check a CF type identity before the cast.
+            // `contents as? CGImage` always succeeds for any CF-bridged Any — CFGetTypeID is the
+            // correct way to check a CF type identity before the cast.
             guard let contents = layer.contents else { continue }
             let cf = contents as CFTypeRef
             guard CFGetTypeID(cf) == CGImage.typeID else { continue }
@@ -404,27 +355,19 @@ public final class RenderCell {
         return result
     }
 
-    /// Total count of successful `applyContent` deliveries across all cells. Test-only — no
-    /// BenchmarkHost consumer (that instrumentation routes through
-    /// `RenderEnvironment.contentDeliveryObserver` instead). Used by RenderCellTests/
-    /// FeedScrollViewTests to assert the sync mount-time paint path bypasses `applyContent`
-    /// entirely.
-    /// nonisolated(unsafe): writes occur only on @MainActor; reads are test-only.
+    /// Total count of successful `applyContent` deliveries across all cells. Test-only — used
+    /// to assert the sync mount-time paint path bypasses `applyContent` entirely.
     nonisolated(unsafe) static var _debugApplyContentCount: Int = 0
     nonisolated static func _debugResetApplyContentCount() { _debugApplyContentCount = 0 }
     #endif
 
     /// Apply a pre-decoded BGRA8888-normalised image. Crossfades over 0.2s via CATransition
-    /// (`CALayer.contents` has no default CA action, so `setAnimationDuration` alone would be
-    /// an instant swap). Fades out the placeholder once ALL image fragments arrive.
+    /// (`CALayer.contents` has no default CA action, so an instant swap would otherwise occur),
+    /// then fades out the placeholder once all image fragments have arrived.
     ///
-    /// `itemID` must match `currentItemID` — passing the ID captured at fetch-start lets the
-    /// cell self-defend against stale callbacks racing a cross-item recycle (privacy guarantee:
-    /// another item's image must never paint on this cell's sublayers).
-    ///
-    /// Returns the `ContentTransitionKind` replaced, or nil if rejected (privacy guard) or the
-    /// fragment id has no sublayer. Callers that don't need gray-vs-thumbnail distinction may
-    /// ignore it.
+    /// `itemID` must match `currentItemID` — this rejects stale callbacks racing a cross-item
+    /// recycle so another item's image can never paint on this cell. Returns nil if rejected or
+    /// the fragment id has no sublayer.
     @discardableResult
     public func applyContent(id: Int, image: CGImage, for itemID: AnyHashable) -> ContentTransitionKind? {
         // Privacy guard: reject stale callbacks from a previous item's fetch.
@@ -464,9 +407,8 @@ public final class RenderCell {
 
     // MARK: - Media Handles
 
-    /// Register a Task token for a pending image fetch.
-    /// The Task's body MUST NOT strongly capture this cell — use `[weak self]` to avoid a
-    /// retain cycle that outlives cancellation. Cycle risk: cell → handles → task closure → cell.
+    /// Register a Task token for a pending image fetch. The Task's body must capture this cell
+    /// weakly to avoid a retain cycle that outlives cancellation.
     func addMediaHandle(_ handle: MediaHandle) {
         mediaHandles.append(handle)
     }
@@ -476,10 +418,8 @@ public final class RenderCell {
         mediaHandlesByFragmentID[fragmentID, default: []].append(handle)
     }
 
-    /// Cancel all pending media fetch Tasks without clearing sublayer contents.
-    /// Symmetric counterpart to `addMediaHandle`. Call at recycle time to release decode
-    /// slots immediately — sublayers stay intact for pool reuse; `prepareForReuse` clears
-    /// them on the next cross-item bind.
+    /// Cancel all pending media fetch Tasks without clearing sublayer contents — call at recycle
+    /// time to release decode slots immediately; `prepareForReuse` clears content later.
     func cancelPendingMedia() {
         mediaHandles.forEach { $0.cancel() }
         mediaHandles.removeAll(keepingCapacity: true)
@@ -495,13 +435,9 @@ public final class RenderCell {
 
     // MARK: - Private
 
-    /// Renders a fragment's first-paint placeholder via `placeholderRenderer`, trying
-    /// thumbnail, then BlurHash, then a consumer's custom payload, in that order — thumbnail
-    /// takes precedence over BlurHash over custom when more than one is set. Runs
-    /// synchronously on MainActor — callers must only invoke this when `sub.contents == nil`
-    /// (the gate in applyLayout already enforces a decode-once-per-fragment-lifetime budget).
-    /// See `PlaceholderRenderer`'s docstring for the frame-budget contract every renderer
-    /// (including the default) must honor.
+    /// Renders a fragment's first-paint placeholder via `placeholderRenderer`, trying thumbnail,
+    /// then BlurHash, then a custom payload, in that order. Runs synchronously on MainActor —
+    /// only call when `sub.contents == nil`.
     private func decodePlaceholder(_ descriptor: ImageDescriptor, targetSize: CGSize) -> CGImage? {
         if let data = descriptor.thumbnailData,
            let image = placeholderRenderer.render(

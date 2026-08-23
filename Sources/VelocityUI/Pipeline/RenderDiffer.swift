@@ -7,14 +7,10 @@ import CoreGraphics
 // MARK: - ChangeKind
 
 /// Coarse classification of how two NodeTables for the same item differ, picking the minimum
-/// re-work path: `.none` skips entirely; `.appearance` re-commits visual properties only
-/// (geometry/media unchanged); `.media` re-fetches image content (geometry unchanged, no
-/// re-layout); `.layout` does a full re-measure and re-commit.
-///
-/// `cornerRadius` changes classify as `.appearance` (geometry unaffected), but since
-/// `AsyncImageNode` bakes rounding at decode time via `CGContext` clip, not on `CALayer`, the
-/// appearance consumer must still re-request image content from `ImageActor` for the new
-/// rounded bitmap (see `ImageDescriptor.cornerRadius`).
+/// re-work path: `.none` skips entirely, `.appearance` re-commits visuals only, `.media`
+/// re-fetches image content, `.layout` does a full re-measure. A `cornerRadius`-only change
+/// still classifies `.appearance`, but since rounding is baked at decode time (not on
+/// `CALayer`), that consumer must still re-request the image for a new rounded bitmap.
 public enum ChangeKind: Sendable {
     case none
     case appearance
@@ -24,14 +20,13 @@ public enum ChangeKind: Sendable {
 
 // MARK: - classify
 
-/// Compares two NodeTables for the same item, returning the minimum change tier via a
-/// three-tier, hash-first algorithm: (1) both hashes equal → `.none`, O(1); (2) layoutHash
-/// equal, appearanceHash differs → `.appearance`; (3) layoutHash differs → pairwise flat-array
-/// walk, `.media` if every differing node is an image whose only change is a URL with
-/// dimensions already in `dimensionCache`, else `.layout`.
+/// Compares two NodeTables via a three-tier hash-first algorithm: both hashes equal →
+/// `.none`; layoutHash equal → `.appearance`; else a flat-array walk classifies `.media`
+/// only if every differing node is an image URL change with dimensions already cached,
+/// else `.layout`.
 ///
-/// - Parameter dimensionCache: pass the same instance `ImageActor` uses so decode-time stores
-///   are visible here; `nil` disables the `.media` fast-path (forces `.layout`).
+/// - Parameter dimensionCache: same instance `ImageActor` uses; `nil` disables the
+///   `.media` fast-path (forces `.layout`).
 public nonisolated func classify(
     _ prev: NodeTable,
     _ next: NodeTable,
@@ -86,19 +81,14 @@ public struct LayoutSnapshot: Sendable {
 
 // MARK: - ChangeSet
 
-/// Flat description of differences between two LayoutSnapshots.
+/// Flat description of differences between two LayoutSnapshots. All change arrays carry
+/// full NodeTable references plus `(prevIdx, nextIdx)` positions, avoiding a second lookup.
+/// `removed` carries the prev-state table for resource cleanup; `survived` holds
+/// `.none`-classified pairs so `rebuildFrames` can forward known heights.
 ///
-/// All change arrays carry full NodeTable references plus `(prevIdx, nextIdx)` positions, so
-/// consumers can route work and forward heights without a second lookup or O(N) AnyHashable
-/// dict rebuild. `removed` carries the prev-state table so consumers can clean up media
-/// resources keyed by the old descriptor. `survived` holds `.none`-classified pairs (excluded
-/// from `hasChanges`) purely so `rebuildFrames` can forward known heights.
-///
-/// CoW lifetime contract: release the previous `ChangeSet` **before** calling `diff()` again.
-/// The scratch arrays back all six result arrays and reuse storage via
-/// `removeAll(keepingCapacity: true)`; a still-retained prior `ChangeSet` forces Swift's CoW to
-/// reallocate a private copy on `resetScratch()`, defeating zero-allocation. `FeedScrollView`
-/// must not retain the prior `ChangeSet` across a `diff()` call.
+/// CoW contract: release the previous `ChangeSet` before calling `diff()` again — a
+/// still-retained one forces a private-copy reallocation on `resetScratch()`, defeating
+/// the scratch arrays' zero-allocation reuse.
 public struct ChangeSet: Sendable {
     public let layoutChanged:     [(prev: NodeTable, next: NodeTable, prevIdx: Int, nextIdx: Int)]
     public let appearanceChanged: [(prev: NodeTable, next: NodeTable, prevIdx: Int, nextIdx: Int)]
@@ -119,18 +109,11 @@ public struct ChangeSet: Sendable {
 
 // MARK: - RenderDiffer
 
-/// Allocation-free differ for consecutive LayoutSnapshots. Scratch arrays pre-allocate on the
-/// first `diff()` call and reuse via `removeAll(keepingCapacity: true)` afterward — a diff
-/// touching k of n items only allocates the returned `ChangeSet` value types, no backing-buffer
-/// growth for the typical k << n append-page case.
-///
-/// DI contract: inject the **same** `DimensionCache` `ImageActor` uses, or `classify()`'s
-/// `.media` fast-path silently breaks.
-///
-/// Thread safety: `diff()` must not be called concurrently. `RenderDiffer` is owned by
-/// `FeedScrollView` (`@MainActor`) in production, so all calls are main-actor. `@unchecked
-/// Sendable` lets it cross actor-isolated closures without copying — single-owner contract
-/// enforced by the owning isolation context, mirroring `TextMeasurementContext`.
+/// Allocation-free differ for consecutive LayoutSnapshots — scratch arrays reuse via
+/// `removeAll(keepingCapacity: true)` after the first `diff()` call. Inject the same
+/// `DimensionCache` `ImageActor` uses, or `classify()`'s `.media` fast-path silently
+/// breaks. `diff()` must not be called concurrently — `@unchecked Sendable` relies on
+/// `FeedScrollView` (`@MainActor`) as sole owner.
 public final class RenderDiffer: @unchecked Sendable {
 
     private let dimensionCache: DimensionCache?
@@ -144,12 +127,9 @@ public final class RenderDiffer: @unchecked Sendable {
     private var scratchSurvived:   [(prevIdx: Int, nextIdx: Int)] = []
     private var scratchPrevIndex:  [AnyHashable: Int] = [:]
 
-    /// - Parameter dimensionCache: Shared cache for the `.media` classify fast-path.
-    ///   Must be the same instance as `ImageActor.dimensionCache` per the DI contract
-    ///   (DimensionCache.swift:11–17). Pass `nil` to disable the `.media` path (all
-    ///   image-URL changes will classify as `.layout`). Omitting this parameter is
-    ///   intentionally not supported — pass `env.dimensionCache` or `nil` explicitly
-    ///   so the choice is visible at each call site.
+    /// - Parameter dimensionCache: same instance as `ImageActor.dimensionCache`, or `nil`
+    ///   to disable the `.media` fast-path — required explicitly so the choice is visible
+    ///   at each call site.
     public init(dimensionCache: DimensionCache?) {
         self.dimensionCache = dimensionCache
     }

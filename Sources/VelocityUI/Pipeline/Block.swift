@@ -5,10 +5,8 @@ import CoreGraphics
 
 // MARK: - BlockKey
 
-/// Stable, caller-supplied identity for a render block.
-///
-/// `BlockID` is separate from node indices: indices continue routing layout and layers, while
-/// this value lets a block retain its cache identity when siblings move.
+/// Caller-supplied identity for a block, separate from its array index.
+/// Lets a block keep its cache identity even when its siblings move.
 public struct BlockID: Hashable, Sendable {
     nonisolated(unsafe) public let rawValue: AnyHashable
 
@@ -17,15 +15,8 @@ public struct BlockID: Hashable, Sendable {
     }
 }
 
-/// Stable identity for one block within one item's ordered block list — item id + position.
-///
-/// `itemID` is `AnyHashable` behind `nonisolated(unsafe)` (mirrors `NodeTable.itemID`): not
-/// stdlib-`Sendable`, but the generic `Hashable & Sendable` init is the only place boxing
-/// happens, so the payload is always `Sendable` in practice.
-///
-/// Identifies WHICH block this is, not what it contains — the key persists across a block's
-/// lifetime from `.hot` (growing) to `.frozen` (measured). Content equality for diffing is
-/// `Block.contentHash`, not part of this key.
+/// Identity for one block: item id + position, or a stable `BlockID` if it has one.
+/// Content changes are tracked separately, via `Block.contentHash`.
 public struct BlockKey: Hashable, Sendable {
     // See struct-level doc for the nonisolated(unsafe) rationale — identical to NodeTable's.
     nonisolated(unsafe) public let itemID: AnyHashable
@@ -38,15 +29,15 @@ public struct BlockKey: Hashable, Sendable {
         self.blockID = nil
     }
 
-    /// Uses an explicit stable identity while retaining the positional initializer above for
-    /// existing callers. Equal stable IDs within the same item intentionally share a key.
+    /// Same as above but keyed by a stable `BlockID` instead of position.
+    /// Two blocks with the same ID in the same item share a key on purpose.
     public init<ID: Hashable & Sendable>(itemID: ID, blockID: BlockID) {
         self.itemID = AnyHashable(itemID)
         self.index = 0
         self.blockID = blockID
     }
 
-    /// Reuses the Sendable payload already validated and boxed by `NodeTable.init`.
+    /// Reuses the itemID already boxed by `NodeTable.init`.
     init(boxedItemID: AnyHashable, index: Int, blockID: BlockID? = nil) {
         self.itemID = boxedItemID
         self.index = blockID == nil ? index : 0
@@ -76,11 +67,10 @@ public struct BlockKey: Hashable, Sendable {
 
 // MARK: - Block
 
-/// Rendering residency declared by the block producer.
-///
-/// `.positional` preserves the legacy fallback: only the trailing block is treated as hot.
-/// Producers with stable identities should emit `.sealed` or `.hot` directly so moving a block
-/// never changes its residency merely because its array index changed.
+/// Whether a block is still growing (`.hot`) or done (`.sealed`).
+/// `.positional` is the legacy fallback: only the last block counts as hot.
+/// Producers with a stable `BlockID` should use `.sealed`/`.hot` directly, so
+/// reordering blocks doesn't change which one is treated as hot.
 public enum BlockLifecycle: Sendable, Equatable {
     case sealed
     case hot
@@ -101,8 +91,8 @@ struct LeafGeometryResolution: Sendable, Equatable {
     let contentFrame: CGRect
 }
 
-/// Mirrors `measureNode` + leaf `applyFrame` semantics for deterministic block policies.
-/// Returns `nil` when intrinsic measurement is still required.
+/// Resolves geometry for a block whose size doesn't need measurement (fixed, aspect ratio, spacer).
+/// Returns `nil` if the block still needs `measureNode`.
 nonisolated func resolveLeafGeometry(
     _ policy: BlockGeometryPolicy,
     presentation: BlockPresentationPolicy,
@@ -239,9 +229,7 @@ public struct BlockRenderContract: Sendable {
     }
 }
 
-/// One block of an item's ordered content, wrapping existing render vocabulary — no parallel
-/// content enum. A bound item is an ordered `[Block]`; lifecycle is declared per block rather
-/// than inferred from its position when the producer supports it.
+/// One block of an item's ordered content. An item is just `[Block]`.
 public struct Block: Sendable {
     public let key: BlockKey
     public let blockID: BlockID?
@@ -249,13 +237,9 @@ public struct Block: Sendable {
     public let layout: ResolvedLayout
     public let lifecycle: BlockLifecycle
 
-    /// Cheap content-equality fingerprint for `diff(previous:new:)`. Reuses the layout/appearance
-    /// hashes the Flattener already computes on `TextDescriptor`/`ImageDescriptor` (the same
-    /// hash-first vocabulary `RenderDiffer.classify` uses) instead of inventing a new hashing
-    /// scheme. `.geometry` fragments carry no descriptor to hash, so they fingerprint to a fixed
-    /// constant — two `.geometry` blocks are always diff-equivalent (their frame, not their
-    /// content, is what can change, and frame changes are a layout-provider concern, not this
-    /// block-level content diff).
+    /// Cheap fingerprint used by `diff(previous:new:)` to detect content changes.
+    /// `.geometry` blocks have no content to hash, so they always fingerprint the same —
+    /// only their frame can change, which is a layout concern, not a content one.
     public let contentHash: Int
 
     public let contract: BlockRenderContract

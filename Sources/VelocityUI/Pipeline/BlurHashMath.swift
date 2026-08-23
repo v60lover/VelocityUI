@@ -4,10 +4,8 @@ import Foundation
 
 // MARK: - BlurHash algorithm shared primitives (public-domain — https://blurha.sh)
 //
-// Pure Swift/Foundation math with no CoreGraphics or UIKit dependency, so both
-// PlaceholderDecode.swift (`#if canImport(UIKit)`, on-device render path) and
-// PlaceholderEncode.swift (`#if canImport(CoreGraphics)`, also buildable as macOS
-// offline tooling) can share one implementation instead of drifting into two.
+// No CoreGraphics/UIKit dependency, so PlaceholderDecode.swift (on-device) and
+// PlaceholderEncode.swift (also builds as macOS tooling) can share this code.
 
 let blurHashAlphabet: [Character] = Array(
     "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz#$%*+,-.:;=?@[]^_{|}~"

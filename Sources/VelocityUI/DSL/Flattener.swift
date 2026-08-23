@@ -11,11 +11,10 @@ import CoreGraphics
 /// only needs a case there. Modifier nodes (padding etc.) should fold into their target
 /// descriptor's layout contribution at measure time, not become NodeKind cases.
 ///
-/// - Parameter contentSizeCategory: Dynamic Type category baked into every `TextDescriptor`
-///   (VelocityUI-ezo.2.5). `flatten()` is the only `@MainActor` boundary aware of the live
-///   trait environment, so it's where this enters the pipeline. Default `.unspecified`
-///   preserves prior behavior exactly. Folds into `NodeTable.layoutHash` only when the tree
-///   contains a text node — see `sawText` below for why unconditional folding would be wrong.
+/// - Parameter contentSizeCategory: Dynamic Type category baked into every `TextDescriptor`.
+///   `flatten()` is the only `@MainActor` boundary aware of the live trait environment, so it's
+///   where this enters the pipeline. Folds into `NodeTable.layoutHash` only when the tree contains
+///   a text node — see `sawText` below for why unconditional folding would be wrong.
 @MainActor
 public func flatten<ID: Hashable & Sendable>(
     _ root: any RenderNode,
@@ -24,29 +23,23 @@ public func flatten<ID: Hashable & Sendable>(
 ) -> NodeTable {
     var nodes: [NodeKind] = []
     var parentIndices: [Int] = []
-    // Sparse — only indices that were actually `.frame()`-wrapped get an entry. Kept empty
-    // (not even reserved) in the common unframed case so the final `frames` array collapses
-    // to `nil` and NodeTable never allocates a [FrameSpec] for unframed cells.
+    // Sparse — only `.frame()`-wrapped indices get an entry. Empty in the common unframed case so
+    // the final `frames` array collapses to `nil` and NodeTable never allocates for unframed cells.
     var frameByIndex: [Int: FrameSpec] = [:]
     var blockIDByIndex: [Int: BlockID] = [:]
     var blockLifecycleByIndex: [Int: BlockLifecycle] = [:]
-    // Set the first time a TextNode is visited. Gates whether contentSizeCategory folds into
-    // the returned NodeTable's top-level layoutHash (see the call site below for why this
-    // matters: unconditionally folding it in would make classify() misclassify category-blind,
-    // pure-image trees as `.media` instead of `.none` on every Dynamic Type change).
+    // Set the first time a TextNode is visited. Gates whether contentSizeCategory folds into the
+    // top-level layoutHash — unconditional folding would misclassify category-blind, pure-image
+    // trees as `.media` instead of `.none` on every Dynamic Type change.
     var sawText = false
 
     func visit(_ node: any RenderNode, parent: Int) {
-        // Unwrap the FrameModifierNode chain (transparent: contributes no NodeKind/parentIndices
-        // entry of its own — the wrapped node lands at `myIndex` with `parent`, as if `.frame()`
-        // never wrapped it).
+        // Unwrap the FrameModifierNode chain (transparent — contributes no NodeKind/parentIndices entry
+        // of its own; the wrapped node lands at `myIndex` as if `.frame()` never wrapped it).
         //
-        // Traversal hits the OUTERMOST `.frame()` first and walks toward content, so each step
-        // is closer to content than what's merged so far. Per the "inner (closer-to-content)
-        // wins" merge contract, the newly-unwrapped frame is `inner` and the accumulated `spec`
-        // is `outer`. Verified: `.frame(width:100).frame(width:200)` → `merge(inner: f.spec,
-        // outer: spec)` resolves width=100 correctly; swapping the args would let the outer
-        // frame win instead — do not swap this back.
+        // Traversal hits the OUTERMOST `.frame()` first, so the newly-unwrapped frame is `inner` (closer
+        // to content) and the accumulated `spec` is `outer` in the merge call below — do not swap these,
+        // or the outer frame wins instead of the inner one per the merge contract.
         var node = node
         var spec = FrameSpec.unspecified
         var blockID: BlockID?
@@ -112,20 +105,16 @@ public func flatten<ID: Hashable & Sendable>(
 
     visit(root, parent: -1)
 
-    // nil (not an all-`.unspecified` array) when nothing in the tree was framed — this is
-    // the zero-cost unframed path NodeTable.frame(at:) and measureNode rely on: no
-    // [FrameSpec] allocation, single predicted nil-check branch.
+    // nil (not an all-`.unspecified` array) when nothing in the tree was framed — the zero-cost
+    // unframed path NodeTable.frame(at:) and measureNode rely on: no allocation, one nil-check branch.
     let frames: [FrameSpec]? = frameByIndex.isEmpty
         ? nil
         : (0..<nodes.count).map { frameByIndex[$0] ?? .unspecified }
     let blockIDs = (0..<nodes.count).map { blockIDByIndex[$0] }
     let blockLifecycles = (0..<nodes.count).map { blockLifecycleByIndex[$0] ?? .positional }
 
-    // sawText gate: a category-blind (pure-image/spacer/container) tree must keep byte-identical
-    // layoutHash across categories — folding it in unconditionally would make classify()'s
-    // tier-1 fast path miss on every Dynamic Type change even though nothing in the tree
-    // actually depends on the category, and its tier-3 walk would then find no node differing
-    // and misclassify the whole item as `.media` instead of `.none`. See the flatten() doc.
+    // sawText gate: a category-blind tree must keep byte-identical layoutHash across categories, or
+    // classify()'s tier-1 fast path misses on every Dynamic Type change and misclassifies as `.media`.
     let tableLayoutHash = sawText ? combineHash(root.layoutHash, contentSizeCategory) : root.layoutHash
 
     return NodeTable(
@@ -144,10 +133,8 @@ public func flatten<ID: Hashable & Sendable>(
 /// Used for both the table's top-level layoutHash (gated by `sawText`) and each `.text` node's
 /// own `TextDescriptor.layoutHash`.
 ///
-/// `.unspecified` is a true identity transform — returns `layoutHash` verbatim, not just an
-/// equal-valued mix — so callers that never opt into Dynamic Type get byte-identical output to
-/// pre-ezo.2.5 (`testFlatten_textDescriptor_carriesNodeHashes`,
-/// `testFlatten_tableHashes_matchRootNode` assert exact, not cross-call, equality).
+/// `.unspecified` is a true identity transform — returns `layoutHash` verbatim, so callers that
+/// never opt into Dynamic Type get byte-identical output.
 private func combineHash(_ layoutHash: Int, _ category: VContentSizeCategory) -> Int {
     guard category != .unspecified else { return layoutHash }
     var h = Hasher()

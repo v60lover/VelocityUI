@@ -8,14 +8,9 @@
 
   /// Thread-safe URL → CGSize store for dimension-first image fetching.
   ///
-  /// - DI: inject the same instance into `classify()` and `ImageActor` — `ImageActor` writes
-  ///   via `store(_:for:)`, `classify()` reads via `get(_:)`; separate instances break the
-  ///   cache-hit contract. Share one `URLSession` too, so dimension probes and full fetches
-  ///   reuse one HTTP/2 connection pool.
-  /// - Query params are part of the key (`?v=1` vs `?v=2` cache separately) — needed so CDN
-  ///   cache-busting doesn't collide entries.
-  /// - Unbounded dictionary (~116B/entry, 10k URLs ≈ 1.2MB) — LRU eviction flagged for Phase 6
-  ///   hardening.
+  /// - Inject the same instance into `classify()` and `ImageActor` — separate instances break the cache-hit contract.
+  /// - Query params are part of the key, so CDN cache-busting doesn't collide entries.
+  /// - Unbounded dictionary — LRU eviction deferred to a later hardening pass.
   public final class DimensionCache: Sendable {
 
     // Single lock over both maps so cache re-check + inFlight read/write are atomic.
@@ -26,9 +21,8 @@
     private let state = OSAllocatedUnfairLock(initialState: State())
     private let session: URLSession
 
-    /// - Parameter session: URLSession to use for ranged probes. Inject a shared instance
-    ///   so dimension probes and full-image fetches (ImageActor) reuse the same HTTP/2
-    ///   connection pool and TLS session. Defaults to `.shared` for call-site convenience.
+    /// - Parameter session: inject a shared instance so dimension probes and full-image fetches
+    ///   reuse the same HTTP/2 connection pool. Defaults to `.shared`.
     public init(session: URLSession = .shared) {
       self.session = session
     }
@@ -47,12 +41,8 @@
 
     // MARK: - Async dimension fetch
 
-    /// Cache hit → synchronous return (no allocation on hot path).
-    /// In-flight hit → coalesces onto the existing Task; no duplicate network calls.
-    ///   Priority note: the probe runs at the **first** caller's Task priority. Subsequent
-    ///   waiters do not escalate it. Acceptable for Phase 1 (prefetch and scroll share
-    ///   .userInitiated); flag for Phase 6 if priority inversion becomes measurable.
-    /// Cache miss → `Range: bytes=0-1023` → ImageIO parse → cache + return.
+    /// Cache hit → synchronous return. In-flight hit → coalesces onto the existing Task, no duplicate
+    /// network calls. Cache miss → ranged `bytes=0-1023` fetch → ImageIO parse → cache + return.
     /// Returns nil on 416, parse failure, or insufficient header bytes.
     public func dimensions(for url: URL) async -> CGSize? {
       // Fast cache-only read — skips the wider critical section that also services

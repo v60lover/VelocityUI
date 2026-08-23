@@ -14,11 +14,9 @@ public enum FragmentContent: Sendable {
 
 /// A flat render instruction produced by extractFragments.
 ///
-/// id is the node's index in NodeTable.nodes — stable across re-measures of the
-/// same NodeTable. RenderCell uses this to route applyContent(id:image:) to the
-/// correct sublayer without re-scanning the layout tree.
-///
-/// Array order = z-order (back to front), matching ZStack semantics.
+/// `id` is the node's index in `NodeTable.nodes` — stays stable across re-measures,
+/// so `RenderCell` can route `applyContent(id:image:)` to the right sublayer without
+/// re-scanning the layout tree. Array order = z-order (back to front), like ZStack.
 public struct Fragment: Sendable {
     public let id: Int
     /// Optional stable identity propagated from a `.renderID(...)` modifier.
@@ -37,36 +35,29 @@ public struct Fragment: Sendable {
 
 // MARK: - Post-pass extraction
 
-/// Walks a ResolvedLayout tree alongside its NodeTable and produces a flat, ordered list
-/// of Fragments with absolute frames in cell coordinates.
-///
-/// - Containers (vstack/hstack/zstack) contribute no Fragment, only resolve child
-///   coordinate spaces. Leaf nodes (image, text, spacer, hosting, gif, video, customLayer)
-///   each produce one.
-/// - Array order = z-order (earlier = back, later = front), matching ZStack draw order.
+/// Walks a `ResolvedLayout` tree with its `NodeTable` and flattens it into an ordered
+/// list of `Fragment`s with absolute frames in cell coordinates. Containers (vstack/
+/// hstack/zstack) produce no fragment of their own, just resolve child coordinates;
+/// leaves each produce one.
 public nonisolated func extractFragments(table: NodeTable, layout: ResolvedLayout) -> [Fragment] {
     var result: [Fragment] = []
-    // clip starts nil: an unframed tree never establishes a slot to clip against, so this
-    // stays nil the entire recursion and the `if let clip` intersection below never runs —
-    // byte-identical fragment output to the pre-clip behavior for every unframed row.
+    // clip starts nil — an unframed tree never sets one, so output for unframed rows
+    // is unchanged from before clipping was added.
     collectFragments(table: table, layout: layout, parentOrigin: .zero, clip: nil, into: &result)
     return result
 }
 
 // MARK: - Private
 
-/// `clip`, when non-nil, is an absolute rect (cell coordinates, same space as `Fragment.frame`)
-/// every descendant fragment must intersect before emission. Set on crossing a FRAMED container
-/// (VelocityUI-983) and narrows — never widens — through nested framed containers via
-/// `clip.map { $0.intersection(slotAbs) } ?? slotAbs`.
+/// `clip`, when set, is an absolute rect every descendant fragment must be intersected
+/// with before it's emitted. It's set when crossing a framed container and only ever
+/// narrows going deeper.
 ///
-/// Why: `applyFrame` clamps a framed container's own `totalFrame` to the slot, but an UNFRAMED
-/// descendant leaf can still measure larger on its own axis (e.g. an unframed `.image`'s
-/// intrinsic `width / aspectRatio` height) — nothing else clamps raw children to the container's
-/// bounds. Since `RenderCell` never sets `masksToBounds` (reserved for corner-radius rounding,
-/// not layout clipping), an unclipped leaf paints past the cell edge and over neighboring cells
-/// — visible as "expand"/glitch on scroll-up. This is a geometry clip on the emitted `CGRect`,
-/// not a pixel crop — `contentMode` still governs on-leaf drawing.
+/// Why we need this: an unframed leaf (e.g. an image sized by its own aspect ratio) can
+/// measure larger than its framed container's slot, and nothing else clamps it. Since
+/// `RenderCell` never sets `masksToBounds`, an unclipped leaf paints past the cell edge
+/// and over neighboring cells — visible as a glitch on scroll-up. This clips the emitted
+/// `CGRect` itself; it doesn't crop pixels, so `contentMode` still governs the drawing.
 private nonisolated func collectFragments(
     table: NodeTable,
     layout: ResolvedLayout,
@@ -77,21 +68,18 @@ private nonisolated func collectFragments(
     let nodeIndex = layout.nodeIndex
     guard nodeIndex >= 0, nodeIndex < table.nodes.count else { return }
 
-    // Children's frames (and a container's own totalFrame) are stored relative to this
-    // node's local origin. Shift by parentOrigin to get cell-absolute coordinates.
+    // Frames are stored relative to this node's local origin — shift by parentOrigin
+    // to get cell-absolute coordinates.
     let absoluteFrame = layout.totalFrame.offsetBy(dx: parentOrigin.x, dy: parentOrigin.y)
 
-    // Leaves draw at contentFrame when `.frame()` (VelocityUI-rsg) aligned/clamped the
-    // content within a slot that differs from totalFrame; contentFrame is nil in the
-    // common unframed case, where this is identical to absoluteFrame — byte-identical
-    // fragment output for every unframed row. Containers never set contentFrame (they
-    // express framing by shifting `children` in `applyFrame` instead), so this value is
-    // simply unused on the container branch below.
+    // contentFrame is set when `.frame()` aligned/clamped a leaf within a slot that
+    // differs from totalFrame; nil (falls back to totalFrame) in the common unframed
+    // case. Containers never set it — they express framing via `children` instead — so
+    // it's unused on the container branch below.
     let drawFrame = (layout.contentFrame ?? layout.totalFrame).offsetBy(dx: parentOrigin.x, dy: parentOrigin.y)
 
-    // Shared by every leaf case below: intersect against the inherited clip (nil = no-op,
-    // the unframed path) and drop the fragment entirely when fully clipped — an empty/null
-    // rect is not a degenerate Fragment, it's "nothing to paint here."
+    // Intersect against the inherited clip and drop the fragment if fully clipped —
+    // an empty rect means "nothing to paint here", not a degenerate Fragment.
     func appendLeaf(_ content: FragmentContent) {
         var frame = drawFrame
         if let clip { frame = frame.intersection(clip) }
@@ -107,16 +95,14 @@ private nonisolated func collectFragments(
     case .spacer, .hosting, .gif, .video, .customLayer:
         appendLeaf(.geometry)
     case .vstack, .hstack, .zstack:
-        // A framed container establishes (or further narrows) the clip for everything
-        // beneath it — its own absolute slot (absoluteFrame) is exactly what descendants
-        // must not paint outside of. An unframed container passes `clip` through unchanged.
+        // A framed container narrows the clip to its own slot; an unframed one
+        // passes the inherited clip through unchanged.
         var childClip = clip
         if table.frame(at: nodeIndex).isSpecified {
             childClip = clip.map { $0.intersection(absoluteFrame) } ?? absoluteFrame
         }
-        // Container nodes: no fragment. Children are in this container's local space,
-        // so pass absoluteFrame.origin (= totalFrame's origin) as their parentOrigin —
-        // children were already alignment-shifted in applyFrame, so no double-count.
+        // No fragment for containers themselves. Children are already alignment-shifted
+        // within this container's local space, so pass absoluteFrame.origin as parentOrigin.
         for child in layout.children {
             collectFragments(table: table, layout: child, parentOrigin: absoluteFrame.origin, clip: childClip, into: &result)
         }

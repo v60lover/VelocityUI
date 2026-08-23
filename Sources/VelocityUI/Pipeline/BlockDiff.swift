@@ -13,11 +13,9 @@ public struct BlockMatch: Sendable, Equatable {
     }
 }
 
-/// Minimum-update description for a same-item block-list change.
-///
-/// With complete, unique `BlockID`s it is identity-aware: array order remains `new` order while
-/// reused and moved blocks retain their prior state. Missing or duplicate identities use the old
-/// positional comparison, which is deliberately conservative.
+/// Minimal-update description of how one item's block list changed.
+/// With unique `BlockID`s, blocks are matched by identity (so moves/reuse are detected).
+/// If IDs are missing or duplicated, falls back to a conservative positional comparison.
 public struct BlockDiff: Sendable, Equatable {
     public let reused: [BlockMatch]
     public let moved: [BlockMatch]
@@ -72,8 +70,8 @@ private nonisolated func diff(
     let hot = hotIndices(in: new, positionalFrontier: positionalFrontier)
     let volatile = volatileEnvelope(for: hot, count: new.count)
     guard let previousByID = uniqueBlocksByID(previous), uniqueBlocksByID(new) != nil else {
-        // A producer's explicit hot set remains authoritative even when one sibling lacks an
-        // identity. With no explicit hot block, preserve the legacy trailing-block fallback.
+        // An explicit hot set still wins even without full identity. Otherwise fall back
+        // to treating the trailing block as hot.
         let fallbackHot = positionalFrontier == nil && hot.isEmpty && !new.isEmpty
             ? Set([new.count - 1])
             : hot

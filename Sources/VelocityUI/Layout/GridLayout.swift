@@ -2,32 +2,26 @@
 
 import CoreGraphics
 
-/// Declares the layout strategy for a feed or grid.
-/// .custom enables future extension without breaking the public shape — preferred over
-/// shipping dead Phase 5 stubs (.masonry etc.) that would never fatalError cleanly.
+/// Declares the layout strategy for a feed or grid. `.custom` allows caller-supplied strategies
+/// without expanding this enum's public cases.
 public enum GridLayout: Sendable {
     case vertical(spacing: CGFloat = 8)
-    /// Classic row-major grid: `columns` fixed-width columns, ragged final row, each row
-    /// top-aligned to its tallest cell. Cells are measured at column width, not linearly
-    /// scaled from the full container width — see `GridLayoutProvider.measureWidth(availableWidth:)`.
+    /// Row-major grid: `columns` fixed-width columns, ragged final row, top-aligned. Cells measure
+    /// at column width, not the full container width.
     case grid(columns: Int, spacing: CGFloat = 8)
     /// Caller-supplied strategy; must be Sendable (actor-safe, value type preferred).
     case custom(any LayoutProvider)
 }
 
 extension GridLayout {
-    /// Returns the layout provider that implements this strategy.
-    /// Value-semantically stable: the provider is fully determined by the enum case's associated value,
-    /// so callers may rebuild it freely or cache it — both produce equivalent behaviour.
-    /// The `.vertical`/`.grid` cases allocate one small struct per access; callers that invoke this
-    /// repeatedly in a tight loop should cache the result.
+    /// Returns the layout provider for this strategy. `.vertical`/`.grid` allocate a new struct each
+    /// access — cache the result if calling in a tight loop.
     public var provider: any LayoutProvider {
         switch self {
         case .vertical(let spacing):
             return VerticalLayoutProvider(spacing: spacing)
         case .grid(let columns, let spacing):
-            // GridLayoutProvider.init silently clamps columns >= 1 / spacing >= 0 — this assert
-            // exists only to catch a caller bug loudly in debug builds, not as the real guard.
+            // Debug-only guard; GridLayoutProvider.init silently clamps out-of-range values anyway.
             #if DEBUG
             assert(columns >= 1, "GridLayout.grid: columns must be >= 1, got \(columns)")
             assert(spacing >= 0, "GridLayout.grid: spacing must be >= 0, got \(spacing)")

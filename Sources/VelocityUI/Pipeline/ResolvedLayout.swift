@@ -7,12 +7,9 @@ import CoreGraphics
 /// Sendable value type — crosses actor boundaries freely.
 public struct ResolvedLayout: Sendable {
     public let totalFrame: CGRect
-    /// The LEAF-only content box within `totalFrame`, set by `LayoutEngine.applyFrame`
-    /// (VelocityUI-rsg) when a `.frame()` slot is larger or smaller than the node's
-    /// intrinsic content — `nil` in the common unframed case (and always nil for
-    /// container nodes, which express framing by shifting `children` instead; see
-    /// `applyFrame`'s doc comment). `extractFragments` draws leaves at
-    /// `contentFrame ?? totalFrame`, so a `nil` here is byte-identical to today's behavior.
+    /// Leaf-only content box within `totalFrame`, set by `.frame()` framing when the slot
+    /// is larger/smaller than intrinsic content. `nil` in the unframed case, and always
+    /// nil for containers, which shift `children` instead.
     public let contentFrame: CGRect?
     public let children: [ResolvedLayout]
     /// Index of the corresponding node in NodeTable.nodes.
@@ -26,11 +23,9 @@ public struct ResolvedLayout: Sendable {
         self.nodeIndex = nodeIndex
     }
 
-    // Offsets totalFrame (and contentFrame, when present) only — children remain in this
-    // node's local coordinate space. collectFragments depends on this: it reconstructs
-    // absolute positions by passing each container's absolute origin down as parentOrigin.
-    // If children were also shifted here, absolute frames would be double-counted at every
-    // nesting level.
+    // Offsets totalFrame/contentFrame only — children stay in local coordinate space.
+    // collectFragments reconstructs absolute positions from parentOrigin; shifting
+    // children here too would double-count offsets at every nesting level.
     public func offsetBy(dy: CGFloat) -> ResolvedLayout {
         ResolvedLayout(
             totalFrame: totalFrame.offsetBy(dx: 0, dy: dy),

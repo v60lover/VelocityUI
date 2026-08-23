@@ -5,32 +5,24 @@ import UIKit
 import CoreGraphics
 
 /// How far outside the visible viewport a feed keeps content warm — measured, mounted, and
-/// prefetched — before the user scrolls there.
-///
-/// `.screens` is the geometrically correct unit: it degrades to a small item count for a
-/// single-column feed (1 item ~= 1 screen) and scales automatically for a grid or masonry layout
-/// where items-per-screen varies. `.items` is a fixed item count, independent of viewport
-/// geometry — only correct when items-per-screen is roughly constant and known ahead of time
-/// (e.g. a fixed single-column list). See `AsyncFeed.prefetchScreens(leading:trailing:)` and
-/// `AsyncFeed.prefetchWindow(ahead:behind:)`.
+/// prefetched — before the user scrolls there. `.screens` scales automatically with
+/// items-per-screen (grid/masonry-safe); `.items` is a fixed count, only correct when
+/// items-per-screen is roughly constant.
 public enum WarmWindow: Sendable, Equatable {
-    /// Warm window sized in viewport-height multiples. `leading` = screens to warm ahead in the
-    /// scroll direction; `trailing` = screens to keep warm behind. Fractional values allowed
-    /// (e.g. `1.5`).
+    /// Screens to warm ahead (`leading`) and behind (`trailing`) in the scroll direction.
+    /// Fractional values allowed (e.g. `1.5`).
     case screens(leading: CGFloat, trailing: CGFloat)
-    /// Warm window sized in item counts, symmetric around the visible range regardless of
-    /// scroll direction.
+    /// Item counts, symmetric around the visible range regardless of scroll direction.
     case items(ahead: Int, behind: Int)
 }
 
 /// CALayer-backed vertical feed scroll container.
 ///
 /// Contract: `layoutSubviews` → `updateVisibleCells` is fully synchronous — zero `await`,
-/// zero `Task` spawn, zero allocations in steady-state recycling. Pipeline notifications fire
-/// only on leading-index boundary crossings.
+/// zero `Task` spawn, zero allocations in steady-state recycling.
 ///
-/// `FeedScrollView.layer` is a plain CALayer; cell layers are direct sublayers. UIScrollView
-/// scrolls by adjusting `bounds.origin` — no CAScrollLayer override needed.
+/// `layer` is a plain CALayer; cell layers are direct sublayers. UIScrollView scrolls by
+/// adjusting `bounds.origin` — no CAScrollLayer override needed.
 @MainActor
 public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView where Item.ID: Sendable {
 
@@ -40,13 +32,11 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     public var cellBuilder: (@MainActor (Item) -> any RenderNode)?
 
     /// How far outside the visible viewport to keep content warm — screens (default) or items.
-    /// Set at init — changing after construction requires a new FeedScrollView, since
-    /// `warmRange(viewportTop:viewportBottom:)` and pipeline notification both read it directly.
+    /// Set at init; changing later requires a new FeedScrollView.
     public let warmWindow: WarmWindow
 
-    /// How many items before the end of the list `onReachEnd` fires.
-    /// Independent of `warmWindow` — tuning the prefetch window must not silently move the
-    /// page-load trigger.
+    /// How many items before the end of the list `onReachEnd` fires. Independent of
+    /// `warmWindow`, so tuning the prefetch window can't silently move the page-load trigger.
     public let reachEndThreshold: Int
 
     /// Called when a user taps a cell. Receives the tapped item and its frame in
@@ -58,24 +48,17 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     public var onReachEnd: (@MainActor () async -> Void)?
 
     /// Opt-in: return a value whose change should invalidate the cached NodeTable for that ID.
-    ///
-    /// `nil` (default): every `itemsDidChange` rebuilds all NodeTables, unchanged behavior.
-    /// Non-nil: items whose signature matches the cached value skip `cellBuilder`+`flatten`
-    /// entirely, eliminating the dominant builder+flatten cost for unchanged items.
-    ///
-    /// Contract (caller's responsibility): if `sig(a) == sig(b)` and `a.id == b.id`, then
-    /// `flatten(cellBuilder(a), itemID: a.id)` MUST equal `flatten(cellBuilder(b), itemID: b.id)`.
-    /// Violations cause stale UI, not crashes — mirrors SwiftUI's `Equatable` view-identity contract.
+    /// `nil` (default) rebuilds every NodeTable on `itemsDidChange`; non-nil skips
+    /// `cellBuilder`+`flatten` for items whose signature is unchanged. Caller's contract: if
+    /// `sig(a) == sig(b)` and `a.id == b.id`, then `flatten` must produce the same result for
+    /// both — a violation causes stale UI, not a crash.
     public var itemSignature: ((Item) -> AnyHashable)? = nil
 
     // MARK: - Items
 
-    /// VelocityUI-socg C4: does NOT diff/relayout synchronously on assignment. A burst of `items`
-    /// assignments within one display frame (e.g. token-by-token streaming) coalesces to exactly
-    /// ONE `itemsDidChange` call, drained at the top of the next `layoutSubviews()` — see
-    /// `_pendingItemsDiffBase`. Leverages UIKit's own `setNeedsLayout`/`layoutSubviews` coalescing
-    /// instead of a hand-rolled CADisplayLink. Test pattern `feed.items = X; feed.layoutSubviews()`
-    /// still yields exactly one `itemsDidChange` call.
+    /// Does NOT diff/relayout synchronously on assignment. A burst of assignments within one
+    /// display frame (e.g. token-by-token streaming) coalesces to exactly one `itemsDidChange`
+    /// call, drained at the top of the next `layoutSubviews()` — see `_pendingItemsDiffBase`.
     public var items: [Item] = [] {
         didSet {
             if _pendingItemsDiffBase == nil {
@@ -86,9 +69,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     }
 
     /// The pre-burst `items` value to diff FROM once `layoutSubviews()` drains the coalesced
-    /// update — captured only on the FIRST assignment of a burst (subsequent assignments before
-    /// the next layout pass must not overwrite it, or the burst would diff against its own
-    /// intermediate state instead of the true pre-burst baseline). `nil` in steady state.
+    /// update. Captured only on the first assignment of a burst so later assignments can't
+    /// overwrite the true baseline. `nil` in steady state.
     private var _pendingItemsDiffBase: [Item]?
 
     // MARK: - Dependencies
@@ -125,25 +107,22 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// the current value each pass to derive `scrollDirection` from a real scroll metric.
     private var lastScrollOffsetY: CGFloat = 0
 
-    /// Direction of travel along the scroll axis, updated in `layoutSubviews` from the sign
-    /// of the `contentOffset.y` delta. Holds its last value when the offset doesn't change
-    /// (at rest, or between two layout passes with no scroll) — avoids flicker at the top/
-    /// bottom rubber-band edges. Threaded into `pipeline.onIndexBoundary(direction:)` so
-    /// .ahead/.behind prefetch classification tracks actual travel direction. See VelocityUI-im6.
+    /// Direction of travel along the scroll axis, from the sign of the `contentOffset.y` delta.
+    /// Holds its last value at rest (avoids flicker at rubber-band edges). Threaded into
+    /// `pipeline.onIndexBoundary(direction:)` so ahead/behind prefetch classification tracks
+    /// actual travel direction.
     private var scrollDirection: ScrollDirection = .down
 
     private var lastLayoutWidth: CGFloat = 0
     /// False until the first `layoutSubviews` width transition has been handled. Distinguishes
-    /// the initial `0 -> bounds.width` sentinel transition (nothing stale to evict — WorkingRange
-    /// and LayoutCache are either empty or hold entries `warmUp` populated at this exact width)
-    /// from a genuine width change (rotation/resize), where prior-width entries ARE stale.
+    /// the initial `0 -> bounds.width` sentinel (nothing stale to evict) from a genuine width
+    /// change (rotation/resize), where prior-width entries ARE stale.
     private var hasLaidOutOnce: Bool = false
     private var reachEndFired: Bool = false
 
-    /// Dynamic Type category threaded into every `flatten()` call (VelocityUI-ezo.2.5).
-    /// Initialized from the live trait environment at `init` — mount-time already reflects
-    /// the system's real setting rather than defaulting to `.unspecified` (no scaling) until
-    /// the first `didChangeNotification` fires. Updated only by `handleContentSizeCategoryChange`.
+    /// Dynamic Type category threaded into every `flatten()` call. Initialized from the live
+    /// trait environment at `init` so mount-time already reflects the system setting, rather
+    /// than defaulting to `.unspecified` until the first change notification fires.
     private var contentSizeCategory: VContentSizeCategory = .unspecified
     private let notificationCenter: NotificationCenter
     private var contentSizeCategoryObserver: NSObjectProtocol?
@@ -151,12 +130,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// Pre-allocated scratch buffer for the recycle loop — avoids a per-frame Array allocation.
     private var _recycleBuffer: [Int] = []
 
-    /// Largest `keepRange.count` seen so far — only the driver knows the real working-range
-    /// shape (`warmRange`'s trailing/behind + visible + leading/ahead), and only after first layout, so
-    /// `FrozenBitmapStore`'s byte budget (fixed at the 16 MB default at construction, before
-    /// this feed existed) is resized from this once it grows. Tracked monotonically-up so a
-    /// transient shrink (e.g. rotation narrowing the viewport) never shrinks the live budget
-    /// mid-scroll — a shrink would thrash-evict blocks still inside the window.
+    /// Largest `keepRange.count` seen so far; resizes `FrozenBitmapStore`'s byte budget once it
+    /// grows. Tracked monotonically-up so a transient shrink (e.g. rotation) never shrinks the
+    /// live budget mid-scroll and thrash-evicts blocks still inside the window.
     private var _frozenBudgetWindowCount: Int = 0
 
     /// Pre-allocated scratch buffer for `refineKnownFrames` — avoids a fresh Set.union +
@@ -189,15 +165,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// Does NOT count the one-shot `onReachEnd` spawn — that fires at most once per page.
     private(set) var _taskSpawnCount: Int = 0
 
-    /// Mirrors `scrollDirection` as it's set in `layoutSubviews`. Test-only observability for
-    /// VelocityUI-im6 — lets tests assert the signal flips from a real `contentOffset.y` delta
-    /// without needing to round-trip through `RenderPipeline`/`ImageActor`.
+    /// Mirrors `scrollDirection` as set in `layoutSubviews`. Test-only — lets tests assert the
+    /// signal flips from a real `contentOffset.y` delta.
     private(set) var _lastScrollDirection: ScrollDirection = .down
 
-    /// Mirrors the `visRange` computed at the top of `updateVisibleCells()` — the range
-    /// FeedScrollView actually used to mount cells for this layout pass. Lets a test compare the
-    /// real wired read path against an independently-computed oracle, instead of only inferring
-    /// the mounted range indirectly from cell-layer presence.
+    /// Mirrors the `visRange` computed at the top of `updateVisibleCells()` — the range actually
+    /// used to mount cells this layout pass. Test-only.
     private(set) var _lastVisibleRange: Range<Int> = 0..<0
 
     /// Count of currently-mounted cells. Test-only observability for asserting the mounted set
@@ -208,19 +181,16 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// FeedScrollView property, unreachable from tests without this accessor.
     var _debugWorkingRangeStart: Int { workingRange.currentRangeStart }
 
-    /// Branch counters for `AsyncFeed.itemsDiffer`'s buffer-identity fast path (case b, O(1))
-    /// vs the `Equatable` deep-comparison fallback (case c, O(n)). Incremented by `itemsDiffer`
-    /// itself (a different file in the same module — not `private(set)`, so it can assign here).
-    /// Used to verify the fast path is taken for structurally-identical, CoW-preserved items
-    /// arrays across repeated `updateUIView` calls, and never falls through to deep equality.
+    /// Branch counters for `AsyncFeed.itemsDiffer`'s buffer-identity fast path (O(1)) vs the
+    /// `Equatable` deep-comparison fallback (O(n)). Incremented by `itemsDiffer` itself, hence
+    /// not `private(set)`. Verifies the fast path is taken for CoW-preserved items arrays.
     var _itemsDiffer_bufferHitCount: Int = 0
     var _itemsDiffer_deepEqualCount: Int = 0
 
     var _tableCacheCount: Int { tableCache.count }
 
-    /// Returns nil-entry count in WorkingRange for indices in [start, end).
-    /// Used by the Phase 1 integration suite to re-validate the Spike 2 ring-buffer
-    /// warmup criterion on the real FeedScrollView stack (not just the bare pipeline).
+    /// Returns nil-entry count in WorkingRange for indices in [start, end). Used by the
+    /// integration suite to re-validate the ring-buffer warmup criterion end-to-end.
     func _workingRangeMissCount(from start: Int, to end: Int) -> Int {
         guard start < end else { return 0 }
         let clampedEnd = min(end, tables.count)
@@ -228,17 +198,15 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         return (start..<clampedEnd).filter { workingRange.entry(at: $0) == nil }.count
     }
 
-    /// Resolved frame for an index, in scroll-content coordinates. nil if the index has never
-    /// been laid out. Used by tests to compute a scroll offset that lands a specific index in
-    /// the viewport from the item's real (post-measure) frame rather than a hardcoded estimate —
-    /// `estimatedItemHeight`-based math silently drifts once WorkingRange refines real heights.
+    /// Resolved frame for an index, in scroll-content coordinates. nil if never laid out. Lets
+    /// tests compute a scroll offset from the real post-measure frame instead of a hardcoded
+    /// estimate that would drift once WorkingRange refines real heights.
     func _debugResolvedFrame(at index: Int) -> CGRect? {
         index < resolvedFrames.count ? resolvedFrames[index] : nil
     }
 
-    /// Exercises the private `warmRange(viewportTop:viewportBottom:)` directly — the same
-    /// function `updateVisibleCells`/`notifyPipelineIfNeeded` call on the real scroll path —
-    /// against `resolvedFrames` as they stand after the test's own `layoutSubviews()` call.
+    /// Exercises the private `warmRange(viewportTop:viewportBottom:)` directly, against
+    /// `resolvedFrames` as they stand after the test's own `layoutSubviews()` call.
     func _testWarmRange(viewportTop: CGFloat, viewportBottom: CGFloat) -> Range<Int> {
         warmRange(viewportTop: viewportTop, viewportBottom: viewportBottom)
     }
@@ -264,62 +232,50 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     }
 
     /// Re-derives fragments by walking `workingRange.entry(at: index)`'s `layout` through
-    /// `extractFragments`, using the item's CURRENT `NodeTable`. `nil` if there's no committed
-    /// WorkingRange entry or index is out of range. VelocityUI-socg C4: the fast path patches
-    /// WorkingRange with a SYNTHETIC `ResolvedLayout` (built from block-diff's resolved
-    /// fragments, not a real `measureNode` tree) — this hook lets a test confirm that synthetic
-    /// layout round-trips through the same `extractFragments` call sites a later appearance/
-    /// media-changed classification would use, rather than only trusting it by inspection.
+    /// `extractFragments`, using the item's current `NodeTable`. `nil` if there's no committed
+    /// WorkingRange entry or index is out of range. Test-only.
     func _debugExtractFragmentsFromWorkingRange(at index: Int) -> [Fragment]? {
         guard let entry = workingRange.entry(at: index), index < tables.count else { return nil }
         return extractFragments(table: tables[index], layout: entry.layout)
     }
 
-    /// Count of indices still awaiting fragment delivery via refineKnownFrames — i.e. cells
-    /// mounted with `applyLayout([])` during a WorkingRange miss that LayoutCache could not
-    /// resolve inline. Should be 0 whenever LayoutCache is warm for all visible indices at
-    /// mount time — the inline materialization path bypasses this bookkeeping entirely.
+    /// Count of indices still awaiting fragment delivery via refineKnownFrames — cells mounted
+    /// with `applyLayout([])` during a WorkingRange miss LayoutCache couldn't resolve inline.
+    /// Should be 0 whenever LayoutCache is warm for all visible indices at mount time.
     var _pendingFragmentIndicesCount: Int { _pendingFragmentIndices.count }
 
-    /// Counts `dequeue(kind:)` calls that fell through to `RenderCell(kind:)` (a pool miss —
-    /// the sole `RenderCell` alloc site). Used by the VelocityUI-ksh regression test to verify
-    /// the cell pool CONVERGES after warm-up (miss count stops growing once the working-range
-    /// window has been filled once) instead of missing on ~90% of dequeues every frame.
+    /// Counts `dequeue(kind:)` calls that fell through to `RenderCell(kind:)` (a pool miss, the
+    /// sole alloc site). Verifies the cell pool converges after warm-up instead of missing on
+    /// most dequeues every frame.
     private(set) var _dequeueAllocCount: Int = 0
 
     /// Counts `dequeue(kind:)` calls served from `cellPools` (a pool hit — no allocation).
     var _dequeueHitCount: Int = 0
 
-    /// Counts `returnToPool(_:)` calls — every time a cell's shell is handed back to
-    /// `cellPools` rather than kept bound in `visibleCells`. VelocityUI-socg C2: a same-id
-    /// streaming update must NOT increment this (the `.inPlace` branch keeps the shell); a
-    /// different-id item replacement, or genuine scroll-driven eviction, still does.
+    /// Counts `returnToPool(_:)` calls — a cell's shell handed back to `cellPools` rather than
+    /// kept bound in `visibleCells`. A same-id streaming update must NOT increment this (the
+    /// `.inPlace` branch keeps the shell); a different-id replacement or scroll eviction does.
     private(set) var _returnToPoolCount: Int = 0
 
-    /// VelocityUI-socg C3: counts calls into the in-place block-diff's text measure/rasterize
-    /// primitives (`measureTextSync` / the `rasterize` closure `applyInPlaceBlockDiff` wires
-    /// into `freeze(_:)`). The anti-jank invariant under test is that these counts per streaming
-    /// update stay FLAT (bounded by "the hot tail, plus at most one just-finalized block") as a
-    /// message's block count grows — never O(message length).
+    /// Counts calls into the in-place block-diff's text measure/rasterize primitives. The
+    /// anti-jank invariant under test: these counts per streaming update stay flat (bounded by
+    /// the hot tail plus at most one just-finalized block) as a message's block count grows —
+    /// never O(message length).
     private(set) var _blockDiffMeasureCallCount: Int = 0
     private(set) var _blockDiffRasterizeCallCount: Int = 0
 
-    /// VelocityUI-x4q0: counts calls into the NEW hot-append path
-    /// (`environment.hotBlockRasterizerStore.append`). The old two counters above legitimately
-    /// stop growing for the hot tail once this path is wired in — this is the correct proxy for
-    /// "the incremental rasterizer engaged" now.
+    /// Counts calls into the hot-append path (`environment.hotBlockRasterizerStore.append`).
+    /// The correct proxy for "the incremental rasterizer engaged" — the two counters above
+    /// legitimately stop growing for the hot tail once this path is wired in.
     private(set) var _blockDiffHotAppendCallCount: Int = 0
 
-    /// VelocityUI-80uh (B1): counts successful `growHotBlock(_:)` calls — the side-channel
-    /// engaged and painted the update without touching `items`/`differ`/`snapshot`. Tests use
-    /// this (plus the method's own `Bool` return) to verify the eligibility gate.
+    /// Counts successful `growHotBlock(_:)` calls — the side-channel engaged and painted the
+    /// update without touching `items`/`differ`/`snapshot`.
     private(set) var _growHotBlockSuccessCount: Int = 0
 
-    /// VelocityUI-80uh (B1): overrides `isGestureActive` for tests. `isTracking`/`isDragging`/
-    /// `isDecelerating` are UIKit gesture-recognizer-driven and read-only — there is no way to
-    /// set them on a bare, windowless `UIScrollView` without a live touch (same testability gap
-    /// BenchmarkHost's `StreamGestureCoalescer` spike solved via closure injection). `nil`
-    /// (default) falls back to the real UIKit signals.
+    /// Overrides `isGestureActive` for tests, since UIKit's gesture-driven `isTracking`/
+    /// `isDragging`/`isDecelerating` can't be set without a live touch. `nil` (default) falls
+    /// back to the real UIKit signals.
     var _debugGestureActiveOverride: Bool?
     #endif
 
@@ -328,25 +284,17 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// Designated init.
     ///
     /// - Parameters:
-    ///   - environment: Composition root. Only `textPool`, `layoutCache`, `dimensionCache` are
-    ///     used here; other collaborators are for downstream beads. Taking the whole
-    ///     `RenderEnvironment` is an ergonomic convenience — per-collaborator init is tracked separately.
+    ///   - environment: Composition root; only `textPool`, `layoutCache`, `dimensionCache` used here.
     ///   - warmWindow: How far outside the visible viewport to keep content warm. Defaults to
-    ///     `.items(ahead: 10, behind: 3)` — this type's own historical default, unrelated to
-    ///     `AsyncFeed`'s DSL-level default (`.screens(leading: 2, trailing: 1)`), which the DSL
-    ///     always passes explicitly.
-    ///   - reachEndThreshold: Items before list end that trigger `onReachEnd` — deliberately
-    ///     separate from `warmWindow`.
-    ///   - estimatedItemHeight: Placeholder height (pt) for unmeasured items; affects initial
-    ///     contentSize and visual jump when real layouts land.
+    ///     `.items(ahead: 10, behind: 3)`; `AsyncFeed` always passes its own default explicitly.
+    ///   - reachEndThreshold: Items before list end that trigger `onReachEnd`.
+    ///   - estimatedItemHeight: Placeholder height (pt) for unmeasured items.
     ///   - layoutSpacing: Vertical gap between cells (pt).
-    ///   - layoutProvider: Places item frames and drives visibility/content-height. `nil` (default)
-    ///     uses `VerticalLayoutProvider(spacing: layoutSpacing)` — today's behavior, unchanged.
-    ///     Pass `GridLayoutProvider(columns:spacing:)` for a grid instead.
+    ///   - layoutProvider: Places item frames and drives visibility/content-height. `nil`
+    ///     (default) uses `VerticalLayoutProvider(spacing: layoutSpacing)`.
     ///   - notificationCenter: Source of `UIContentSizeCategory.didChangeNotification` for
-    ///     Dynamic Type invalidation (VelocityUI-ezo.2.5). Default `.default` is the one
-    ///     system-API singleton exception in CLAUDE.md's no-singletons rule; tests inject a
-    ///     private instance for deterministic coverage.
+    ///     Dynamic Type invalidation. Default `.default` is the one system-API singleton
+    ///     exception in CLAUDE.md's no-singletons rule; tests inject a private instance.
     public init(
         environment: RenderEnvironment,
         frame: CGRect = .zero,
@@ -379,18 +327,16 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         addGestureRecognizer(tap)
 
         contentSizeCategory = VContentSizeCategory(traitCollection.preferredContentSizeCategory)
-        // queue: nil — the OS always posts this notification on main, and synchronous delivery
-        // on the posting thread keeps this consistent with "scroll path never awaits" (no async
-        // settle window needed in tests, which post directly to an injected NotificationCenter).
+        // queue: nil — the OS always posts this on main, keeping delivery synchronous and
+        // consistent with "scroll path never awaits".
         contentSizeCategoryObserver = notificationCenter.addObserver(
             forName: UIContentSizeCategory.didChangeNotification,
             object: nil,
             queue: nil
         ) { [weak self] note in
-            // Extracted here (nonisolated) rather than inside the MainActor.assumeIsolated
-            // closure below: Swift 6 region isolation rejects sending the non-Sendable-checked
-            // `Notification` itself across the hop. `UIContentSizeCategory?` is a plain Sendable
-            // value, so extracting it first sidesteps the region-isolation error entirely.
+            // Extracted here (nonisolated) rather than inside MainActor.assumeIsolated below:
+            // Swift 6 region isolation rejects sending the non-Sendable Notification across the
+            // hop, but the extracted Sendable value crosses fine.
             let uiCategory = note.userInfo?[UIContentSizeCategory.newValueUserInfoKey] as? UIContentSizeCategory
             guard let self else { return }
             MainActor.assumeIsolated { self.handleContentSizeCategoryChange(uiCategory: uiCategory) }
@@ -401,10 +347,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     required init?(coder: NSCoder) { fatalError("use init(environment:frame:)") }
 
     deinit {
-        // deinit is not a recycle path — visibleCells are released without passing through
-        // returnToPool, so their decode Tasks must be cancelled here to mirror the recycle contract.
-        // MainActor.assumeIsolated: FeedScrollView is @MainActor-isolated and can only be
-        // deallocated on the main thread, so deinit always runs there. The assumption is safe.
+        // deinit isn't a recycle path — visibleCells never pass through returnToPool, so their
+        // decode Tasks are cancelled here instead. assumeIsolated is safe: this type is
+        // @MainActor, so deinit always runs on main.
         MainActor.assumeIsolated {
             for cell in visibleCells.values { cell.cancelPendingMedia() }
             if let contentSizeCategoryObserver {
@@ -416,28 +361,21 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     // MARK: - Dynamic Type
 
     /// Reads the new category from the notification's payload rather than unconditionally
-    /// re-reading `traitCollection.preferredContentSizeCategory` — the OS always includes
-    /// `UIContentSizeCategory.newValueUserInfoKey`, and reading it directly is what makes this
-    /// testable without needing a real trait-collection override on a bare, windowless view
-    /// (falls back to the live trait only if a caller posts a notification without it).
+    /// re-reading `traitCollection.preferredContentSizeCategory` — this is what makes it testable
+    /// without a real trait-collection override; falls back to the live trait if payload is missing.
     private func handleContentSizeCategoryChange(uiCategory: UIContentSizeCategory?) {
         let newCategory = VContentSizeCategory(uiCategory ?? traitCollection.preferredContentSizeCategory)
         guard newCategory != contentSizeCategory else { return }
         contentSizeCategory = newCategory
-        // itemSignature's cached tables were flattened at the OLD category — their signature
-        // doesn't encode it, so a signature hit here would silently serve stale (wrong-scale)
-        // text. Clearing forces every item back through flatten() with the new category.
+        // itemSignature's cached tables were flattened at the old category and don't encode it,
+        // so clear the cache to force every item back through flatten() at the new category.
         tableCache.removeAll(keepingCapacity: true)
         itemsDidChange(from: items)
     }
 
-    /// `init(frame:)` builds this view before UIKit attaches it to a window, so the
-    /// `traitCollection` read at construction reflects the process default, not the live system
-    /// setting — traits only propagate once attached. Without this, a user launching with an
-    /// accessibility text size would see unscaled text until the next `didChangeNotification`
-    /// (posted only on a live change, never on mount). Re-derives the category at the first
-    /// reliable read point, routed through `handleContentSizeCategoryChange` so it's a no-op
-    /// re-parent when the category hasn't actually changed.
+    /// `init(frame:)` builds this view before UIKit attaches it to a window, so
+    /// `traitCollection` at construction reflects the process default, not the live setting.
+    /// Re-derives the category at the first reliable read point (window attach).
     override public func didMoveToWindow() {
         super.didMoveToWindow()
         guard window != nil else { return }
@@ -449,11 +387,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     override public func layoutSubviews() {
         super.layoutSubviews()
 
-        // VelocityUI-socg C4: drain any coalesced `items` burst FIRST — `refineKnownFrames`/
-        // `updateVisibleCells` below read `tables`/`resolvedFrames`/`estimatedIndices`, which
-        // only `itemsDidChange` updates. `itemsDidChange` clears `_pendingItemsDiffBase` itself
-        // (as its very first action) so this can't double-drain even if something else already
-        // called it directly this pass (e.g. `handleContentSizeCategoryChange`).
+        // Drain any coalesced `items` burst first — refineKnownFrames/updateVisibleCells below
+        // read state that only itemsDidChange updates. itemsDidChange clears
+        // _pendingItemsDiffBase itself, so this can't double-drain.
         if let base = _pendingItemsDiffBase {
             itemsDidChange(from: base)
         }
@@ -484,10 +420,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     // MARK: - Items change
 
     private func itemsDidChange(from oldItems: [Item]) {
-        // Cleared unconditionally, regardless of call site (the `items` didSet's deferred drain
-        // in `layoutSubviews`, or a direct call like `handleContentSizeCategoryChange`'s) — any
-        // call fully resyncs `snapshot`/`tables` to the CURRENT `items`, so a pending marker from
-        // before this call is always stale afterward and must not trigger a redundant re-drain.
+        // Cleared unconditionally regardless of call site — any call fully resyncs
+        // snapshot/tables to the current items, so a pending marker is always stale afterward.
         _pendingItemsDiffBase = nil
         guard let builder = cellBuilder else { return }
 
@@ -524,8 +458,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         }
 
         // Capture old frames and build (prevIdx, nextIdx) survivors before clobbering them.
-        // Covers all items that have a known previous height: .none, .layout, .appearance, .media.
-        // Int-keyed — zero AnyHashable boxing.
+        // Covers all items with a known previous height. Int-keyed — zero AnyHashable boxing.
         let oldFrames = resolvedFrames
         var survivors: [(prevIdx: Int, nextIdx: Int)] = []
         survivors.reserveCapacity(tables.count)
@@ -558,13 +491,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             && !changeSet.layoutChanged.isEmpty
             && changeSet.layoutChanged.allSatisfy { $0.prevIdx == $0.nextIdx && visibleCells[$0.prevIdx] != nil }
 
-        // VelocityUI-socg C3: capture per-block diff inputs for every layout-changed survivor BEFORE
-        // workingRange.invalidateAll() wipes the ring buffer — the OLD fragments (real, previously-
-        // measured per-block heights) are only readable from WorkingRange right now; once invalidated,
-        // recovering them needs a full re-measure, the exact O(item length) cost this diff avoids.
-        // `changeSet.layoutChanged` already carries the (prev, next) NodeTable pair, no need to
-        // re-derive from `tables`/`nextTables`. Safe under `canDeferInvalidation` too — that path only
-        // skips invalidation, never reorders this capture relative to it.
+        // Capture per-block diff inputs for every layout-changed survivor BEFORE
+        // workingRange.invalidateAll() wipes the ring buffer — the old fragments are only
+        // readable from WorkingRange right now; once invalidated, recovering them needs a full
+        // re-measure, the exact O(item length) cost this diff avoids.
         var blockDiffInputs: [Int: (previousTable: NodeTable, newTable: NodeTable, previousFragments: [Fragment])] = [:]
         if needsFullInvalidation {
             for e in changeSet.layoutChanged {
@@ -584,58 +514,41 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
         rebuildFrames(oldFrames: oldFrames, survivors: survivors)
 
-        // Set only by the fully-resolved C4 fast path below (every layoutChanged entry patched
+        // Set only by the fully-resolved fast path below (every layoutChanged entry patched
         // WorkingRange directly, no invalidation) — gates the `lastNotifiedLeadingIndex` reset
         // near the end of this method.
         var tookInPlaceFastPath = false
 
         if needsFullInvalidation {
-            // reuseDecision(oldID:newID:) (Pipeline/ReuseDecision.swift, VelocityUI-0wi) gates recycling
-            // here instead of the old unconditional pool-return of every visible cell. `survivors`
-            // (built above) already guarantees every prevIdx in `survivorByPrevIdx` is bound to the
-            // same item identity as its nextIdx slot (RenderDiffer.diff keys off itemID) — calling
-            // reuseDecision explicitly, rather than silently trusting that invariant, makes the
-            // decision rule the one source of truth and gives a real branch to unit-test (VelocityUI-socg C2).
+            // reuseDecision gates recycling explicitly rather than trusting that survivors always
+            // match identity — makes the decision rule the one source of truth and testable.
             var survivorByPrevIdx: [Int: Int] = [:]
             survivorByPrevIdx.reserveCapacity(survivors.count)
             for s in survivors { survivorByPrevIdx[s.prevIdx] = s.nextIdx }
 
             var keptCells: [Int: RenderCell] = [:]
             keptCells.reserveCapacity(visibleCells.count)
-            // C3: indices the block-diff path below already resolved synchronously (correct
-            // height + repositioned fragments) — excluded from the `_pendingFragmentIndices`
-            // re-enroll so refineKnownFrames doesn't redundantly redo the same work through the
-            // async pipeline once WorkingRange recommits.
+            // Indices the block-diff path below already resolved synchronously — excluded from
+            // the _pendingFragmentIndices re-enroll so refineKnownFrames doesn't redo the work.
             var blockDiffResolvedIndices: Set<Int> = []
-            // C4: WorkingRange patches for the fast path — populated only when `canDeferInvalidation`,
-            // applied after the loop iff every layoutChanged entry resolved. A synthetic ResolvedLayout
-            // mirroring what `extractFragments` would derive: root nodeIndex 0 spanning the item
-            // (flatBlocks guarantees an unframed root vstack), one child per resolved fragment at
-            // nodeIndex == fragment.id / totalFrame == fragment.frame (already item-local, same space
-            // `extractFragments` produces) — keeps a later appearanceChanged/mediaChanged
-            // classification (which reads `wrEntry.layout`, not `wrEntry.fragments`) correct.
+            // WorkingRange patches for the fast path, applied after the loop iff every
+            // layoutChanged entry resolved — a synthetic ResolvedLayout mirroring what
+            // extractFragments would derive, so later appearance/media classification stays correct.
             var blockDiffWorkingRangeCommits: [Int: (layout: ResolvedLayout, fragments: [Fragment])] = [:]
             let width = measureWidth(for: containerWidth)
             let scale = max(1, traitCollection.displayScale)
             for (prevIdx, cell) in visibleCells {
                 if let nextIdx = survivorByPrevIdx[prevIdx], nextIdx < tables.count,
                    reuseDecision(oldID: cell.currentItemID, newID: tables[nextIdx].itemID) == .inPlace {
-                    // Detach (do not reposition here): survivor indices can shift relative to items
-                    // still to be freshly mounted this pass (e.g. a prepend moves this cell from
-                    // index 0 to 1 while a new item takes index 0) — reattaching now would leave it
-                    // z-ordered ahead of a not-yet-mounted lower index. `updateVisibleCells`' mount
-                    // loop re-attaches it in ascending visible-index order, matching display order
-                    // without a pool round-trip.
+                    // Detach without repositioning: survivor indices can shift relative to items
+                    // still to be mounted this pass (e.g. a prepend). updateVisibleCells' mount
+                    // loop re-attaches in ascending visible-index order to preserve z-order.
                     cell.layer.removeFromSuperlayer()
                     keptCells[nextIdx] = cell
 
-                    // C3: per-block diff (diff(previous:new:) + freeze application) — unchanged blocks
-                    // reused verbatim from FrozenBitmapStore (zero re-measure/rasterize), only the hot
-                    // tail / newly-appended blocks touched. `applyInPlaceBlockDiff` returns nil whenever
-                    // it can't GUARANTEE correct content cheaply (non-flat item shape, no previous-
-                    // fragment baseline, or a changed image/geometry block it can't remeasure) — those
-                    // fall through to the pre-existing `_pendingFragmentIndices` full-refresh path,
-                    // rather than risk painting wrong/stale content.
+                    // Per-block diff: unchanged blocks reused verbatim from FrozenBitmapStore,
+                    // only the hot tail touched. Returns nil when it can't guarantee correct
+                    // content cheaply, falling through to the full-refresh path.
                     if let inputs = blockDiffInputs[prevIdx], nextIdx < items.count,
                        let result = applyInPlaceBlockDiff(
                            previousTable: inputs.previousTable,
@@ -650,10 +563,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                         estimatedIndices.remove(nextIdx)
                         cell.layer.frame = resolvedFrames[nextIdx]
                         // Merge image cache hits with the block-diff's freshly-resolved text
-                        // bitmaps (VelocityUI-socg C3 activation — this is the missing consumer
-                        // that makes FrozenBitmapStore's cached bitmaps actually paint). Fragment
-                        // ids never collide across content kinds within one item's NodeTable, so
-                        // a plain overwrite-merge is safe — the two maps are disjoint by key.
+                        // bitmaps — fragment ids never collide across content kinds within one
+                        // item's NodeTable, so a plain overwrite-merge is safe.
                         var syncMap = buildSyncMap(for: result.fragments, itemID: inputs.newTable.itemID)
                         for (id, bitmap) in result.textBitmaps { syncMap[id] = bitmap }
                         let entering = cell.updateBlockViewport(
@@ -680,15 +591,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             }
             visibleCells = keptCells
 
-            // C4: resolve the deferred invalidation decision. `canDeferInvalidation` only established
-            // ELIGIBILITY (no add/remove, every layoutChanged entry visible at a stable position) —
-            // whether each one actually resolved via block-diff is only known now. All-resolved: patch
-            // WorkingRange directly for just those indices, skipping full-window invalidate + pipeline
-            // re-measure entirely (a streaming token update no longer forces the whole prefetch window
-            // to re-measure). Partial failure: fall back to today's full invalidate + markInvalidated,
-            // just decided here instead of upfront — safe since nothing between the original call site
-            // and here reads `workingRange` (`applyInPlaceBlockDiff` only consumes `blockDiffInputs`,
-            // captured before either branch).
+            // Resolve the deferred invalidation decision: canDeferInvalidation only established
+            // eligibility; whether each entry actually resolved via block-diff is known only now.
+            // All-resolved: patch WorkingRange directly, skipping full-window invalidate + pipeline
+            // re-measure. Partial failure: fall back to full invalidate + markInvalidated.
             if canDeferInvalidation {
                 if blockDiffResolvedIndices.count == changeSet.layoutChanged.count {
                     for (nextIdx, commit) in blockDiffWorkingRangeCommits {
@@ -703,12 +609,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             }
 
             _pendingFragmentIndices.removeAll(keepingCapacity: true)
-            // Re-enroll every kept .inPlace index so refineKnownFrames refreshes its content
-            // once the pipeline recommits WorkingRange — must run AFTER removeAll above, or
-            // the clear would wipe these entries right back out. Without this, a same-id
-            // survivor freezes on its pre-change content until it scrolls out of keep-range
-            // and re-mounts (see VelocityUI-socg review finding). Indices the C3 block-diff
-            // path already resolved above are excluded (see `blockDiffResolvedIndices`'s doc).
+            // Re-enroll every kept .inPlace index (except ones the block-diff path already
+            // resolved) so refineKnownFrames refreshes content once WorkingRange recommits.
+            // Without this, a same-id survivor freezes on stale content until it re-mounts.
             _pendingFragmentIndices.formUnion(keptCells.keys.filter { !blockDiffResolvedIndices.contains($0) })
         } else {
             for e in changeSet.appearanceChanged {
@@ -732,13 +635,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             reachEndFired = false
         }
 
-        // On the fully-resolved fast path, nothing the pipeline needs to re-measure changed —
-        // WorkingRange was patched directly (not invalidated), neighbors untouched. Forcing a
-        // re-notify here would only spawn a `notifyPipelineIfNeeded` Task that immediately
-        // early-returns inside `onIndexBoundary` (the pipeline's last-notified index was never
-        // reset either, since `markInvalidated()` never ran) — a wasted Task + actor hop per
-        // streaming token. Leaving the value in place is still correct if the leading index
-        // genuinely shifted: `notifyPipelineIfNeeded` compares against it and notifies normally.
+        // On the fully-resolved fast path, WorkingRange was patched directly (not invalidated),
+        // so nothing needs a pipeline re-measure. Re-notifying would just spawn a wasted Task
+        // that early-returns inside onIndexBoundary.
         if !tookInPlaceFastPath {
             lastNotifiedLeadingIndex = -1
         }
@@ -747,28 +646,22 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         setNeedsLayout()
     }
 
-    // MARK: - VelocityUI-socg C3: in-place per-block diff
+    // MARK: - In-place per-block diff
 
-    /// Attempts the C3 per-block diff for one `.inPlace` survivor: builds previous/new `[Block]`
-    /// lists from each side's `NodeTable` (flat shape only, see `flatBlocks(for:width:)`), diffs
-    /// them with `diff(previous:new:)`, and re-measures every changed block — freezing it into
-    /// `environment.frozenBitmapStore` once it's TEXT and done growing. Returns the item's new
-    /// height, its repositioned `[Fragment]` list (so image blocks after a resized text block
-    /// still land right), and a `fragment.id -> CGImage` map of every text block's current bitmap
-    /// (unchanged blocks hit the resident tier first, then `FrozenBitmapStore`; changed ones are freshly rasterized) —
-    /// the caller merges this into `synchronousContent` so `RenderCell.applyLayout` paints real
-    /// pixels instead of leaving text blank. `nil` when the update can't be optimized SAFELY —
-    /// caller falls back to the `_pendingFragmentIndices` full-refresh path.
+    /// Per-block diff for one `.inPlace` survivor: builds previous/new `[Block]` lists from each
+    /// side's flat `NodeTable`, diffs them, and re-measures only changed blocks — freezing text
+    /// blocks into `environment.frozenBitmapStore` once done growing. Returns the item's new
+    /// height, its repositioned fragments, and a fragment-id→bitmap map the caller merges into
+    /// `synchronousContent` so `applyLayout` paints real pixels instead of leaving text blank.
+    /// `nil` when the update can't be optimized safely — caller falls back to the
+    /// `_pendingFragmentIndices` full-refresh path.
     ///
-    /// `previousFragments` must be the REAL fragments `extractFragments` produced last time this
-    /// item was measured (captured from `WorkingRange` before `invalidateAll()`, see the
-    /// `itemsDidChange` call site) — the only source of the old content's real per-block heights,
-    /// since `flatBlocks`' synthetic `Fragment`s carry no height of their own.
+    /// `previousFragments` must be the real fragments `extractFragments` produced last time this
+    /// item was measured, captured before `invalidateAll()` — the only source of the old
+    /// content's real per-block heights.
     ///
-    /// `itemID` is `Item.ID`, not `NodeTable.itemID` (`AnyHashable`) — `BlockKey`'s generic init
-    /// requires `Hashable & Sendable` and `AnyHashable` isn't `Sendable` here. `.inPlace`
-    /// guarantees `previousTable`/`newTable` share identity, so one `itemID` covers both
-    /// `flatBlocks` calls below.
+    /// `itemID` is `Item.ID`, not `NodeTable.itemID` (`AnyHashable`, not `Sendable`) — `.inPlace`
+    /// guarantees both tables share identity, so one `itemID` covers both `flatBlocks` calls.
     private func applyInPlaceBlockDiff<ID: Hashable & Sendable>(
         previousTable: NodeTable,
         previousFragments: [Fragment],
@@ -788,21 +681,16 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         let store = environment.frozenBitmapStore
         let residentStore = environment.visibleBlockStore
 
-        // Measures (+ rasterizes) one active TEXT block via the phase-A `freeze(_:)` primitive
-        // and keeps its artifact in the resident tier. A fresh, function-scoped `cache`
-        // dict is passed on every call so `freeze(_:)` always recomputes here — the PERSISTENT
-        // cache is `store`, consulted separately (below) for the genuinely-unchanged case, so
-        // this always represents real new work, never a stale hit.
+        // Measures (+ rasterizes) one active text block via the `freeze(_:)` primitive and keeps
+        // its artifact in the resident tier. A fresh function-scoped `cache` dict is passed on
+        // every call so this always recomputes — `store` is the persistent cache, consulted
+        // separately below for the genuinely-unchanged case.
         func measureAndMaybeFreeze(_ block: Block) -> (height: CGFloat, bitmap: CGImage?)? {
             guard case .text(let descriptor) = block.fragment.content else { return nil }
-            // VelocityUI-x4q0: on seal (fence closes / frontier advances over this block), reuse
-            // the composited bitmap the hot-append path already produced instead of a fresh
-            // measure/rasterize — the sealed-block zero-recompute guarantee for a block that was
-            // hot a mo3ment ago. `catchUpAndFinalize` first re-appends `descriptor`'s CURRENT
-            // content (cheap incremental blit of just the new tail) so a block that grew further
-            // in this same round (self-heal) is caught up before the seal check, instead of
-            // mismatching and falling through to a full re-measure. Always tears down the entry
-            // (match or no-entry alike), so a stale hot rasterizer never lingers past this call.
+            // On seal, reuse the composited bitmap the hot-append path already produced instead
+            // of a fresh measure/rasterize. catchUpAndFinalize first re-appends the descriptor's
+            // current content so a block that grew further this round is caught up before the
+            // seal check. Always tears down the entry so a stale hot rasterizer never lingers.
             if let sealed = environment.hotBlockRasterizerStore.catchUpAndFinalize(
                 block.key, descriptor: descriptor, width: block.width, scale: scale, contentHash: block.contentHash
             ) {
@@ -843,11 +731,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             }
         }
 
-        // VelocityUI-x4q0: the hot-append path for the trailing volatile block — routes through
-        // `HotBlockRasterizerStore` for O(appended) cost instead of `measureAndMaybeFreeze`'s
-        // O(block size) measure/rasterize. Never calls `store.store(...)` — a still-growing
-        // block is never persisted into `FrozenBitmapStore`; its current artifact remains in the
-        // resident tier until the block leaves the mounted range.
+        // Hot-append path for the trailing volatile block — O(appended) cost via
+        // HotBlockRasterizerStore instead of O(block size) measure/rasterize. Never persists
+        // into FrozenBitmapStore since the block is still growing; artifact stays resident.
         func measureAndRasterizeHot(_ block: Block) -> (height: CGFloat, bitmap: CGImage?)? {
             guard case .text(let descriptor) = block.fragment.content else { return nil }
             #if canImport(XCTest)
@@ -956,8 +842,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                 recordGeometry(geometry, at: i)
             }
         }
-        // Positional fallback exposes the volatile tail only through `hot`; unlike the
-        // identity-aware path, it does not also classify that index as updated or reused.
+        // Positional fallback: exposes the volatile tail only through `hot`, without also
+        // classifying that index as updated or reused.
         for i in d.hot where !resolvedIndices.contains(i) {
             let block = newBlocks[i]
             if case .text = block.fragment.content {
@@ -999,19 +885,13 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         return (cursor, fragments, textBitmaps)
     }
 
-    /// Recognizes the one item shape this bind-site diff optimizes: a root `.vstack` whose DIRECT
-    /// children are all leaves (text/image/spacer/hosting/gif/video/customLayer) — no nesting, no
-    /// hstack/zstack — the "VStack of streaming message blocks" shape a chat message produces.
-    /// Returns `nil` for any other shape (nested containers, non-vstack root, `.frame()` applied
-    /// to the root) so the caller falls back to the full-refresh path instead of a partial,
-    /// possibly-wrong optimization for a tree this diff wasn't designed to model (the scoped-down
-    /// "minimal reasonable mapping" from VelocityUI-socg C3's design notes).
+    /// Recognizes the one item shape this diff optimizes: a root `.vstack` whose direct children
+    /// are all leaves — no nesting, no hstack/zstack — the "VStack of streaming message blocks"
+    /// shape a chat message produces. Returns `nil` for any other shape, so the caller falls
+    /// back to the full-refresh path instead of a possibly-wrong optimization.
     ///
-    /// Blocks are positioned 0-height placeholders at `width` — real per-block height is filled
-    /// in by the caller from measurement/the frozen-bitmap store, never read from these `Fragment`s.
-    ///
-    /// `itemID` is the caller's real `Item.ID`, NOT `table.itemID` (`AnyHashable`) — see
-    /// `applyInPlaceBlockDiff`'s doc for why `BlockKey` needs a genuinely `Sendable` id.
+    /// Blocks are positioned 0-height placeholders at `width`; real height is filled in by the
+    /// caller from measurement. `itemID` is the caller's real `Item.ID`, not `table.itemID`.
     private func flatBlocks<ID: Hashable & Sendable>(
         for table: NodeTable, itemID: ID, width: CGFloat
     ) -> (blocks: [Block], spacing: CGFloat)? {
@@ -1035,13 +915,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     }
 
     /// Emits just the BlockKeys for the flat-vstack-of-leaves shape `flatBlocks` recognizes,
-    /// WITHOUT building any `Block`/`Fragment`/`ResolvedLayout` or computing `contentHash` — the
-    /// scroll-path admit/evict window bookkeeping needs only width-independent `(itemID,
-    /// position)` keys, so paying for a `Block`'s hashing/geometry (immediately discarded by the
-    /// `.map(\.key)` this replaces) on every keep-range boundary crossing during a fling would
-    /// violate the zero-allocation scroll-path invariant. Mirrors `flatBlocks`' guards exactly so
-    /// the two never disagree about which items are flat. Returns `true` when it inserted the
-    /// full flat key set into `keys`, `false` on a non-flat shape (nothing inserted).
+    /// without building any `Block`/`Fragment`/`ResolvedLayout` — scroll-path bookkeeping needs
+    /// only the keys, and a full `Block` alloc on every keep-range crossing during a fling would
+    /// violate the zero-allocation scroll-path invariant. Mirrors `flatBlocks`' guards exactly.
+    /// Returns `true` when it inserted the full flat key set, `false` on a non-flat shape.
     @discardableResult
     private func flatBlockKeys<ID: Hashable & Sendable>(
         for table: NodeTable, itemID: ID, into keys: inout Set<BlockKey>
@@ -1049,12 +926,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         guard !table.nodes.isEmpty, case .vstack = table.nodes[0] else { return false }
         let childIndices = table.children(of: 0)
         guard !childIndices.isEmpty, childIndices.count == table.nodes.count - 1 else { return false }
-        // Validate the whole shape is flat FIRST, without touching `keys` — a nested container
-        // found partway through must bail without partially mutating the caller's accumulator,
-        // matching `flatBlocks`' all-or-nothing shape recognition (its nil return likewise
-        // discards a half-built `blocks` array). A second, allocation-free pass then inserts
-        // directly into `keys` — no intermediate buffer needed since `childIndices` is already
-        // materialized.
+        // Validate the whole shape is flat first, without touching `keys` — a nested container
+        // found partway through must bail without partially mutating the caller's accumulator.
         for nodeIndex in childIndices where !table.isBlockLeaf(at: nodeIndex) { return false }
         for (position, nodeIndex) in childIndices.enumerated() {
             let key = table.blockID(at: nodeIndex).map { BlockKey(itemID: itemID, blockID: $0) }
@@ -1064,13 +937,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         return true
     }
 
-    /// Synchronous text measurement for the C3 in-place path. The scroll/bind path must never
-    /// `await` (CLAUDE.md invariant), so this cannot go through the pooled, actor-isolated
-    /// `TextMeasurementPool` that the off-main `RenderPipeline` measure path uses. Matches
-    /// `rasterizeText`'s own "fresh TextKit objects per call" pattern (TextRasteriser.swift)
-    /// instead of adding a second, synchronous-checkout text-context pool — the C3 path touches
-    /// at most one or two text blocks per update (the hot tail, and occasionally one finalized
-    /// block), so the allocation is bounded per update, not per block-count.
+    /// Synchronous text measurement for the in-place path. The scroll/bind path must never
+    /// `await`, so this can't go through the pooled, actor-isolated `TextMeasurementPool`.
+    /// Allocates fresh TextKit objects per call instead — bounded, since this path touches at
+    /// most one or two text blocks per update.
     private func measureTextSync(_ descriptor: TextDescriptor, width: CGFloat) -> CGSize {
         #if canImport(XCTest)
         _blockDiffMeasureCallCount += 1
@@ -1078,12 +948,11 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         return TextMeasurementContext().measure(descriptor, width: width)
     }
 
-    // MARK: - VelocityUI-80uh (B1): hot-block side-channel during an active scroll gesture
+    // MARK: - Hot-block side-channel during an active scroll gesture
 
     /// Whether a scroll gesture is currently in progress — the condition `growHotBlock(_:)`
-    /// gates on. Wraps UIKit's own `isTracking`/`isDragging`/`isDecelerating` (gesture-recognizer
-    /// driven, read-only) behind one property so tests can override it (see
-    /// `_debugGestureActiveOverride`) without a live touch.
+    /// gates on. Wraps UIKit's read-only gesture signals behind one property so tests can
+    /// override it via `_debugGestureActiveOverride` without a live touch.
     private var isGestureActive: Bool {
         #if canImport(XCTest)
         if let override = _debugGestureActiveOverride { return override }
@@ -1092,8 +961,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     }
 
     /// Grows the trailing hot block of `item` directly, bypassing the full `items` diff/relayout
-    /// path — the B1 side-channel (VelocityUI-80uh). Call this INSTEAD OF reassigning `items` on
-    /// every streaming token while a scroll gesture is active, passing the item's current value:
+    /// path. Call this instead of reassigning `items` on every streaming token while a scroll
+    /// gesture is active, passing the item's current value:
     ///
     ///     message.markdownParser.append(token)
     ///     if feed.isTracking || feed.isDragging || feed.isDecelerating {
@@ -1102,27 +971,18 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     ///         feed.items = messages
     ///     }
     ///
-    /// Only applies when `item` is the LAST element of `items` (bottom-growing single-message
-    /// case). Above-viewport / multi-message growth (VelocityUI-qgy9) needs contentOffset anchor
-    /// compensation instead, and always falls through to a normal `items =` assignment.
+    /// Only applies when `item` is the last element of `items` (bottom-growing single-message
+    /// case); other growth always falls through to a normal `items =` assignment.
     ///
-    /// Internally re-runs `applyInPlaceBlockDiff` (VelocityUI-x4q0) — the same per-block diff a
-    /// normal `items =` assignment applies — scoped to just this item (`flatten()` runs for
-    /// `item` alone; `differ.diff`/`LayoutSnapshot` untouched). Diffs the item's whole block list
-    /// every call, so a block-boundary event (new paragraph/code-fence/image/rule) is handled
-    /// LIVE during the gesture, not deferred — no separate boundary detector needed (confirmed
-    /// by `testBlockBoundary_NewBlockAppearsMidGesture_HandledLiveNotDeferred`; trust that test
-    /// over this prose if they disagree).
+    /// Internally re-runs `applyInPlaceBlockDiff`, scoped to just this item, diffing the whole
+    /// block list every call so a block-boundary event (new paragraph/image/rule) is handled
+    /// live during the gesture, not deferred. `tables`/`WorkingRange` stay continuously in sync,
+    /// so nothing needs reconciling at gesture end — the next `items =` assignment finds
+    /// `HotBlockRasterizerStore` already at the final content, no flash.
     ///
-    /// `tables[itemIndex]`/`WorkingRange` stay continuously up to date on every successful call,
-    /// so nothing needs reconciling at gesture end: the next `items =` assignment re-runs
-    /// `applyInPlaceBlockDiff` and finds `HotBlockRasterizerStore` already at the final content —
-    /// an empty-delta append, same height/bitmap, no flash.
-    ///
-    /// - Returns: `true` if the side-channel painted this update (safe to skip `items =`,
-    ///   including block-boundary events). `false` if the caller must fall back to `items =` —
-    ///   no gesture active, `item` isn't the last item, its cell/WorkingRange isn't primed yet,
-    ///   or its shape isn't one `applyInPlaceBlockDiff` optimizes.
+    /// - Returns: `true` if the side-channel painted this update (safe to skip `items =`).
+    ///   `false` if the caller must fall back to `items =` — no gesture active, `item` isn't the
+    ///   last item, its cell/WorkingRange isn't primed yet, or its shape isn't optimizable.
     @discardableResult
     @MainActor
     public func growHotBlock(_ item: Item) -> Bool {
@@ -1160,9 +1020,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         )
         spawnMediaFetches(for: cell, fragments: entering, itemID: newTable.itemID, syncMap: syncMap)
 
-        // Keep `tables`/`WorkingRange` continuously in sync with what's on screen — see doc
-        // comment above for why this is what makes the gesture-end reconcile free. Mirrors the
-        // exact synthetic-layout shape `itemsDidChange`'s C4 fast path already commits.
+        // Keep tables/WorkingRange continuously in sync with what's on screen — this is what
+        // makes the gesture-end reconcile free. Mirrors itemsDidChange's fast-path commit shape.
         tables[lastIdx] = newTable
         let syntheticLayout = ResolvedLayout(
             totalFrame: CGRect(x: 0, y: 0, width: width, height: result.height),
@@ -1180,40 +1039,32 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     // MARK: - Frame management
 
     /// Rebuilds `resolvedFrames` in the current `tables` order. Heights come from
-    /// `oldFrames[s.prevIdx]` for each survivor (prevIdx, nextIdx) pair. Other indices fall back
-    /// to the synchronous `intrinsicHeight(for:width:)` estimate (real `width / aspectRatio` for
-    /// single-image rows — no decode, no cache probe), and only to the flat `estimatedItemHeight`
-    /// placeholder when intrinsic height can't be computed (text/mixed/container rows needing
-    /// async measurement). Without the intrinsic fallback, every unmeasured image row would seed
-    /// the flat estimate until the async pipeline commits — under sustained fast scroll that
-    /// regime never ends, so `visRange` churns every frame and the cell pool never converges
-    /// (VelocityUI-ksh). Populates `estimatedIndices` for any index not sourced from a known
-    /// survivor height — both intrinsic- and placeholder-seeded rows still need
-    /// `refineKnownFrames` to reconcile against the real WorkingRange-committed layout.
+    /// `oldFrames[s.prevIdx]` for each survivor pair; other indices fall back to the synchronous
+    /// `intrinsicHeight(for:width:)` estimate, and only to the flat `estimatedItemHeight`
+    /// placeholder when intrinsic height can't be computed. Without the intrinsic fallback,
+    /// every unmeasured image row would seed the flat estimate until the async pipeline
+    /// commits — under sustained fast scroll `visRange` would churn every frame and the cell
+    /// pool never converges. Populates `estimatedIndices` for any index not sourced from a known
+    /// survivor height.
     ///
     /// Container width, honoring the first-layout fallback (`bounds.width` until
-    /// `lastLayoutWidth` is set by the first `layoutSubviews` pass). This is always the raw,
-    /// full width — pass it to `layoutProvider.frames(for:availableWidth:)` and to
-    /// `syncContentSize`'s `contentSize.width`, never directly to a measure/cache-key call
-    /// (route those through `measureWidth(for:)` instead).
+    /// `lastLayoutWidth` is set). Always the raw full width — route measure/cache-key calls
+    /// through `measureWidth(for:)` instead.
     private var containerWidth: CGFloat {
         lastLayoutWidth > 0 ? lastLayoutWidth : bounds.width
     }
 
-    /// The width to measure a cell's content at, and to key `CacheKey`/`measureNode` calls with —
-    /// `layoutProvider.measureWidth(availableWidth:)` applied to a container width. For
-    /// `VerticalLayoutProvider` this equals `containerWidth` verbatim (unchanged behavior); for
-    /// `GridLayoutProvider` it's the narrower column width. Every measure/
-    /// CacheKey call site must route through this so writers and readers never key-mismatch.
+    /// The width to measure a cell's content at, and to key `CacheKey`/`measureNode` calls with.
+    /// For `VerticalLayoutProvider` this equals `containerWidth`; for `GridLayoutProvider` it's
+    /// the narrower column width. Every measure/CacheKey call site must route through this so
+    /// writers and readers never key-mismatch.
     private func measureWidth(for containerWidth: CGFloat) -> CGFloat {
         layoutProvider.measureWidth(availableWidth: containerWidth)
     }
 
-    /// Picking each item's height stays here, since it needs `tables`/`oldFrames`/measurement.
-    /// Placing the frames (x/y/width, grid columns included) is handed off to
-    /// `layoutProvider.frames(for:availableWidth:)` — we wrap each height in a bare
-    /// `ResolvedLayout` and let the provider do the positioning. Safe because every provider's
-    /// `frames(for:)` only reads `totalFrame.height` from its input.
+    /// Picks each item's height (needs `tables`/`oldFrames`/measurement), then hands positioning
+    /// off to `layoutProvider.frames(for:availableWidth:)` — safe because every provider only
+    /// reads `totalFrame.height` from its input.
     private func rebuildFrames(oldFrames: [CGRect], survivors: [(prevIdx: Int, nextIdx: Int)]) {
         let w = containerWidth
         let measureW = measureWidth(for: w)
@@ -1268,13 +1119,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                       let cacheEntry = environment.layoutCache.cachedEntry(
                           for: CacheKey(layoutHash: tables[index].layoutHash, width: measureWidth(for: lastLayoutWidth))
                       ) {
-                // WorkingRange still hasn't been populated by the pipeline for this index (e.g. a
-                // fast leading-index advance outran notifyPipelineIfNeeded), but LayoutCache
-                // already has the entry — materialize inline, same fallback as
-                // updateVisibleCells' WR-miss branch. Gated on _pendingFragmentIndices (the
-                // small, mount-bounded set) — NOT on estimatedIndices, which spans the whole feed
-                // and would turn this into an NSCache probe + CacheKeyBox allocation per
-                // far-off, never-mounted index.
+                // WorkingRange hasn't been populated by the pipeline yet, but LayoutCache
+                // already has the entry — materialize inline. Gated on _pendingFragmentIndices
+                // (small, mount-bounded), not estimatedIndices, which spans the whole feed and
+                // would probe LayoutCache per far-off, never-mounted index.
                 workingRange.commit(cacheEntry.layout, cacheEntry.fragments, at: index)
                 entry = cacheEntry
             } else {
@@ -1323,21 +1171,17 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     // MARK: - Width change
 
     /// - Parameter isFirstLayout: `true` only for the very first width transition (the
-    ///   `0 -> bounds.width` sentinel). On first layout there is no prior width whose entries
-    ///   could be stale — `WorkingRange` is empty and any `LayoutCache` entries were populated by
-    ///   `AsyncFeed.warmUp` at this SAME width — so the WR/LayoutCache invalidation side effects
-    ///   are skipped. `rebuildFrames` + `syncContentSize` still run unconditionally: the frames
-    ///   must be (re)computed against the now-known width either way.
+    ///   `0 -> bounds.width` sentinel), where there's no prior width to invalidate against, so
+    ///   the WR/LayoutCache invalidation is skipped. `rebuildFrames` + `syncContentSize` still
+    ///   run unconditionally either way.
     private func handleWidthChange(isFirstLayout: Bool) {
         if !isFirstLayout {
             workingRange.invalidateAll()
             let pipeline = self.pipeline
             Task { await pipeline.markInvalidated() }
-            // LayoutCache eviction is async (actor-isolated). Between here and when invalidateAll()
-            // completes, a boundary-crossing notifyPipelineIfNeeded will miss on the new-width key —
-            // harmless. An in-flight old-width prefetch can still write back entries, but old-width
-            // CacheKeys (layoutHash, oldWidth) never collide with new-width keys (layoutHash, newWidth),
-            // so no stale data pollutes the new-width lookup path.
+            // LayoutCache eviction is async. Between now and completion, a boundary-crossing
+            // notifyPipelineIfNeeded misses on the new-width key harmlessly — old-width CacheKeys
+            // never collide with new-width ones, so no stale data pollutes the lookup.
             let cache = environment.layoutCache
             Task { await cache.invalidateAll() }
         }
@@ -1381,9 +1225,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             environment.frozenBitmapStore.sizeBudget(forWindowCount: keepRange.count)
         }
 
-        // Collect out-of-range indices into the pre-allocated scratch buffer,
-        // then remove. Dictionary.keys is a lazy non-allocating view; _recycleBuffer
-        // reuses its backing store after warm-up — no per-frame allocations.
+        // Collect out-of-range indices into the pre-allocated scratch buffer, then remove.
+        // _recycleBuffer reuses its backing store after warm-up — no per-frame allocations.
         _recycleBuffer.removeAll(keepingCapacity: true)
         for index in visibleCells.keys where !keepRange.contains(index) {
             _recycleBuffer.append(index)
@@ -1398,8 +1241,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             }
             if !leavingKeys.isEmpty {
                 environment.visibleBlockStore.demote(leavingKeys, to: environment.frozenBitmapStore)
-                // VelocityUI-x4q0: same `leavingKeys` set — a live hot rasterizer's
-                // `NSTextLayoutManager` must not leak when its cell recycles away.
+                // A live hot rasterizer's NSTextLayoutManager must not leak when its cell recycles away.
                 environment.hotBlockRasterizerStore.evict(leavingKeys)
             }
         }
@@ -1411,10 +1253,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             }
         }
 
-        // Set when a LayoutCache-hit mount below refines resolvedFrames for an index whose
-        // real height differs from the estimatedItemHeight placeholder — signals that
-        // already-mounted cells at later indices (not touched by this loop, since
-        // visibleCells[index] == nil gates re-entry) may need repositioning below.
+        // Set when a LayoutCache-hit mount below refines resolvedFrames for an index whose real
+        // height differs from the placeholder — signals already-mounted cells at later indices
+        // may need repositioning below.
         var didRefineDuringMount = false
 
         // Keys of newly mounted cells are promoted after this pass. Existing cache entries move
@@ -1425,12 +1266,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         for index in visRange {
             guard index < resolvedFrames.count, index < tables.count else { continue }
             if let keptCell = visibleCells[index] {
-                // VelocityUI-socg C2: a cell kept in-place by itemsDidChange's reuseDecision
-                // branch is detached from the layer tree (superlayer == nil) but still bound —
-                // reattach it here, in the SAME ascending visRange order a fresh mount uses, so
-                // z-order matches display order exactly as a full remount would have produced.
-                // A steady-state already-attached cell (the common case) is a single pointer
-                // read and `continue` — no allocation, no pool round-trip.
+                // A cell kept in-place by itemsDidChange's reuseDecision branch is detached
+                // (superlayer == nil) but still bound — reattach here in ascending visRange
+                // order so z-order matches display order. Steady-state already-attached cells
+                // are a single pointer read and `continue`.
                 if keptCell.layer.superlayer == nil {
                     keptCell.layer.frame = resolvedFrames[index]
                     layer.addSublayer(keptCell.layer)
@@ -1469,18 +1308,13 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             } else if let entry = environment.layoutCache.cachedEntry(
                 for: CacheKey(layoutHash: table.layoutHash, width: measureWidth(for: lastLayoutWidth))
             ) {
-                // WorkingRange miss, but LayoutCache already has the entry (prior pipeline pass at
-                // this width, or AsyncFeed.warmUp() before mount). Materialize inline so this cell
-                // gets real fragments in THIS layoutSubviews pass instead of a placeholder frame.
-                // Subsequent passes hit the WR-hit branch above; refineKnownFrames is bypassed for
-                // this index. See WorkingRange.commit's docstring for why a possible double-commit
-                // with notifyPipelineIfNeeded's pipeline Task is safe.
+                // WorkingRange miss, but LayoutCache already has the entry (prior pipeline pass,
+                // or AsyncFeed.warmUp()). Materialize inline so this cell gets real fragments
+                // this pass instead of a placeholder frame.
                 workingRange.commit(entry.layout, entry.fragments, at: index)
 
-                // resolvedFrames[index] may still hold the estimatedItemHeight placeholder —
-                // this is the first layoutSubviews to see this index, so refineKnownFrames
-                // (which runs before this function) had nothing in WorkingRange yet to refine
-                // from. Refine here, inline, from the same LayoutCache-sourced layout, so the
+                // resolvedFrames[index] may still hold the placeholder — refineKnownFrames ran
+                // before WorkingRange had anything to refine from. Refine here inline so the
                 // cell mounts at its real height instead of the stale estimate.
                 let realHeight = entry.layout.totalFrame.height
                 var mountFrame = frame
@@ -1519,10 +1353,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             environment.visibleBlockStore.promote(enteringKeys, from: environment.frozenBitmapStore)
         }
 
-        // A LayoutCache-hit refine above only shifts resolvedFrames for indices AFTER the
-        // refined one — any cell already mounted (from a prior pass) at a higher index needs
-        // its layer.frame re-synced. Cheap no-op in the common case (didRefineDuringMount is
-        // false whenever every visible index either WR-hits or has no LayoutCache entry yet).
+        // A LayoutCache-hit refine above shifts resolvedFrames for indices after the refined
+        // one — any cell already mounted at a higher index needs its layer.frame re-synced.
         if didRefineDuringMount {
             for (i, cell) in visibleCells {
                 guard i < resolvedFrames.count else { continue }
@@ -1536,13 +1368,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
     /// The index range to keep warm (measured, mounted, prefetched) around the visible viewport —
     /// drives both `updateVisibleCells`'s recycle bounds and the pipeline measure window, so
-    /// mounting never asks for an index the pipeline was never told to warm. Same binary-search
-    /// primitive as the plain visible-range query, extended geometrically (screens mode) or by a
-    /// fixed item count (items mode).
+    /// mounting never asks for an index the pipeline was never told to warm.
     ///
-    /// Runs on the scroll path (`layoutSubviews` → `updateVisibleCells`): allocation-free, O(log n)
-    /// — one extra `visibleIndexRange` binary search over the already-built `resolvedFrames`, same
-    /// class of work the plain visible-range search already does. No rebuild, no Task, no await.
+    /// Runs on the scroll path: allocation-free, O(log n) — one extra binary search over the
+    /// already-built `resolvedFrames`. No rebuild, no Task, no await.
     private func warmRange(viewportTop: CGFloat, viewportBottom: CGFloat) -> Range<Int> {
         switch warmWindow {
         case .items(let ahead, let behind):
@@ -1584,14 +1413,13 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         guard leading != lastNotifiedLeadingIndex else { return }
         lastNotifiedLeadingIndex = leading
 
-        // The window actually sent to the pipeline — geometrically wider than `visRange` in
-        // screens mode, which is the fix: the trigger (`leading` changing) stays item-based, but
-        // the WIDTH of what gets measured now tracks the real viewport, not a fixed item count.
+        // The window sent to the pipeline is geometrically wider than `visRange` in screens
+        // mode: the trigger (`leading` changing) stays item-based, but the width measured now
+        // tracks the real viewport.
         let capturedWarmRange = warmRange(viewportTop: visTop, viewportBottom: visBottom)
         let capturedTables = tables
-        // The measure width, not the raw container width — RenderPipeline's CacheKey/measureNode
-        // calls must key on the same width `measureWidth(for:)` produces everywhere else (colWidth
-        // under a grid), or its writes silently miss every read site above.
+        // The measure width, not the raw container width, so RenderPipeline's CacheKey calls
+        // key on the same width every read site uses.
         let capturedWidth  = measureWidth(for: bounds.width)
         let capturedScale  = max(1, traitCollection.displayScale)  // same guard as spawnMediaFetches
         let capturedDirection = scrollDirection
@@ -1647,11 +1475,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
     /// Returns a cell from the pool, or allocates a new one.
     ///
-    /// `cellPools[kind]?.popLast()` mutates the array in place through the dictionary's
-    /// `_modify` accessor — the key is never removed, so a hit never touches the
-    /// dictionary's hash table (no rehash/resize). See VelocityUI-9lq: the previous
-    /// `removeValue(forKey:)`-then-conditionally-reinsert shape churned the dictionary
-    /// backing store (`_NativeDictionary.setValue -> _copyOrMoveAndResize`) every recycle.
+    /// `cellPools[kind]?.popLast()` mutates the array in place via the dictionary's `_modify`
+    /// accessor — the key is never removed, so a hit never touches the hash table.
     private func dequeue(kind: CellKind) -> RenderCell {
         guard let cell = cellPools[kind]?.popLast() else {
             #if canImport(XCTest)
@@ -1665,11 +1490,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         return cell
     }
 
-    /// Returns a cell to its kind's pool.
-    ///
-    /// `subscript(_:default:)` mutates the array in place through the dictionary's
-    /// `_modify` accessor, without ever removing/reinserting the key. See
-    /// `dequeue(kind:)`'s docstring — same VelocityUI-9lq fix, symmetric shape.
+    /// Returns a cell to its kind's pool. `subscript(_:default:)` mutates the array in place
+    /// via `_modify`, without ever removing/reinserting the key — same shape as `dequeue(kind:)`.
     private func returnToPool(_ cell: RenderCell) {
         cell.cancelPendingMedia()
         cellPools[cell.kind, default: []].append(cell)
@@ -1680,22 +1502,18 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
     // MARK: - Media pipeline
 
-    /// Phase 2 commit: for each image fragment with a non-nil URL, spawn a Task that fetches and
-    /// decodes the image then delivers it to the cell. Called at mount time (WR hit) and from
-    /// refineKnownFrames when a WR miss is resolved.
+    /// For each image fragment with a non-nil URL, spawn a Task that fetches and decodes the
+    /// image then delivers it to the cell. Called at mount time and from refineKnownFrames.
     ///
-    /// Task body inherits @MainActor isolation. Cell is captured weakly to prevent a Task → cell
-    /// → mediaHandles → Task retain cycle. itemID is captured at spawn time and threaded through
-    /// applyContent, which rejects callbacks whose captured itemID doesn't match the cell's
-    /// current one.
+    /// Cell is captured weakly to prevent a retain cycle. itemID is captured at spawn time and
+    /// threaded through applyContent, which rejects callbacks whose itemID doesn't match the
+    /// cell's current one.
     ///
-    /// `max(1, traitCollection.displayScale)` guards against 0.0 scale for views not yet attached
-    /// to a UIWindow (iOS 17+ scene-based traits, unit tests) — a zero scale would produce a
-    /// zero-size `ImageCacheKey` and undefined decode behavior; 1× is a safe floor the cache
-    /// supersedes on first real-scale hit.
+    /// `max(1, traitCollection.displayScale)` guards against 0.0 scale for views not yet
+    /// attached to a UIWindow — a zero scale would produce an undefined decode.
     ///
-    /// `syncMap`: fragments already painted synchronously via `applyLayout`'s synchronousContent
-    /// map — must not receive a second async fetch (already cached, sublayer already has content).
+    /// `syncMap`: fragments already painted synchronously via `applyLayout` — must not receive a
+    /// second async fetch.
     private func spawnMediaFetches(
         for cell: RenderCell,
         fragments: [Fragment],
@@ -1720,13 +1538,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                     cornerRadius: cornerRadius,
                     scale: scale
                 ) else { return }
-                // isCancelled guard: primary defence on the fast-scroll path. MediaHandle.cancel()
-                // marks the Task cancelled before prepareForReuse rebinds the cell; imageActor.image()
-                // may still return a decoded image if the semaphore had already been acquired.
-                // This guard catches that window and returns before calling applyContent, keeping
-                // RenderCell._privacyGuardFiredCount at zero during fast scroll (Test 5 invariant).
-                // applyContent's itemID privacy guard is a defense-in-depth backup for races
-                // where cancellation and content delivery coincide after isCancelled is checked.
+                // Primary defence on the fast-scroll path: MediaHandle.cancel() marks the Task
+                // cancelled before prepareForReuse rebinds the cell, but imageActor.image() may
+                // still return if the semaphore was already acquired. applyContent's itemID
+                // guard is the defense-in-depth backup for races after this check.
                 guard !Task.isCancelled else { return }
                 if let transition = cell?.applyContent(id: fragmentID, image: img, for: itemID) {
                     contentDeliveryObserver?(transition)
@@ -1737,11 +1552,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     }
 
     /// Collects synchronously available image and text pixels for a mounted item. Text artifacts
-    /// are retained in the resident tier on a cache hit so viewport reconciliation cannot clear them.
+    /// are retained in the resident tier on a cache hit so viewport reconciliation can't clear them.
     ///
-    /// Scale caveat: if preload ran at a different displayScale (e.g. scale 1 in tests,
-    /// scale 3 in production), cachedImage returns nil and the fragment is excluded from
-    /// the map, silently falling back to the async path. Same constraint as image().
+    /// Scale caveat: if preload ran at a different displayScale, cachedImage returns nil and the
+    /// fragment silently falls back to the async path.
     private func buildSyncMap(for fragments: [Fragment], itemID: AnyHashable) -> [Int: CGImage] {
         let imageActor = environment.imageActor
         let residentStore = environment.visibleBlockStore

@@ -5,23 +5,15 @@ import CoreGraphics
 import Foundation
 
 /// Encodes a decoded image into a BlurHash string — the producer-side inverse of
-/// `decodeBlurHashPlaceholder`.
-///
-/// Guarded by `canImport(CoreGraphics)`, not `canImport(UIKit)`: CGImage/CGContext are
-/// CoreGraphics APIs, so this builds on-device and as plain macOS CLI tooling — the latter is the
-/// point (BenchmarkHost's offline dataset generator uses it to derive real per-item BlurHashes
-/// instead of hand-picking samples). VelocityUI-1su.3 scoped BlurHash *encoding* out of the
-/// package as a data-source responsibility; VelocityUI-9x0 exposes it as public API.
-///
-/// Pure, nonisolated, synchronous CPU work — no I/O, no caching. Downsamples to a small internal
-/// grid before summing basis functions, since a BlurHash only reconstructs `componentsX *
-/// componentsY` components anyway (mirrors `placeholderMaxPixelSize`'s bounded-grid rationale in
-/// PlaceholderDecode.swift).
+/// `decodeBlurHashPlaceholder`. Guarded by `canImport(CoreGraphics)`, not `canImport(UIKit)`,
+/// so this also builds as plain macOS CLI tooling (BenchmarkHost's offline dataset generator
+/// uses it). Downsamples to a small internal grid before summing basis functions, since a
+/// BlurHash only reconstructs `componentsX * componentsY` components anyway.
 ///
 /// - Parameters:
 ///   - componentsX: horizontal frequency component count, clamped to BlurHash's 1...9 range.
 ///   - componentsY: vertical frequency component count, clamped to BlurHash's 1...9 range.
-/// - Returns: nil only if the source image is zero-sized or CGContext allocation fails (OOM).
+/// - Returns: nil only if the source image is zero-sized or CGContext allocation fails.
 public nonisolated func encodeBlurHash(
     _ image: CGImage,
     componentsX: Int = 4,
@@ -43,11 +35,9 @@ public nonisolated func encodeBlurHash(
         width = max(1, Int((CGFloat(sourceMaxPixelSize) * aspect).rounded()))
     }
 
-    // CGContext allocates and owns its own buffer (data: nil) rather than us handing it an
-    // Array's backing pointer — an Array's address is only guaranteed stable for the duration
-    // of a single withUnsafeMutableBytes closure, but the context (and the pixel reads below)
-    // need that address to stay valid across draw() and the whole basis-function summation
-    // that follows. Mirrors ImageNormaliser.swift's normaliseAndRound.
+    // CGContext allocates its own buffer (data: nil) rather than an Array's backing pointer,
+    // whose address is only stable within a single withUnsafeMutableBytes closure — this needs
+    // the address to stay valid across draw() and the summation below.
     let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
     guard let ctx = CGContext(
         data: nil,

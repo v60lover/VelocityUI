@@ -7,8 +7,7 @@ import UIKit
 
 extension VContentSizeCategory {
     /// The real UIKit category, or `nil` for `.unspecified` — callers must skip
-    /// `UIFontMetrics` entirely on `nil` rather than passing `.unspecified` through (see
-    /// `VContentSizeCategory`'s doc for why that would be a hidden global read).
+    /// `UIFontMetrics` entirely on `nil` rather than passing `.unspecified` through.
     var uiContentSizeCategory: UIContentSizeCategory? {
         switch self {
         case .unspecified: return nil
@@ -27,9 +26,8 @@ extension VContentSizeCategory {
         }
     }
 
-    /// Reverse mapping — used at the one place a live trait environment is read
-    /// (`FeedScrollView`'s content-size-category observer). `UIContentSizeCategory.unspecified`
-    /// and any future/unrecognized raw value both map to `.unspecified`.
+    /// Reverse mapping, used where a live trait environment is read. Unrecognized or
+    /// `.unspecified` values both map to `.unspecified`.
     init(_ uiCategory: UIContentSizeCategory) {
         switch uiCategory {
         case .extraSmall: self = .extraSmall
@@ -59,11 +57,8 @@ extension TextDescriptor {
     }
 
     /// Resolves `font` to a concrete UIFont: named family if it loads, else system font at the
-    /// same size/weight (deterministic fallback, never crashes on a bad family name). Symbolic
-    /// traits (e.g. italic) layer on top afterward, so italic composes with custom families too.
-    /// Scaled for Dynamic Type via `UIFontMetrics` when `contentSizeCategory` isn't
-    /// `.unspecified` (VelocityUI-ezo.2.5) — built entirely from `self.contentSizeCategory`,
-    /// never read from `UIApplication`/`UIScreen` (CLAUDE.md §4: no global reads).
+    /// same size/weight. Italic traits layer on afterward, then Dynamic Type scaling — all
+    /// driven from `self.contentSizeCategory`, never a global read.
     private var resolvedFont: UIFont {
         var uiFont: UIFont
         if let family = font.family, let named = UIFont(name: family, size: font.size) {
@@ -84,11 +79,9 @@ extension TextDescriptor {
         return uiFont
     }
 
-    /// Single source of truth for the attribute dictionary. Both
-    /// TextMeasurementContext.measure and rasterizeText build their NSAttributedString
-    /// from this — the two paths can no longer diverge on font/paragraph/color attributes.
-    /// VColorDescriptor's components are display-P3 (see NodeTable.swift docstring), so the
-    /// conversion must go through the displayP3 UIColor initializer, not the sRGB one.
+    /// Single source of truth for the attribute dictionary, shared by measure and rasterizeText
+    /// so they can't diverge. Color components are display-P3, so use the displayP3 UIColor
+    /// initializer, not sRGB.
     func makeAttributes() -> [NSAttributedString.Key: Any] {
         var attrs: [NSAttributedString.Key: Any] = [
             .font: resolvedFont,
@@ -96,9 +89,8 @@ extension TextDescriptor {
                 displayP3Red: color.red, green: color.green, blue: color.blue, alpha: color.alpha
             )
         ]
-        // 0 means "no override" — NOT "kerning disabled". Setting .kern explicitly to 0
-        // would turn off the font's own default kerning, regressing every existing caller
-        // that never asked for a kerning override. Only add the attribute for a real value.
+        // 0 means "no override", not "kerning disabled" — setting .kern to 0 would turn off
+        // the font's own default kerning for callers who never asked for an override.
         if kerning != 0 {
             attrs[.kern] = kerning
         }
@@ -108,12 +100,8 @@ extension TextDescriptor {
         if strikethroughStyle != 0 {
             attrs[.strikethroughStyle] = strikethroughStyle
         }
-        // A non-default lineBreakMode must reach the paragraph style even standalone --
-        // without this branch a wrapping-mode-only descriptor (no lineLimit, no lineSpacing)
-        // silently falls back to NSMutableParagraphStyle's own default (.byWordWrapping),
-        // dropping the requested mode on both the measure and render paths (they share this
-        // attributedString builder). lineBreakMode == 0 already matches that default, so this
-        // is a no-op for every caller that never set lineBreakMode.
+        // Without this branch, a lineBreakMode-only descriptor (no lineLimit/lineSpacing) would
+        // silently fall back to NSMutableParagraphStyle's default, dropping the requested mode.
         if lineBreakMode != NSLineBreakMode.byWordWrapping.rawValue || lineLimit != nil || lineSpacing != 0 {
             let para = NSMutableParagraphStyle()
             para.lineBreakMode = NSLineBreakMode(rawValue: lineBreakMode) ?? .byWordWrapping
@@ -123,8 +111,7 @@ extension TextDescriptor {
         return attrs
     }
 
-    /// NSAttributedString built from `makeAttributes()` — same attributes used in
-    /// TextMeasurementContext.measure so rendered output matches measured size.
+    /// NSAttributedString built from `makeAttributes()`, shared with `TextMeasurementContext.measure`.
     var attributedString: NSAttributedString {
         NSAttributedString(string: content, attributes: makeAttributes())
     }
@@ -132,12 +119,11 @@ extension TextDescriptor {
 
 // MARK: - rasterizeText
 
-/// Rasterise a TextDescriptor into a CGImage at exactly `size`.
-/// Uses the same NSTextLayoutManager pipeline as TextMeasurementContext so
-/// rendered height matches measured height — the core Spike 4 contract.
+/// Rasterise a TextDescriptor into a CGImage at exactly `size`, using the same TextKit 2
+/// pipeline as `TextMeasurementContext` so rendered height matches measured height.
 ///
-/// Thread-safe: creates all TextKit 2 objects fresh per call.
-/// `scale`: pass from @MainActor call site — UIScreen.main.scale is off-limits off-main.
+/// Thread-safe: creates all TextKit 2 objects fresh per call. Pass `scale` from a @MainActor
+/// call site — `UIScreen.main.scale` is off-limits off-main.
 public nonisolated func rasterizeText(
     _ descriptor: TextDescriptor,
     size: CGSize,

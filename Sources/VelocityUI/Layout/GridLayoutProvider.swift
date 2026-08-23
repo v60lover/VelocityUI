@@ -2,17 +2,9 @@
 
 import CoreGraphics
 
-/// Places items row-major: item `i` sits at column `i % columns`, a new row starts every
-/// `columns` items, each row top-aligned to its tallest item. Spatial order == index order,
-/// so visibility stays one contiguous range — same shape `VerticalLayoutProvider` relies on.
-///
-/// Pure arithmetic over `ResolvedLayout.totalFrame.height` — no re-measurement. Callers needing
-/// heights that reflect wrapping at the narrower column width must measure each cell at
-/// `measureWidth(availableWidth:)` BEFORE calling `frames(for:)`; this type takes
-/// `totalFrame.height` verbatim.
-///
-/// Reached via `GridLayout.grid(columns:spacing:)`, or directly via
-/// `GridLayout.custom(GridLayoutProvider(columns:spacing:))` for a caller-owned instance.
+/// Places items row-major: item `i` sits at column `i % columns`, new row every `columns` items,
+/// top-aligned to the tallest cell. Callers must measure each cell at `measureWidth(availableWidth:)`
+/// before calling `frames(for:)` — this type takes `totalFrame.height` verbatim, no re-measurement.
 public struct GridLayoutProvider: LayoutProvider, Sendable {
     public let columns: Int
     public let spacing: CGFloat
@@ -60,8 +52,7 @@ public struct GridLayoutProvider: LayoutProvider, Sendable {
     }
 
     /// Cells must be measured at the same column width `frames(for:)` lays them out at — text
-    /// re-wraps narrower here than at the full container width, so height is not
-    /// `fullWidthHeight / columns`. See `GRID_LAYOUT_DESIGN.md` §D5.
+    /// re-wraps narrower, so height isn't `fullWidthHeight / columns`.
     public nonisolated func measureWidth(availableWidth: CGFloat) -> CGFloat {
         Self.colWidth(availableWidth: availableWidth, columns: columns, spacing: spacing)
     }
@@ -76,12 +67,9 @@ public struct GridLayoutProvider: LayoutProvider, Sendable {
 // MARK: - contentHeight
 
 extension GridLayoutProvider {
-    /// Total content height: the last row's top plus the last row's max item height — NOT the
-    /// last frame's `maxY`, since the tallest item in the final row may not be the last index
-    /// (a ragged or variable-height final row can have its tallest item earlier in the row).
-    ///
-    /// `columns` MUST match the value used to build `frames` (via `frames(for:availableWidth:)`);
-    /// a mismatch silently yields wrong results.
+    /// Total content height: last row's top plus its max item height — NOT the last frame's `maxY`,
+    /// since the tallest item in a ragged final row may not be the last index. `columns` must match
+    /// the value used to build `frames`, or results silently break.
     public static func contentHeight(for frames: [CGRect], columns: Int) -> CGFloat {
         guard !frames.isEmpty else { return 0 }
         let columns = max(1, columns)
@@ -98,11 +86,8 @@ extension GridLayoutProvider {
 // MARK: - Row-granular visibility (grid-specific)
 
 extension GridLayoutProvider {
-    /// Per-row `[minY, maxY)` bounds, one entry per row. Both arrays are monotonically
-    /// non-decreasing across rows (row tops only advance forward, rows never overlap because
-    /// `spacing >= 0`) — that monotonicity is what makes binary search over rows valid, in
-    /// contrast to per-item `frame.maxY` within a single variable-height row, which is NOT
-    /// monotonic (items share `rowTop` — top-aligned — but have different heights/maxY).
+    /// Per-row `[minY, maxY)` bounds. Both arrays are monotonically non-decreasing across rows —
+    /// that's what makes binary search over rows valid (per-item `maxY` within a row is NOT monotonic).
     private static func rowBounds(for frames: [CGRect], columns: Int) -> (tops: [CGFloat], bottoms: [CGFloat]) {
         let rowCount = (frames.count + columns - 1) / columns
         var tops = [CGFloat](repeating: 0, count: rowCount)
@@ -144,21 +129,10 @@ extension GridLayoutProvider {
     }
 
     /// Row-granular visible index range: a row is visible iff `[rowTop, rowBottom)` overlaps
-    /// `[viewportTop, viewportBottom)`. Returns the smallest CONTIGUOUS range covering every visible
-    /// row: `[firstVisibleRow*columns, min(count, (lastVisibleRow+1)*columns))`.
-    ///
-    /// Row-granular, not item-granular, on purpose: within a variable-height row items are
-    /// top-aligned but have different `maxY`, so per-item frames aren't sorted by `maxY` and
-    /// `VerticalLayoutProvider`'s item-level binary search doesn't apply directly. Row tops/bottoms
-    /// ARE monotonic across rows, so binary-searching those keeps the result contiguous — a raw
-    /// per-item overlap set would not be, under variable row heights (see
-    /// `testPerItemOverlap_isNotContiguous_underVariableHeights`). Rebuilds `rowBounds` from scratch
-    /// each call: O(rows) time/allocation, O(log rows) for the binary searches themselves.
-    ///
-    /// Trade-off: a short item above `viewportTop` whose row is visible IS included — over-mounts
-    /// by at most `2*columns` items in exchange for a contiguous range on the vertical read-path.
-    ///
-    /// `columns` MUST match the value used to build `frames`; a mismatch silently yields wrong results.
+    /// `[viewportTop, viewportBottom)`; returns the smallest CONTIGUOUS range covering every visible
+    /// row. Row-granular rather than item-granular because row tops/bottoms are monotonic (unlike
+    /// per-item `maxY` within a variable-height row), which keeps the result contiguous. `columns`
+    /// MUST match the value used to build `frames`, or results silently break.
     public static func visibleIndexRange(
         in frames: [CGRect],
         columns: Int,

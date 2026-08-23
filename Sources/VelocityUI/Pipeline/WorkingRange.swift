@@ -10,12 +10,8 @@ public struct CellEntry: Sendable {
     public let fragments: [Fragment]
 }
 
-/// O(1) ring-buffer cache of CellEntry for items near the visible range. Replaces the v4
-/// `[Int: ResolvedLayout]` dictionary, which hashed on every lookup and rebuilt entirely on
-/// eviction — both unacceptable on the synchronous 120Hz scroll path.
-///
-/// - `entry(at:)` is O(1): one subtraction, one array index, no hashing, no allocation.
-/// - `advance(to:)` is O(shift): runs only in the pipeline, never during scroll.
+/// O(1) ring-buffer cache of CellEntry for items near the visible range — no hashing or
+/// per-lookup allocation, required for the synchronous 120Hz scroll path.
 @MainActor
 public final class WorkingRange {
     private var buffer: [CellEntry?]
@@ -40,20 +36,16 @@ public final class WorkingRange {
     }
 
     /// Primary commit — called by RenderPipeline after measure + extractFragments.
-    ///
-    /// Idempotent under identical inputs: a pure array-index write with no accumulation, so
-    /// two callers committing the same `(layout, fragments, index)` — e.g. the scroll path's
-    /// LayoutCache-hit inline write racing the pipeline's `notifyPipelineIfNeeded` Task —
-    /// just overwrite the same slot with identical data. Safe to call more than once.
+    /// Idempotent: a plain array-index write, so racing callers writing identical data for the
+    /// same index just overwrite the same slot.
     public func commit(_ layout: ResolvedLayout, _ fragments: [Fragment], at index: Int) {
         let offset = index - rangeStart
         guard offset >= 0, offset < capacity else { return }
         buffer[offset] = CellEntry(layout: layout, fragments: fragments)
     }
 
-    /// Spike-grade convenience — commits with an empty fragment list.
-    /// Existing spike tests and fixture code use this.
-    /// Production pipeline must use commit(_:_:at:).
+    /// Test/fixture convenience — commits with an empty fragment list. Production code should
+    /// use `commit(_:_:at:)`.
     public func commit(_ layout: ResolvedLayout, at index: Int) {
         commit(layout, [], at: index)
     }

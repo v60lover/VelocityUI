@@ -3,17 +3,9 @@
 #if canImport(UIKit)
 import UIKit
 
-/// Per-`BlockKey` lifecycle owner for `HotBlockRasterizer` (VelocityUI-x4q0).
-///
-/// Invariant: `FeedScrollView.applyInPlaceBlockDiff` always calls `diff(previous:new:frontier:)`
-/// with `frontier == newBlocks.count - 1`, so `volatile` is always the singleton `{trailingIndex}`
-/// — at most one live `HotBlockRasterizer` per hot `BlockKey`, safe to build a dictionary-keyed
-/// store around instead of a general multi-hot-block design.
-///
-/// `@MainActor final class`, no `Sendable` — mirrors `VideoController`, not `FrozenBitmapStore`'s
-/// lock-guarded pattern: touched ONLY from `FeedScrollView`'s synchronous MainActor scroll-path
-/// methods, so `@MainActor` isolation is enough and a lock would be pure overhead. No in-flight
-/// coalescing either (unlike `DimensionCache`) — a single synchronous caller has nothing to coalesce.
+/// Per-`BlockKey` lifecycle owner for `HotBlockRasterizer`. At most one live rasterizer
+/// per hot key — only the trailing block is ever hot — so a dictionary-keyed store is
+/// enough. `@MainActor`, no locking: touched only from the synchronous scroll path.
 @MainActor
 public final class HotBlockRasterizerStore {
     private struct Entry {
@@ -25,9 +17,8 @@ public final class HotBlockRasterizerStore {
 
     public init() {}
 
-    /// Appends `descriptor`'s current content to the hot rasterizer owned by `key`, creating one
-    /// on first call for that key. Returns the extended height and composited/rasterized image
-    /// (see `HotBlockRasterizer.append(_:width:scale:)`).
+    /// Appends `descriptor`'s current content to the hot rasterizer owned by `key`,
+    /// creating one on first call for that key.
     func append(_ descriptor: TextDescriptor, width: CGFloat, scale: CGFloat, contentHash: Int, for key: BlockKey) -> (height: CGFloat, image: CGImage?) {
         let rasterizer = entries[key]?.rasterizer ?? HotBlockRasterizer()
         let result = rasterizer.append(descriptor, width: width, scale: scale)
@@ -35,28 +26,19 @@ public final class HotBlockRasterizerStore {
         return result
     }
 
-    /// Seals `key`'s hot rasterizer: ALWAYS removes the entry, so a stale/mismatched entry never
-    /// lingers. Returns the final bitmap only when `expectedContentHash` matches the content last
-    /// appended — a mismatch means the block grew further within the same round it closed, and the
-    /// caller must fall back to a full re-measure. Once returned, ARC drops the `HotBlockRasterizer`
-    /// (and its `HotBlockMeasurer`'s live `NSTextLayoutManager`) — no incremental state leaks into
-    /// the sealed cache.
+    /// Seals `key`'s hot rasterizer: always removes the entry. Returns the final bitmap
+    /// only if `expectedContentHash` matches the content last appended — a mismatch means
+    /// the block grew further after this round closed, and the caller must fall back to
+    /// a full re-measure.
     func finalize(_ key: BlockKey, expectedContentHash: Int) -> (size: CGSize, image: CGImage)? {
         guard let entry = entries.removeValue(forKey: key) else { return nil }
         guard entry.contentHash == expectedContentHash else { return nil }
         return entry.rasterizer.finish()
     }
 
-    /// Catches the live hot rasterizer for `key` up to `descriptor`'s current content, then seals it
-    /// — closes the gap in `finalize`'s doc ("block grew further within the same round it closed"):
-    /// once `key` stops being `trailingIndex`, that growth never reaches a separate `append` call.
-    /// `append` unconditionally overwrites `contentHash`, so `finalize` below always matches —
-    /// reuses the composited bitmap (cheap incremental blit of the new tail) instead of a full
-    /// `freeze()`-based re-measure.
-    ///
-    /// Returns `nil` without appending when `key` has no live entry — nothing hot to catch up, and
-    /// spinning up a rasterizer just to tear it down would cost more than falling through to the
-    /// caller's full `freeze()`.
+    /// Catches the live hot rasterizer for `key` up to `descriptor`'s current content,
+    /// then seals it — an incremental blit instead of a full `freeze()` re-measure.
+    /// Returns `nil` without appending when `key` has no live entry.
     func catchUpAndFinalize(
         _ key: BlockKey, descriptor: TextDescriptor, width: CGFloat, scale: CGFloat, contentHash: Int
     ) -> (size: CGSize, image: CGImage)? {

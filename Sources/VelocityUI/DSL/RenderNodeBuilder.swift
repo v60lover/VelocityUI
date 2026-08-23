@@ -14,11 +14,9 @@ public enum RenderNodeBuilder {
         [expression]
     }
 
-    /// Lets an already-built `[any RenderNode]` value — e.g.
-    /// `IncrementalMarkdownParser.renderNodes` — be spliced directly into a container's builder
-    /// closure. The generic overload above only matches a single `RenderNode`-conforming value;
-    /// `Array` doesn't conform to `RenderNode`, so without this identity overload a statement
-    /// producing `[any RenderNode]` couldn't appear inside `{ }` at all.
+    /// Lets an already-built `[any RenderNode]` value — e.g. `IncrementalMarkdownParser.renderNodes`
+    /// — be spliced directly into a container's builder closure. The generic overload above only
+    /// matches a single `RenderNode`-conforming value; `Array` doesn't conform to `RenderNode`.
     public static func buildExpression(_ expression: [any RenderNode]) -> [any RenderNode] {
         expression
     }
@@ -31,9 +29,8 @@ public enum RenderNodeBuilder {
         component ?? []
     }
 
-    // Both branches return the same type ([any RenderNode]), so if/else compiles
-    // without needing _ConditionalNode. This is the Layer-1-internal erasure noted in
-    // the bead polish findings — existentials never escape past flatten().
+    // Both branches return the same type ([any RenderNode]), so if/else compiles without needing
+    // _ConditionalNode — existentials never escape past flatten().
     public static func buildEither(first: [any RenderNode]) -> [any RenderNode] { first }
     public static func buildEither(second: [any RenderNode]) -> [any RenderNode] { second }
 

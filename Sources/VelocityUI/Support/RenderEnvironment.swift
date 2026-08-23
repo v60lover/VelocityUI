@@ -21,53 +21,39 @@ public final class RenderEnvironment: Sendable {
     public let videoController: VideoController
     public let videoPreparation: VideoPreparationActor
 
-    /// The working-range / LRU-bounded cache for frozen block bitmaps (VelocityUI-qc7 phase B).
-    /// See `FrozenBitmapStore`'s doc for why it is a lock-guarded `final class`, not an actor —
-    /// the MainActor bind/scroll path reads it synchronously, with zero `await`.
+    /// The working-range / LRU-bounded cache for frozen block bitmaps. A lock-guarded `final class`,
+    /// not an actor — the MainActor bind/scroll path reads it synchronously, with zero `await`.
     public let frozenBitmapStore: FrozenBitmapStore
 
     /// Per-feed ownership for artifacts actively mounted by the scroll view. This deliberately
     /// has no hard eviction ceiling; `FrozenBitmapStore` owns only inactive, reusable entries.
     public let visibleBlockStore: VisibleBlockStore
 
-    /// Per-`BlockKey` lifecycle owner for the incremental hot-tail text rasterizer
-    /// (VelocityUI-x4q0). `@MainActor final class`, not `Sendable` — mirrors `videoController`'s
-    /// treatment, since it is touched only from `FeedScrollView`'s synchronous MainActor
-    /// scroll-path methods. See `HotBlockRasterizerStore`'s doc for why no lock is needed.
+    /// Per-`BlockKey` lifecycle owner for the incremental hot-tail text rasterizer. `@MainActor final
+    /// class`, not `Sendable` — touched only from `FeedScrollView`'s synchronous MainActor scroll-path.
     public let hotBlockRasterizerStore: HotBlockRasterizerStore
 
-    /// Gates the trailing hot block in `FeedScrollView.applyInPlaceBlockDiff` between the
-    /// O(appended) incremental path (`hotBlockRasterizerStore.append`, VelocityUI-x4q0) and the
-    /// pre-x4q0 O(block) fallback (a full `rasterizeText` pass every append, same as any other
-    /// non-trailing block). `true` in every production call site — this exists so
-    /// BenchmarkHost's `stream` scenario (VelocityUI-xxf7) can run the identical token stream
-    /// through both paths and report the ON-vs-OFF cost difference; it is not a runtime feature
-    /// flag consumers are expected to toggle.
+    /// Gates the trailing hot block between the O(appended) incremental path
+    /// (`hotBlockRasterizerStore.append`) and the O(block) fallback (a full `rasterizeText` pass
+    /// every append). `true` in every production call site — exists so BenchmarkHost can compare
+    /// ON-vs-OFF cost; not a runtime feature flag consumers are expected to toggle.
     public let hotBlockRasterizeEnabled: Bool
 
-    /// Produces a fragment's first-paint image before its real image has decoded. Defaults
-    /// to `DefaultPlaceholderRenderer` (thumbnail/BlurHash, VelocityUI's original behavior) —
-    /// inject a different `PlaceholderRenderer` to plug in a custom first-paint strategy. See
-    /// `PlaceholderRenderer`'s docstring for the synchronous MainActor contract every
-    /// implementation must honor.
+    /// Produces a fragment's first-paint image before its real image has decoded. Defaults to
+    /// `DefaultPlaceholderRenderer` (thumbnail/BlurHash) — inject a different `PlaceholderRenderer`
+    /// for a custom first-paint strategy.
     public let placeholderRenderer: any PlaceholderRenderer
 
     /// Fires after each successful async `RenderCell.applyContent` delivery, carrying which
-    /// placeholder path it replaced. Routes benchmark/debug instrumentation through the
-    /// composition root instead of `#if DEBUG` hooks on library types — those compile into
-    /// every consumer DEBUG build (QA, TestFlight), not just BenchmarkHost. `nil` in
-    /// production; BenchmarkHost passes a closure that dispatches to its harness counters.
-    /// Never fires for the synchronous mount-time paint path (cache-hit at mount bypasses
-    /// `applyContent` entirely — see `RenderCell._debugIsContentRevealed`'s docstring).
+    /// placeholder path it replaced. Routes benchmark/debug instrumentation through the composition
+    /// root instead of `#if DEBUG` hooks on library types, which would compile into every consumer
+    /// DEBUG build. `nil` in production. Never fires for the synchronous mount-time paint path.
     public let contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)?
 
-    /// Fires once per pipeline `Task` spawned by `FeedScrollView.notifyPipelineIfNeeded`
-    /// (one leading-index boundary crossing). Called synchronously, on `@MainActor`, at the
-    /// spawn site — before the `Task` body runs — so a BenchmarkHost observer can attribute
-    /// the event to the frame in which it was triggered. Routes instrumentation through the
-    /// composition root for the same reason as `contentDeliveryObserver`: `#if DEBUG` hooks on
-    /// library types would compile into every consumer DEBUG build, not just BenchmarkHost.
-    /// `nil` in production.
+    /// Fires once per pipeline `Task` spawned by `FeedScrollView.notifyPipelineIfNeeded`, called
+    /// synchronously on `@MainActor` at the spawn site — before the `Task` body runs — so a
+    /// BenchmarkHost observer can attribute the event to the frame it was triggered in. `nil` in
+    /// production.
     public let pipelineTaskSpawnObserver: (@Sendable () -> Void)?
 
     /// Designated init — all collaborators supplied by the caller. `nonisolated`, callable from any
@@ -75,10 +61,8 @@ public final class RenderEnvironment: Sendable {
     /// the `@MainActor` convenience init.
     ///
     /// Enforces two identity DI contracts at runtime: `imageActor.dimensionCache === dimensionCache`
-    /// (ImageActor writes raw source dimensions at decode time, `classify()` reads the same store —
-    /// separate instances break the hit contract, DimensionCache.swift:11–17) and
-    /// `videoController.videoPreparation === videoPreparation` (must share one actor, Phase 4
-    /// invariant).
+    /// (separate instances break `classify()`'s hit contract) and
+    /// `videoController.videoPreparation === videoPreparation` (must share one actor).
     public init(
         textPool: TextMeasurementPool,
         layoutCache: LayoutCache,
@@ -123,12 +107,10 @@ public final class RenderEnvironment: Sendable {
     /// — tests substituting a `FakeImageActor`/`FakeVideoController` must use the nonisolated
     /// designated init instead.
     ///
-    /// Auto-wires: `session` into both `DimensionCache` and `ImageActor` (shared HTTP/2
-    /// connection pool, DimensionCache.swift:15–17); the same `DimensionCache` into `imageActor`;
-    /// the same `VideoPreparationActor` into both `videoController` and `videoPreparation`;
-    /// `decodeScaleCeiling` into `imageActor` (2.0 default, VelocityUI-zgs); a fresh
-    /// `FrozenBitmapStore`/`HotBlockRasterizerStore` at default budget — pass either explicitly
-    /// to inject a custom budget or share one across a caller-managed graph.
+    /// Auto-wires: `session` into both `DimensionCache` and `ImageActor` (shared HTTP/2 connection
+    /// pool); the same `DimensionCache` into `imageActor`; the same `VideoPreparationActor` into both
+    /// `videoController` and `videoPreparation`; a fresh `FrozenBitmapStore`/`HotBlockRasterizerStore`
+    /// at default budget — pass either explicitly to share one across a caller-managed graph.
     @MainActor
     public convenience init(
         textPool: TextMeasurementPool = .init(),

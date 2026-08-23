@@ -3,12 +3,8 @@
 #if canImport(UIKit)
 import Foundation
 
-/// Bounded pool of TextMeasurementContext objects.
-/// Capacity = processor count: amortises expensive NSTextLayoutManager alloc
-/// while bounding concurrency to avoid memory pressure.
-///
-/// withContext is nonisolated async: checkout/checkin enter the actor briefly;
-/// the body itself runs off-actor so multiple tasks can measure concurrently.
+/// Bounded pool of `TextMeasurementContext` objects, sized to processor count to amortise
+/// NSTextLayoutManager alloc without unbounded concurrency.
 public actor TextMeasurementPool {
     private var available: [TextMeasurementContext]
     private var waiters: [CheckedContinuation<TextMeasurementContext, Never>] = []

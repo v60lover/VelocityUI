@@ -173,10 +173,8 @@ public struct ZStackNode: RenderNode {
 // MARK: - SpacerNode
 
 public struct SpacerNode: RenderNode {
-    /// Minimum length in the stack's primary axis.
-    /// flatten() maps nil → 0.0 when writing NodeKind.spacer(CGFloat).
-    /// A nil spacer fills remaining space in SwiftUI semantics; here it collapses to zero
-    /// height until the layout engine grows to support flexible spacers. See bead b52.
+    /// Minimum length in the stack's primary axis. flatten() maps nil → 0.0. A nil spacer fills
+    /// remaining space in SwiftUI semantics; here it collapses to zero until flexible spacers land.
     public let minLength: CGFloat?
 
     public init(minLength: CGFloat? = nil) {
@@ -321,18 +319,14 @@ public struct AsyncImageNode: RenderNode {
     /// Rounding applied at decode time via CGContext clip — never set on CALayer.
     /// Appearance-only: a cornerRadius change requires re-decode but does not affect layout geometry.
     public let cornerRadius: CGFloat
-    /// Small (~4KB) JPEG bytes decoded synchronously on MainActor for an instant first
-    /// paint when the real image has not finished fetching. Takes precedence over
-    /// `blurHash` when both are set. Appearance-only — never affects layout geometry.
+    /// Small (~4KB) JPEG bytes decoded synchronously on MainActor for an instant first paint before
+    /// the real image fetches. Takes precedence over `blurHash`. Appearance-only.
     public let thumbnailData: Data?
-    /// Compact (~30 char) BlurHash string decoded synchronously on MainActor as a
-    /// fallback first paint when `thumbnailData` is nil. Appearance-only — never
-    /// affects layout geometry.
+    /// Compact (~30 char) BlurHash string decoded synchronously on MainActor as a fallback first
+    /// paint when `thumbnailData` is nil. Appearance-only.
     public let blurHash: String?
-    /// Consumer-supplied placeholder payload for a custom `PlaceholderRenderer`, used as
-    /// the last fallback tier when `thumbnailData` and `blurHash` are both nil or fail to
-    /// decode. Appearance-only — never affects layout geometry. See
-    /// `AsyncImageNode.placeholder(custom:)` and `PlaceholderRenderer`.
+    /// Consumer-supplied placeholder payload for a custom `PlaceholderRenderer`, used as the last
+    /// fallback tier when `thumbnailData` and `blurHash` are both nil or fail to decode. Appearance-only.
     public let customPlaceholderPayload: AnyPlaceholderPayload?
 
     public init(url: URL?, aspectRatio: CGFloat? = nil, contentMode: VContentMode = .fit) {
@@ -363,10 +357,8 @@ public struct AsyncImageNode: RenderNode {
         self.customPlaceholderPayload = customPlaceholderPayload
     }
 
-    /// layoutHash covers url, aspectRatio, and contentMode.
-    /// cornerRadius, thumbnailData, and blurHash are intentionally excluded: all three
-    /// are appearance-only (they affect what gets painted before the real image arrives,
-    /// never the fragment's geometry).
+    /// layoutHash covers url, aspectRatio, and contentMode. cornerRadius, thumbnailData, and blurHash
+    /// are intentionally excluded — they're appearance-only, affecting paint but never geometry.
     public var layoutHash: Int {
         var h = Hasher()
         h.combine(url)
@@ -418,16 +410,13 @@ public struct AsyncImageNode: RenderNode {
         )
     }
 
-    /// Sets a consumer-defined placeholder payload, tried when `thumbnailData` and `blurHash`
-    /// are both nil or fail to decode. Interpreted only by a custom `PlaceholderRenderer`
-    /// injected via `RenderEnvironment` — the built-in `DefaultPlaceholderRenderer` ignores it
-    /// (falls through to the gray tint). `payload` must be `Hashable & Sendable` so it folds
-    /// into `appearanceHash` (changing it triggers a repaint) and can cross into the pipeline.
+    /// Sets a consumer-defined placeholder payload, tried when `thumbnailData` and `blurHash` are both
+    /// nil or fail to decode. Interpreted only by a custom `PlaceholderRenderer` injected via
+    /// `RenderEnvironment` — the built-in `DefaultPlaceholderRenderer` ignores it. `payload` must be
+    /// `Hashable & Sendable` so it folds into `appearanceHash`.
     ///
-    /// Your `PlaceholderRenderer.render(...)` runs SYNCHRONOUSLY on the MainActor in the
-    /// cell-bind scroll path — keep it cheap (p99 < 500us, output ≤ the 32px placeholder
-    /// bound; a full-res decode here drops scroll frames). See `PlaceholderRenderer`'s
-    /// docstring for the full contract.
+    /// `PlaceholderRenderer.render(...)` runs SYNCHRONOUSLY on the MainActor in the cell-bind scroll
+    /// path — keep it cheap (p99 < 500us; a full-res decode here drops scroll frames).
     public func placeholder<T: Hashable & Sendable>(custom payload: T?) -> AsyncImageNode {
         AsyncImageNode(
             url: url, aspectRatio: aspectRatio, contentMode: contentMode, cornerRadius: cornerRadius,
@@ -436,10 +425,9 @@ public struct AsyncImageNode: RenderNode {
         )
     }
 
-    /// Clears (or sets from an already-boxed value) the custom placeholder payload. The
-    /// generic `placeholder<T>(custom:)` overload can't infer `T` from a bare `nil` literal
-    /// (`.placeholder(custom: nil)` won't compile); this overload exists so clearing it
-    /// doesn't require a spelled-out `Optional<T>.none`.
+    /// Clears (or sets from an already-boxed value) the custom placeholder payload. The generic
+    /// `placeholder<T>(custom:)` overload can't infer `T` from a bare `nil` literal, so this overload
+    /// avoids requiring a spelled-out `Optional<T>.none`.
     public func placeholder(custom payload: AnyPlaceholderPayload?) -> AsyncImageNode {
         AsyncImageNode(
             url: url, aspectRatio: aspectRatio, contentMode: contentMode, cornerRadius: cornerRadius,

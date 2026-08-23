@@ -4,12 +4,9 @@
 import Foundation
 import CoreGraphics
 
-/// Cache key for LayoutCache: layout hash + available width. Width is keyed because
-/// measurement is width-relative — rotation/resize must not reuse a prior entry.
-///
-/// Pass an exact, source-of-truth width (e.g. `bounds.width`), not one derived through
-/// arithmetic — CGFloat equality is exact, but `containerWidth - 2 * padding * scale / scale`
-/// can silently produce a near-miss key and a cache miss.
+/// Cache key for LayoutCache: layout hash + available width (measurement is
+/// width-relative). Pass an exact, source-of-truth width, not one derived through
+/// arithmetic — CGFloat equality is exact and a near-miss silently misses the cache.
 public struct CacheKey: Hashable, Sendable {
     public let layoutHash: Int
     public let width: CGFloat
@@ -45,19 +42,10 @@ private final class CachedEntryBox {
 }
 
 /// Actor-isolated cache of layout + fragment pairs for the prefetch pipeline.
-///
-/// - Only `RenderPipeline`'s TaskGroup writes via `set()`/reads via `get()`. The synchronous
-///   scroll path reads via `cachedEntry(for:)` instead (see its docstring for why a nonisolated
-///   read is safe).
-/// - Eviction: FIFO count cap. Appropriate for feed prefetch — items measure in scroll order,
-///   so the oldest entry is least likely to be revisited soon. LRU would need O(n)
-///   move-to-front per `get()`; FIFO keeps reads O(1).
-/// - No in-flight coalescing: `measureNode` is pure, so a concurrent double-measure costs a few
-///   µs CPU (unlike DimensionCache's network round-trip); the second store is a no-op update.
-/// - Authoritative store is Dictionary + insertion-order array, not NSCache — NSCache's eviction
-///   order is unspecified, which would break the deterministic FIFO contract
-///   (`testFIFOEvictsOldestEntry`). `readMirror` (NSCache) is a lockstep mirror purely for the
-///   nonisolated `cachedEntry(for:)` peek; it never governs eviction or count.
+/// FIFO eviction (not LRU) — items measure in scroll order, so the oldest entry is
+/// least likely to be revisited, and FIFO keeps reads O(1). `readMirror` (NSCache) is
+/// a lockstep read-only mirror for the nonisolated `cachedEntry(for:)` peek; the
+/// Dictionary + insertion-order array above is the sole source of truth for eviction.
 public actor LayoutCache {
     private let capacity: Int
     private var store: [CacheKey: CellEntry]
@@ -83,12 +71,8 @@ public actor LayoutCache {
         store[key]
     }
 
-    /// Stores `entry` for `key`.
-    ///
-    /// If `key` already exists the value is updated in-place without changing
-    /// eviction order (two tasks racing on the same key produce identical output;
-    /// keeping the original insertion position is correct).
-    /// If the cap is reached, the oldest-inserted entry is evicted first.
+    /// Stores `entry` for `key`. An existing key updates in place without changing
+    /// eviction order; at capacity, the oldest-inserted entry is evicted first.
     public func set(_ entry: CellEntry, for key: CacheKey) {
         if store[key] != nil {
             store[key] = entry
@@ -108,10 +92,8 @@ public actor LayoutCache {
         readMirror.setObject(CachedEntryBox(entry), forKey: CacheKeyBox(key))
     }
 
-    /// Removes the single entry for `key`, if present.
-    ///
-    /// O(capacity) on the insertionOrder linear scan — intentional. Single-key
-    /// invalidation is not a hot path; rotation/replacement uses invalidateAll().
+    /// Removes the single entry for `key`, if present. O(capacity) — fine since
+    /// single-key invalidation isn't a hot path.
     public func invalidate(_ key: CacheKey) {
         guard store.removeValue(forKey: key) != nil else { return }
         if let idx = insertionOrder.firstIndex(of: key) {
@@ -130,19 +112,10 @@ public actor LayoutCache {
 
     // MARK: - Synchronous peek (scroll path)
 
-    /// Synchronous cache probe — callable from any isolation context, including `@MainActor`,
-    /// with zero `await`.
-    ///
-    /// Returns the entry if present in the read-mirror, or `nil` on a miss (not yet measured,
-    /// evicted, or written with a different `width`/`layoutHash`). Callers on the scroll path
-    /// must treat `nil` as "fall back to the WorkingRange-miss path" — this never triggers work.
-    ///
-    /// Safe `nonisolated`: `LayoutCache`'s actor isolation serializes `set()` against concurrent
-    /// `measureNode` writes on the same key — a write-ordering guarantee, not a read-safety one.
-    /// `NSCache` already guarantees thread-safe concurrent reads, and `readMirror` is a `let`
-    /// (satisfies Swift 6 Sendable for nonisolated access). A read can race a
-    /// `set()`/`invalidate()` write and see old or new, never torn — fine for a best-effort peek
-    /// with a synchronous fallback. Mirrors `ImageActor.cachedImage(url:targetSize:cornerRadius:scale:)`.
+    /// Synchronous, zero-`await` cache probe for the scroll path. Safe `nonisolated`:
+    /// `NSCache` guarantees thread-safe concurrent reads, so a read can race a `set()`/
+    /// `invalidate()` write and see old or new, but never torn. Treat `nil` as a miss —
+    /// fall back to the WorkingRange-miss path; this never triggers work itself.
     public nonisolated func cachedEntry(for key: CacheKey) -> CellEntry? {
         readMirror.object(forKey: CacheKeyBox(key))?.entry
     }

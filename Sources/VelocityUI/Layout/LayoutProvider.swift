@@ -4,11 +4,9 @@ import CoreGraphics
 
 // MARK: - Protocol
 
-/// Turns measured layouts into absolute frames, and answers two questions about those frames:
-/// what's visible, and how tall is the content. Must be pure and nonisolated.
-///
-/// `visibleIndexRange` and `contentHeight` run on `FeedScrollView`'s scroll path (every frame),
-/// so they must be fast — no allocations, no rebuilding `frames` from scratch.
+/// Turns measured layouts into absolute frames, and answers what's visible and how tall the
+/// content is. Must be pure and nonisolated — `visibleIndexRange`/`contentHeight` run on
+/// `FeedScrollView`'s scroll path every frame, so no allocations or rebuilding `frames`.
 public protocol LayoutProvider: Sendable {
     nonisolated func frames(for layouts: [ResolvedLayout], availableWidth: CGFloat) -> [CGRect]
 
@@ -23,12 +21,8 @@ public protocol LayoutProvider: Sendable {
     /// Total height of the content.
     nonisolated func contentHeight(for frames: [CGRect]) -> CGFloat
 
-    /// Width to measure each item's content at, given the layout's available (container) width.
-    /// Defaults to `availableWidth` verbatim via the extension below — override only when the
-    /// provider subdivides `availableWidth` into narrower measurement columns (e.g. a grid's
-    /// column width), so a cell's measured wrapping matches the width `frames(for:)` lays it out
-    /// at. Must stay in lockstep with any width arithmetic `frames(for:)` performs internally —
-    /// see `GridLayoutProvider.measureWidth(availableWidth:)`.
+    /// Width to measure each item's content at. Defaults to `availableWidth` verbatim — override only
+    /// when the provider subdivides it into narrower columns, and keep in lockstep with `frames(for:)`.
     nonisolated func measureWidth(availableWidth: CGFloat) -> CGFloat
 }
 
@@ -42,9 +36,8 @@ extension LayoutProvider {
 
 // MARK: - VerticalLayoutProvider
 
-/// Stacks items top-to-bottom at full available width.
-/// O(n). Called only on items-change and measure-completion — NEVER on the scroll path
-/// or in layoutSubviews. See WorkingRange / partitioningIndex for the synchronous read path.
+/// Stacks items top-to-bottom at full available width. O(n); called only on items-change and
+/// measure-completion — NEVER on the scroll path or in layoutSubviews.
 public struct VerticalLayoutProvider: LayoutProvider, Sendable {
     public let spacing: CGFloat
 
@@ -85,12 +78,9 @@ public struct VerticalLayoutProvider: LayoutProvider, Sendable {
 
 extension VerticalLayoutProvider {
     /// Replace the frame at `index` with `newHeight`, shifting all subsequent origins by the delta.
-    /// Returns the signed delta (positive = content grew). Caller adjusts contentOffset by this delta
-    /// when the refined item sits above the visible viewport to avoid a visual jump.
-    ///
-    /// Vertical-specific: shifts a single column of origins. Masonry refinement requires per-column
-    /// delta propagation and must not use this helper.
-    /// O(n − index) — fires on measure completion, never on the 120 Hz scroll path.
+    /// Returns the signed delta (positive = content grew) — caller adjusts contentOffset by it when
+    /// the refined item sits above the viewport, to avoid a visual jump. Vertical-specific; masonry
+    /// needs per-column delta propagation instead.
     public static func refineFrames(_ frames: inout [CGRect], at index: Int, newHeight: CGFloat) -> CGFloat {
         guard index >= 0, index < frames.count else { return 0 }
         let delta = newHeight - frames[index].height
@@ -106,9 +96,8 @@ extension VerticalLayoutProvider {
 // MARK: - Binary search (vertical-specific)
 
 extension VerticalLayoutProvider {
-    /// First index whose `frame.maxY > y`.
-    /// Use with `viewportTop` (= `contentOffset.y`) to get the first partially-visible item.
-    /// Frames must be sorted by minY ascending — guaranteed by VerticalLayoutProvider.
+    /// First index whose `frame.maxY > y` — use with `viewportTop` to get the first partially-visible
+    /// item. Frames must be sorted by minY ascending.
     public static func firstIndex(in frames: [CGRect], maxYGreaterThan y: CGFloat) -> Int {
         var lo = 0, hi = frames.count
         while lo < hi {
@@ -118,11 +107,8 @@ extension VerticalLayoutProvider {
         return lo
     }
 
-    /// First index whose `frame.minY >= y`.
-    /// Use with `viewportBottom` (= `contentOffset.y + viewportHeight`) as the exclusive end of the
-    /// visible range: every item in `[firstVisible, end)` satisfies `minY < viewportBottom`, meaning
-    /// it is at least partially on screen (including items that straddle the bottom edge).
-    /// Frames must be sorted by minY ascending — guaranteed by VerticalLayoutProvider.
+    /// First index whose `frame.minY >= y` — use with `viewportBottom` as the exclusive end of the
+    /// visible range. Frames must be sorted by minY ascending.
     public static func firstIndex(in frames: [CGRect], minYNotLessThan y: CGFloat) -> Int {
         var lo = 0, hi = frames.count
         while lo < hi {
@@ -132,8 +118,7 @@ extension VerticalLayoutProvider {
         return lo
     }
 
-    /// Convenience: derives the visible index range in one call.
-    /// Items in the returned range are partially or fully visible within `[viewportTop, viewportBottom)`.
+    /// Convenience: derives the visible index range within `[viewportTop, viewportBottom)` in one call.
     public static func visibleIndexRange(
         in frames: [CGRect],
         viewportTop: CGFloat,
