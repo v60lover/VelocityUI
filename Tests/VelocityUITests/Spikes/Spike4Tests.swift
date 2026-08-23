@@ -320,7 +320,11 @@ final class Spike4Tests: XCTestCase {
         let tables = (0..<tableCount).map(makeMixedTable)
         let range = WorkingRange(capacity: tableCount)
 
-        await pipeline.onIndexBoundary(0, workingRange: range, tables: tables, availableWidth: width, scale: 1)
+        // Old default (ahead=60, behind=3) covered the full 30-row table from leadingIndex=0;
+        // pass the full range directly now that the caller computes it explicitly.
+        await pipeline.onIndexBoundary(
+            warmRange: 0..<tables.count, leadingIndex: 0,
+            workingRange: range, tables: tables, availableWidth: width, scale: 1)
         await pipeline.waitForCurrentPrefetch()
 
         var textFragmentCount = 0

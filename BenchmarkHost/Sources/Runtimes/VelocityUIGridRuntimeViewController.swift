@@ -69,7 +69,7 @@ private struct VelocityUIGridFeedView: View {
         AsyncFeed(items: items, environment: environment, layout: .grid(columns: 3, spacing: 6)) { item in
             VelocityUIGridBenchmarkCell(item: item)
         }
-        .prefetchWindow(ahead: 10, behind: 5)
+        .prefetchScreens(leading: 2, trailing: 1)
     }
 }
 

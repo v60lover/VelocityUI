@@ -91,6 +91,15 @@ final class Spike2Tests: XCTestCase {
 
     // MARK: - Test 2: Scroll simulation — zero nil lookups after warmup
 
+    /// Mirrors `RenderPipeline`'s old test-only default (ahead=60, behind=3) — the actor no
+    /// longer derives a window internally, so the caller (`FeedScrollView` in production, this
+    /// helper in tests) computes it.
+    private func spike2WarmRange(leadingIndex: Int, count: Int) -> Range<Int> {
+        let start = max(0, leadingIndex - 3)
+        let end = min(leadingIndex + 60, count)
+        return start..<max(start, end)
+    }
+
     func testZeroNilLookupsAfterWarmup() async {
         let tables = makeTables(count: 200)
         let range = await WorkingRange(capacity: 60)
@@ -99,7 +108,9 @@ final class Spike2Tests: XCTestCase {
         let visibleCount = 20
 
         // Warmup: seed the first boundary
-        await pipeline.onIndexBoundary(0, workingRange: range, tables: tables, availableWidth: width, scale: 1)
+        await pipeline.onIndexBoundary(
+            warmRange: spike2WarmRange(leadingIndex: 0, count: tables.count), leadingIndex: 0,
+            workingRange: range, tables: tables, availableWidth: width, scale: 1)
         await pipeline.waitForCurrentPrefetch()
 
         var nilCount = 0
@@ -108,7 +119,10 @@ final class Spike2Tests: XCTestCase {
         // Simulate scroll: advance 1 item per "frame", 100 frames total
         for leadingIndex in 1..<100 {
             // Pipeline boundary: notify every time leading changes
-            await pipeline.onIndexBoundary(leadingIndex, workingRange: range, tables: tables, availableWidth: width, scale: 1)
+            await pipeline.onIndexBoundary(
+                warmRange: spike2WarmRange(leadingIndex: leadingIndex, count: tables.count),
+                leadingIndex: leadingIndex,
+                workingRange: range, tables: tables, availableWidth: width, scale: 1)
 
             // Don't wait for prefetch — this is the scroll path (synchronous reads only)
             // Check visible range
@@ -171,17 +185,23 @@ final class Spike2Tests: XCTestCase {
         let pipeline = RenderPipeline()
 
         // First call with index 5 — spawns task
-        await pipeline.onIndexBoundary(5, workingRange: range, tables: tables, availableWidth: 320, scale: 1)
+        await pipeline.onIndexBoundary(
+            warmRange: spike2WarmRange(leadingIndex: 5, count: tables.count), leadingIndex: 5,
+            workingRange: range, tables: tables, availableWidth: 320, scale: 1)
         let countAfterFirst = await pipeline.taskStartCount
         XCTAssertEqual(countAfterFirst, 1, "First call should start one task")
 
         // Same index again — must be no-op
-        await pipeline.onIndexBoundary(5, workingRange: range, tables: tables, availableWidth: 320, scale: 1)
+        await pipeline.onIndexBoundary(
+            warmRange: spike2WarmRange(leadingIndex: 5, count: tables.count), leadingIndex: 5,
+            workingRange: range, tables: tables, availableWidth: 320, scale: 1)
         let countAfterDuplicate = await pipeline.taskStartCount
         XCTAssertEqual(countAfterDuplicate, 1, "Duplicate index should not start a new task")
 
         // New index — must cancel old and start new
-        await pipeline.onIndexBoundary(10, workingRange: range, tables: tables, availableWidth: 320, scale: 1)
+        await pipeline.onIndexBoundary(
+            warmRange: spike2WarmRange(leadingIndex: 10, count: tables.count), leadingIndex: 10,
+            workingRange: range, tables: tables, availableWidth: 320, scale: 1)
         let countAfterNew = await pipeline.taskStartCount
         XCTAssertEqual(countAfterNew, 2, "New index should start a new task")
 

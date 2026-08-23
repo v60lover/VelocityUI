@@ -22,8 +22,7 @@ public struct AsyncFeed<
     private let environment: RenderEnvironment
     private let layout: GridLayout
     private let cellBuilder: @MainActor (Item) -> Cell
-    private var prefetchAhead: Int = 10
-    private var prefetchBehind: Int = 3
+    private var warmWindow: WarmWindow = .screens(leading: 2, trailing: 1)
     private var reachEndThreshold: Int = 3
     private var onTap: (@MainActor (Item, CGRect) -> Void)? = nil
     private var onReachEnd: (@MainActor () async -> Void)? = nil
@@ -56,21 +55,38 @@ public struct AsyncFeed<
 
     // MARK: - Modifiers
 
-    /// Sets the number of items to keep warm outside the visible area (ahead default 10,
-    /// behind default 3). Captured at view identity — changing after mount has no effect
+    /// Sets a fixed-item-count warm window, opting out of the default screens-based window.
+    /// Only correct when items-per-screen is roughly constant and known (e.g. a fixed
+    /// single-column list) — under a grid or masonry layout, prefer `prefetchScreens(leading:trailing:)`,
+    /// which is the default. Captured at view identity — changing after mount has no effect
     /// (debug asserts, release ignores); force a `.id()` rebuild to change it at runtime.
+    /// Last-modifier-wins if chained with `prefetchScreens(leading:trailing:)`.
     public func prefetchWindow(ahead: Int, behind: Int) -> Self {
         var copy = self
-        copy.prefetchAhead = ahead
-        copy.prefetchBehind = behind
+        copy.warmWindow = .items(ahead: ahead, behind: behind)
+        return copy
+    }
+
+    /// Sets the warm window geometrically, in screens (viewport-height multiples) — the
+    /// recommended path, and the default (`leading: 2, trailing: 1`) even without calling this.
+    /// `leading` = screens to warm ahead in the scroll direction; `trailing` = screens to keep
+    /// warm behind. The same setting works for vertical, grid, and masonry layouts, because the
+    /// window is a rectangle, not an item count — a grid packing many tiles per screen still
+    /// gets a warm window that actually covers a full screen ahead, unlike a fixed item count.
+    /// Captured at view identity, same rules as `prefetchWindow(ahead:behind:)`.
+    /// Last-modifier-wins if chained with `prefetchWindow(ahead:behind:)`.
+    public func prefetchScreens(leading: CGFloat, trailing: CGFloat) -> Self {
+        var copy = self
+        copy.warmWindow = .screens(leading: leading, trailing: trailing)
         return copy
     }
 
     /// Sets how many items from the end of the list trigger `onReachEnd`.
     ///
-    /// Must be ≤ `prefetchBehind` (asserted in debug builds) — a threshold larger than the
-    /// behind-window fires inside the evictable range, potentially loading a page that is
-    /// immediately purged before reaching the visible viewport.
+    /// In `prefetchWindow(ahead:behind:)` (item-count) mode, must be ≤ the `behind` count
+    /// (asserted in debug builds) — a threshold larger than the behind-window fires inside the
+    /// evictable range, potentially loading a page that is immediately purged before reaching the
+    /// visible viewport. Not checked in the default `prefetchScreens` (screens) mode.
     ///
     /// Default: 3. Captured at view identity (same rules as `prefetchWindow`).
     public func reachEndThreshold(_ count: Int) -> Self {
@@ -130,8 +146,13 @@ public struct AsyncFeed<
 
     public func makeUIView(context: Context) -> FeedScrollView<Item> {
         #if DEBUG
-        assert(reachEndThreshold <= prefetchBehind,
-               "AsyncFeed: reachEndThreshold > prefetchBehind — page-load trigger fires inside the evictable window.")
+        // Only meaningful in item-count mode, where "behind" is a concrete item count to compare
+        // reachEndThreshold against. Screens mode has no direct item-behind count — the trigger
+        // still fires safely, just without this specific footgun check.
+        if case .items(_, let behind) = warmWindow {
+            assert(reachEndThreshold <= behind,
+                   "AsyncFeed: reachEndThreshold > prefetchWindow(behind:) — page-load trigger fires inside the evictable window.")
+        }
         #endif
 
         return buildUIView(coordinator: context.coordinator)
@@ -147,8 +168,7 @@ public struct AsyncFeed<
 
         let view = FeedScrollView<Item>(
             environment: environment,
-            prefetchAheadCount: prefetchAhead,
-            prefetchBehindCount: prefetchBehind,
+            warmWindow: warmWindow,
             reachEndThreshold: reachEndThreshold,
             layoutProvider: layout.provider
         )
@@ -172,10 +192,8 @@ public struct AsyncFeed<
 
         // Prefetch window is init-time only. Debug-assert values unchanged.
         #if DEBUG
-        assert(uiView.prefetchAheadCount == prefetchAhead,
-               "AsyncFeed.prefetchWindow(ahead:) is init-time only — mutating it requires a .id() rebuild.")
-        assert(uiView.prefetchBehindCount == prefetchBehind,
-               "AsyncFeed.prefetchWindow(behind:) is init-time only — mutating it requires a .id() rebuild.")
+        assert(uiView.warmWindow == warmWindow,
+               "AsyncFeed.prefetchWindow/.prefetchScreens is init-time only — mutating it requires a .id() rebuild.")
         #endif
 
         guard itemsDiffer(uiView.items, items, on: uiView) else { return }

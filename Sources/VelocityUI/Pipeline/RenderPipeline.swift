@@ -25,16 +25,15 @@ private final class PrefetchGenerationToken: Sendable {
     }
 }
 
-/// Returns the half-open prefetch index range for a given leading visible index.
+/// Clamps a caller-supplied warm range to `0..<count`.
 ///
-/// Single authoritative formula shared by the deep-cancel stale filter and the measure
-/// loop — both call this function so they can never silently diverge (e.g. the stale
-/// filter cancelling items the measure loop still wants, or missing items it abandons).
-private func prefetchRange(leadingIndex: Int, ahead: Int, behind: Int, count: Int) -> Range<Int> {
-    let start = max(0, leadingIndex - behind)
-    let end = min(leadingIndex + ahead, count)
-    // Clamp to avoid a trap: if leadingIndex is at or beyond count (feed shrank under a
-    // stale boundary), start can exceed end. Both call sites handle empty ranges correctly.
+/// Defensive re-clamp: `FeedScrollView.warmRange` already bounds its result to
+/// `resolvedFrames.count` via `LayoutProvider.visibleIndexRange`, but `tables.count` is
+/// this actor's own source of truth, so re-clamping here is what actually prevents a trap
+/// if the two ever disagree (e.g. a stale boundary call racing a shrinking feed).
+private func clampedRange(_ range: Range<Int>, count: Int) -> Range<Int> {
+    let start = max(0, range.lowerBound)
+    let end = min(range.upperBound, count)
     return start..<max(start, end)
 }
 
@@ -62,7 +61,10 @@ private nonisolated func rasterizeTextArtifacts(
 /// Prefetch actor — runs off MainActor, writes back to WorkingRange via MainActor.run.
 /// Called by the scroll container on leading-index boundary crossings (not every frame).
 public actor RenderPipeline {
-    private var lastLeadingIndex: Int = -1
+    /// Last warm range this actor was notified of. `nil` means "never notified" — distinct from
+    /// `0..<0`, which is a legitimate (empty) window. Compared by full range, not just its lower
+    /// bound, so a window that widens/narrows at the same leading edge still re-notifies.
+    private var lastWarmRange: Range<Int>?
     private(set) var prefetchTask: Task<Void, Never>?
 
     /// Incremented each time a new prefetch Task is spawned.
@@ -82,9 +84,6 @@ public actor RenderPipeline {
     private let layoutCache: LayoutCache
     private let imageActor: ImageActor
     private let frozenBitmapStore: FrozenBitmapStore
-
-    private let prefetchAhead: Int
-    private let prefetchBehind: Int
 
     // MARK: - Supersession guard state
 
@@ -107,34 +106,34 @@ public actor RenderPipeline {
         textPool: TextMeasurementPool,
         layoutCache: LayoutCache,
         imageActor: ImageActor,
-        frozenBitmapStore: FrozenBitmapStore = FrozenBitmapStore(),
-        prefetchAhead: Int = 10,
-        prefetchBehind: Int = 3
+        frozenBitmapStore: FrozenBitmapStore = FrozenBitmapStore()
     ) {
         self.textPool = textPool
         self.layoutCache = layoutCache
         self.imageActor = imageActor
         self.frozenBitmapStore = frozenBitmapStore
-        self.prefetchAhead = prefetchAhead
-        self.prefetchBehind = prefetchBehind
     }
 
     /// Test-only convenience — creates a private pool, cache, and image actor not shared with RenderEnvironment.
-    /// Uses prefetchAhead = 60 to match the old hardcoded range and preserve Spike2 test thresholds.
     /// The private `ImageActor` instance's cache is isolated — do not combine with `env.imageActor` in tests expecting shared warmup.
     init() {
         self.textPool = TextMeasurementPool()
         self.layoutCache = LayoutCache()
         self.imageActor = ImageActor()
         self.frozenBitmapStore = FrozenBitmapStore()
-        self.prefetchAhead = 60
-        self.prefetchBehind = 3
     }
 
-    /// Notify the pipeline that the visible leading index has changed. No-op if unchanged since
-    /// last call; cancels and replaces any running prefetch task.
+    /// Notify the pipeline that the warm window has changed. No-op if `warmRange` is unchanged
+    /// since the last call; cancels and replaces any running prefetch task.
     ///
     /// - Parameters:
+    ///   - warmRange: The exact index range to measure/prefetch, already computed geometrically
+    ///     by the caller (`FeedScrollView.warmRange(viewportTop:viewportBottom:)`) — this actor no
+    ///     longer derives a window from an internal ahead/behind item count. Re-clamped to
+    ///     `0..<tables.count` defensively.
+    ///   - leadingIndex: The real current top-visible index — distinct from `warmRange`, which may
+    ///     extend behind it (trailing screens/behind items). Used only to classify each prefetched
+    ///     image as `.ahead` (coming into view next) or `.behind` (scrolled past), per `direction`.
     ///   - tables: NodeTables in display order, parallel to the item array.
     ///   - availableWidth: The MEASURE width — `layoutProvider.measureWidth(availableWidth:)`
     ///     already applied by the caller (e.g. a grid's column width, not the raw container
@@ -148,21 +147,22 @@ public actor RenderPipeline {
     ///     to `.down` (VelocityUI-he0's original assumption), so non-observing callers are
     ///     unaffected.
     public func onIndexBoundary(
-        _ leadingIndex: Int,
+        warmRange: Range<Int>,
+        leadingIndex: Int,
         workingRange: WorkingRange,
         tables: [NodeTable],
         availableWidth: CGFloat,
         scale: CGFloat,
         direction: ScrollDirection = .down
     ) {
-        guard leadingIndex != lastLeadingIndex else { return }
-        lastLeadingIndex = leadingIndex
+        guard warmRange != lastWarmRange else { return }
+        lastWarmRange = warmRange
         lastDirection = direction
 
         // Deep cancel (secondary layer): items from the previous batch whose index falls
         // outside the new range are guaranteed not to be needed. Cancel their in-flight
         // inner decode Tasks before they consume more network/decode budget.
-        let newRange = prefetchRange(leadingIndex: leadingIndex, ahead: prefetchAhead, behind: prefetchBehind, count: tables.count)
+        let newRange = clampedRange(warmRange, count: tables.count)
         let staleItems = activePrefetchItems.filter { !newRange.contains($0.index) }
         if !staleItems.isEmpty {
             let actor = imageActor
@@ -188,11 +188,10 @@ public actor RenderPipeline {
         let actor = imageActor
         let bitmapStore = frozenBitmapStore
         let capturedScale = scale
-        let ahead = prefetchAhead
-        let behind = prefetchBehind
+        let capturedWarmRange = warmRange
 
         prefetchTask = Task {
-            let range = prefetchRange(leadingIndex: leadingIndex, ahead: ahead, behind: behind, count: tables.count)
+            let range = clampedRange(capturedWarmRange, count: tables.count)
             guard !range.isEmpty else { return }
 
             // Single MainActor hop: advance or reset the ring buffer, then collect nil slots.
@@ -328,11 +327,11 @@ public actor RenderPipeline {
     }
 
     /// Resets dedup state and cancels any in-flight prefetch so the next
-    /// `onIndexBoundary` call with the same leading index is not skipped by the
-    /// guard on line 57 — necessary after `WorkingRange.invalidateAll()` wipes
-    /// all entries and the leading index hasn't changed.
+    /// `onIndexBoundary` call with the same warm range is not skipped by the
+    /// guard on line 150 — necessary after `WorkingRange.invalidateAll()` wipes
+    /// all entries and the warm range hasn't changed.
     public func markInvalidated() {
-        lastLeadingIndex = -1
+        lastWarmRange = nil
         prefetchTask?.cancel()
         prefetchTask = nil
         if !activePrefetchItems.isEmpty {

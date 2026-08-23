@@ -100,14 +100,21 @@ final class RenderPipelineTests: XCTestCase {
         (0..<count).map { makeImageTable(id: $0) }
     }
 
-    private func makePipeline(ahead: Int = 10, behind: Int = 3) -> RenderPipeline {
+    private func makePipeline() -> RenderPipeline {
         RenderPipeline(
             textPool: TextMeasurementPool(),
             layoutCache: LayoutCache(),
-            imageActor: ImageActor(),
-            prefetchAhead: ahead,
-            prefetchBehind: behind
+            imageActor: ImageActor()
         )
+    }
+
+    /// Mirrors `RenderPipeline`'s old internal `prefetchRange(leadingIndex:ahead:behind:count:)` —
+    /// the actor no longer derives this window itself; callers (`FeedScrollView` in production,
+    /// this helper in tests) compute it explicitly and pass it as `warmRange:`.
+    private func boundaryRange(leadingIndex: Int, ahead: Int, behind: Int, count: Int) -> Range<Int> {
+        let start = max(0, leadingIndex - behind)
+        let end = min(leadingIndex + ahead, count)
+        return start..<max(start, end)
     }
 
     // MARK: - Test 1: Cache hits skip measureNode
@@ -119,7 +126,9 @@ final class RenderPipelineTests: XCTestCase {
         let width: CGFloat = 320
 
         // First boundary: all cache misses → measures everything
-        await pipeline.onIndexBoundary(0, workingRange: range, tables: tables, availableWidth: width, scale: 1)
+        await pipeline.onIndexBoundary(
+            warmRange: boundaryRange(leadingIndex: 0, ahead: 10, behind: 3, count: tables.count),
+            leadingIndex: 0, workingRange: range, tables: tables, availableWidth: width, scale: 1)
         await pipeline.waitForCurrentPrefetch()
 
         let hitsAfterFirst = await pipeline.cacheHitCount
@@ -129,12 +138,16 @@ final class RenderPipelineTests: XCTestCase {
         await MainActor.run { range.invalidateAll() }
 
         // Second boundary at same index: must be treated as a new boundary.
-        // Poke a different index first to reset lastLeadingIndex, then come back.
-        await pipeline.onIndexBoundary(1, workingRange: range, tables: tables, availableWidth: width, scale: 1)
+        // Poke a different index first to reset the pipeline's dedup state, then come back.
+        await pipeline.onIndexBoundary(
+            warmRange: boundaryRange(leadingIndex: 1, ahead: 10, behind: 3, count: tables.count),
+            leadingIndex: 1, workingRange: range, tables: tables, availableWidth: width, scale: 1)
         await pipeline.waitForCurrentPrefetch()
         await MainActor.run { range.invalidateAll() }
 
-        await pipeline.onIndexBoundary(0, workingRange: range, tables: tables, availableWidth: width, scale: 1)
+        await pipeline.onIndexBoundary(
+            warmRange: boundaryRange(leadingIndex: 0, ahead: 10, behind: 3, count: tables.count),
+            leadingIndex: 0, workingRange: range, tables: tables, availableWidth: width, scale: 1)
         await pipeline.waitForCurrentPrefetch()
 
         let hitsAfterSecond = await pipeline.cacheHitCount
@@ -151,17 +164,22 @@ final class RenderPipelineTests: XCTestCase {
         let tables = makeTables(count: 600)
         let range = await WorkingRange(capacity: 60)
         // Large prefetch window so warmup covers plenty of items
-        let pipeline = makePipeline(ahead: 30, behind: 5)
+        let pipeline = makePipeline()
+        let ahead = 30, behind = 5
         let width: CGFloat = 320
 
         // Scroll down 500 items (matches bead success criterion)
         for step in stride(from: 0, through: 500, by: 10) {
-            await pipeline.onIndexBoundary(step, workingRange: range, tables: tables, availableWidth: width, scale: 1)
+            await pipeline.onIndexBoundary(
+                warmRange: boundaryRange(leadingIndex: step, ahead: ahead, behind: behind, count: tables.count),
+                leadingIndex: step, workingRange: range, tables: tables, availableWidth: width, scale: 1)
         }
         await pipeline.waitForCurrentPrefetch()
 
         // Fling to top
-        await pipeline.onIndexBoundary(0, workingRange: range, tables: tables, availableWidth: width, scale: 1)
+        await pipeline.onIndexBoundary(
+            warmRange: boundaryRange(leadingIndex: 0, ahead: ahead, behind: behind, count: tables.count),
+            leadingIndex: 0, workingRange: range, tables: tables, availableWidth: width, scale: 1)
         await pipeline.waitForCurrentPrefetch()
 
         // Visible range [0, 10) must be fully populated — zero permanent blank cells
@@ -179,12 +197,15 @@ final class RenderPipelineTests: XCTestCase {
     func testSupersededPrefetchLeavesNoStaleCommits() async {
         let tables = makeTables(count: 200)
         let range = await WorkingRange(capacity: 60)
-        let pipeline = makePipeline(ahead: 10, behind: 3)
+        let pipeline = makePipeline()
+        let ahead = 10, behind = 3
         let width: CGFloat = 320
 
         // Issue 50 boundary calls in rapid succession without waiting
         for i in 0..<50 {
-            await pipeline.onIndexBoundary(i, workingRange: range, tables: tables, availableWidth: width, scale: 1)
+            await pipeline.onIndexBoundary(
+                warmRange: boundaryRange(leadingIndex: i, ahead: ahead, behind: behind, count: tables.count),
+                leadingIndex: i, workingRange: range, tables: tables, availableWidth: width, scale: 1)
         }
         // Wait for the final task (index 49) to complete
         await pipeline.waitForCurrentPrefetch()
@@ -217,12 +238,17 @@ final class RenderPipelineTests: XCTestCase {
         let tables = makeTables(count: 20)
         let range = await WorkingRange(capacity: 60)
         let pipeline = makePipeline()
+        let warmRange = boundaryRange(leadingIndex: 5, ahead: 10, behind: 3, count: tables.count)
 
-        await pipeline.onIndexBoundary(5, workingRange: range, tables: tables, availableWidth: 320, scale: 1)
+        await pipeline.onIndexBoundary(
+            warmRange: warmRange, leadingIndex: 5,
+            workingRange: range, tables: tables, availableWidth: 320, scale: 1)
         let after1 = await pipeline.taskStartCount
         XCTAssertEqual(after1, 1)
 
-        await pipeline.onIndexBoundary(5, workingRange: range, tables: tables, availableWidth: 320, scale: 1)
+        await pipeline.onIndexBoundary(
+            warmRange: warmRange, leadingIndex: 5,
+            workingRange: range, tables: tables, availableWidth: 320, scale: 1)
         let after2 = await pipeline.taskStartCount
         XCTAssertEqual(after2, 1, "Duplicate index must not spawn a new task")
     }
@@ -279,14 +305,15 @@ final class RenderPipelineTests: XCTestCase {
         let pipeline = RenderPipeline(
             textPool: TextMeasurementPool(),
             layoutCache: LayoutCache(),
-            imageActor: imageActor,
-            prefetchAhead: 10,
-            prefetchBehind: 3
+            imageActor: imageActor
         )
+        let warmRange = boundaryRange(leadingIndex: 0, ahead: 10, behind: 3, count: tables.count)
 
         // Spawn prefetch in the background — layout commits quickly; gate blocks prefetch Task.
         Task {
-            await pipeline.onIndexBoundary(0, workingRange: range, tables: tables, availableWidth: 320, scale: 1)
+            await pipeline.onIndexBoundary(
+                warmRange: warmRange, leadingIndex: 0,
+                workingRange: range, tables: tables, availableWidth: 320, scale: 1)
         }
 
         // Wait until at least one prefetch Task is inside the actor.
@@ -300,12 +327,14 @@ final class RenderPipelineTests: XCTestCase {
         // Release the gate — prefetch Task(s) resume; outer prefetchTask is already cancelled.
         await gate.open()
 
-        // markInvalidated() must reset lastLeadingIndex so the same index re-spawns a task.
-        await pipeline.onIndexBoundary(0, workingRange: range, tables: tables, availableWidth: 320, scale: 1)
+        // markInvalidated() must reset the dedup state so the same warmRange re-spawns a task.
+        await pipeline.onIndexBoundary(
+            warmRange: warmRange, leadingIndex: 0,
+            workingRange: range, tables: tables, availableWidth: 320, scale: 1)
         let countAfter = await pipeline.taskStartCount
         XCTAssertEqual(
             countAfter, countBefore + 1,
-            "markInvalidated() must reset lastLeadingIndex; same index must spawn a fresh prefetch task"
+            "markInvalidated() must reset dedup state; same warmRange must spawn a fresh prefetch task"
         )
         await pipeline.waitForCurrentPrefetch()
 
@@ -408,13 +437,14 @@ final class RenderPipelineTests: XCTestCase {
         let pipeline = RenderPipeline(
             textPool: TextMeasurementPool(),
             layoutCache: LayoutCache(),
-            imageActor: imageActor,
-            prefetchAhead: n + 5,   // covers all n+1 table indices from leading=0
-            prefetchBehind: 0
+            imageActor: imageActor
         )
+        // ahead: n + 5 covers all n+1 table indices from leading=0
+        let warmRange = boundaryRange(leadingIndex: 0, ahead: n + 5, behind: 0, count: tables.count)
 
         await pipeline.onIndexBoundary(
-            0, workingRange: range, tables: tables, availableWidth: 320, scale: 2
+            warmRange: warmRange, leadingIndex: 0,
+            workingRange: range, tables: tables, availableWidth: 320, scale: 2
         )
         // waitForCurrentPrefetch() is the happens-before anchor: it awaits the prefetch
         // Task, which awaits the withTaskGroup, which awaits every actor.prefetch() call,
@@ -500,12 +530,12 @@ final class RenderPipelineTests: XCTestCase {
         let pipeline = RenderPipeline(
             textPool: textPool,
             layoutCache: layoutCache,
-            imageActor: imageActor,
-            prefetchAhead: n + 2,
-            prefetchBehind: 0
+            imageActor: imageActor
         )
 
-        await pipeline.onIndexBoundary(0, workingRange: range, tables: tables, availableWidth: width, scale: 2)
+        await pipeline.onIndexBoundary(
+            warmRange: boundaryRange(leadingIndex: 0, ahead: n + 2, behind: 0, count: tables.count),
+            leadingIndex: 0, workingRange: range, tables: tables, availableWidth: width, scale: 2)
         await pipeline.waitForCurrentPrefetch()
 
         // AC(4): every image URL must receive exactly one network fetch.
@@ -596,19 +626,23 @@ final class RenderPipelineTests: XCTestCase {
         let pipeline = RenderPipeline(
             textPool: textPool,
             layoutCache: layoutCache,
-            imageActor: imageActor,
-            prefetchAhead: n + 2,
-            prefetchBehind: 0
+            imageActor: imageActor
         )
 
         // Large filler table for boundary 500 — non-overlapping with [0, n).
         let largeTables = tables + (n..<600).map { makeImageTable(id: $0) }
 
+        // Computed outside the Task closure: `boundaryRange` is an instance method, and calling
+        // it from inside would implicitly capture non-Sendable `self` (XCTestCase) across the
+        // isolation boundary.
+        let boundary0Range = boundaryRange(leadingIndex: 0, ahead: n + 2, behind: 0, count: tables.count)
+
         // Fire boundary 0 in the background; layout commits quickly (all cache hits),
         // then the for-await consumer spawns n prefetch Tasks that block at the gate.
         Task {
             await pipeline.onIndexBoundary(
-                0, workingRange: range, tables: tables, availableWidth: width, scale: 1
+                warmRange: boundary0Range,
+                leadingIndex: 0, workingRange: range, tables: tables, availableWidth: width, scale: 1
             )
         }
 
@@ -624,7 +658,8 @@ final class RenderPipelineTests: XCTestCase {
         // Supersede: new boundary at index 500 bumps the generation.
         // Deep-cancel has nothing to cancel (no inner Tasks spawned yet — all at the gate).
         await pipeline.onIndexBoundary(
-            500, workingRange: range, tables: largeTables, availableWidth: width, scale: 1
+            warmRange: boundaryRange(leadingIndex: 500, ahead: n + 2, behind: 0, count: largeTables.count),
+            leadingIndex: 500, workingRange: range, tables: largeTables, availableWidth: width, scale: 1
         )
 
         // Release gate — all n prefetch Tasks resume, check isCurrent() → false → bail.
@@ -712,19 +747,19 @@ final class RenderPipelineTests: XCTestCase {
         let pipeline = RenderPipeline(
             textPool: textPool,
             layoutCache: layoutCache,
-            imageActor: imageActor,
-            prefetchAhead: n + 2,
-            prefetchBehind: 0
+            imageActor: imageActor
         )
 
         // Fire boundary 0 immediately followed by boundary 500 — no coordination between them.
         // Some inner Tasks may have already spawned (deep cancel fires); others may still be
         // pending (generation guard fires). Both paths must reach stable completion.
         await pipeline.onIndexBoundary(
-            0, workingRange: range, tables: tables, availableWidth: width, scale: 1
+            warmRange: boundaryRange(leadingIndex: 0, ahead: n + 2, behind: 0, count: tables.count),
+            leadingIndex: 0, workingRange: range, tables: tables, availableWidth: width, scale: 1
         )
         await pipeline.onIndexBoundary(
-            500, workingRange: range, tables: largeTables, availableWidth: width, scale: 1
+            warmRange: boundaryRange(leadingIndex: 500, ahead: n + 2, behind: 0, count: largeTables.count),
+            leadingIndex: 500, workingRange: range, tables: largeTables, availableWidth: width, scale: 1
         )
 
         // Liveness assertion: pipeline must drain without deadlock.
@@ -784,19 +819,19 @@ final class RenderPipelineTests: XCTestCase {
         let pipeline = RenderPipeline(
             textPool: textPool,
             layoutCache: layoutCache,
-            imageActor: imageActor,
-            prefetchAhead: n + 2,
-            prefetchBehind: 0
+            imageActor: imageActor
         )
 
         // Boundary at index 0: range [0, n+2) — covers all n+1 tables.
         await pipeline.onIndexBoundary(
-            0, workingRange: range, tables: tables, availableWidth: width, scale: 1
+            warmRange: boundaryRange(leadingIndex: 0, ahead: n + 2, behind: 0, count: tables.count),
+            leadingIndex: 0, workingRange: range, tables: tables, availableWidth: width, scale: 1
         )
         // Immediately fire overlapping boundary at index 1: range [0, n+2) — same URLs, one
         // generation bump. Smooth-scroll invariant: shared URLs must not be re-fetched.
         await pipeline.onIndexBoundary(
-            1, workingRange: range, tables: tables, availableWidth: width, scale: 1
+            warmRange: boundaryRange(leadingIndex: 1, ahead: n + 2, behind: 0, count: tables.count),
+            leadingIndex: 1, workingRange: range, tables: tables, availableWidth: width, scale: 1
         )
         await pipeline.waitForCurrentPrefetch()
 
@@ -924,18 +959,17 @@ final class RenderPipelineTests: XCTestCase {
         let range = await WorkingRange(capacity: 30)
         let leadingIndex = 3
 
-        // ahead=n, behind=n: prefetchRange clamps to [0, n) — the full table — so every
+        // ahead=n, behind=n: boundaryRange clamps to [0, n) — the full table — so every
         // index's classification is exercised in one boundary call.
         let pipeline = RenderPipeline(
             textPool: TextMeasurementPool(),
             layoutCache: LayoutCache(),
-            imageActor: imageActor,
-            prefetchAhead: n,
-            prefetchBehind: n
+            imageActor: imageActor
         )
 
         await pipeline.onIndexBoundary(
-            leadingIndex, workingRange: range, tables: tables, availableWidth: 320, scale: 2
+            warmRange: boundaryRange(leadingIndex: leadingIndex, ahead: n, behind: n, count: tables.count),
+            leadingIndex: leadingIndex, workingRange: range, tables: tables, availableWidth: 320, scale: 2
         )
         await pipeline.waitForCurrentPrefetch()
 
@@ -991,18 +1025,17 @@ final class RenderPipelineTests: XCTestCase {
         let range = await WorkingRange(capacity: 30)
         let leadingIndex = 3
 
-        // ahead=n, behind=n: prefetchRange clamps to [0, n) — the full table — so every
+        // ahead=n, behind=n: boundaryRange clamps to [0, n) — the full table — so every
         // index's classification is exercised in one boundary call.
         let pipeline = RenderPipeline(
             textPool: TextMeasurementPool(),
             layoutCache: LayoutCache(),
-            imageActor: imageActor,
-            prefetchAhead: n,
-            prefetchBehind: n
+            imageActor: imageActor
         )
 
         await pipeline.onIndexBoundary(
-            leadingIndex, workingRange: range, tables: tables, availableWidth: 320, scale: 2,
+            warmRange: boundaryRange(leadingIndex: leadingIndex, ahead: n, behind: n, count: tables.count),
+            leadingIndex: leadingIndex, workingRange: range, tables: tables, availableWidth: 320, scale: 2,
             direction: .up
         )
         await pipeline.waitForCurrentPrefetch()
@@ -1024,6 +1057,51 @@ final class RenderPipelineTests: XCTestCase {
                 "Table index \(i) (leadingIndex=\(leadingIndex), direction=.up) must request \(expected); got \(String(describing: byURL[url]))"
             )
         }
+    }
+
+    // MARK: - Test 15: onIndexBoundary measures exactly the passed warmRange, and dedups on it
+
+    /// VelocityUI-jc9z acceptance criterion: `onIndexBoundary(warmRange:)` measures exactly the
+    /// caller-supplied range (not a range it derives internally), and still de-dups when the same
+    /// warmRange is passed again — even for a range shape (5..<9) that no ahead/behind formula
+    /// naturally produces from leadingIndex=5, proving the range itself — not leadingIndex — is
+    /// the source of truth for what gets measured.
+    func testOnIndexBoundaryMeasuresExactlyPassedWarmRangeAndDedups() async {
+        let tables = makeTables(count: 20)
+        let range = await WorkingRange(capacity: 30)
+        let pipeline = makePipeline()
+        let warmRange = 5..<9
+
+        await pipeline.onIndexBoundary(
+            warmRange: warmRange, leadingIndex: 5,
+            workingRange: range, tables: tables, availableWidth: 320, scale: 1)
+        await pipeline.waitForCurrentPrefetch()
+
+        for i in 5..<9 {
+            let entry = await range.entry(at: i)
+            XCTAssertNotNil(entry, "Index \(i) is inside warmRange 5..<9 and must be measured")
+        }
+        for i in [0, 1, 4, 9, 10, 19] {
+            let entry = await range.entry(at: i)
+            XCTAssertNil(entry, "Index \(i) is outside warmRange 5..<9 and must not be measured")
+        }
+
+        let startsAfterFirst = await pipeline.taskStartCount
+        XCTAssertEqual(startsAfterFirst, 1)
+
+        // Same warmRange again (even with a different leadingIndex) — must be a no-op.
+        await pipeline.onIndexBoundary(
+            warmRange: warmRange, leadingIndex: 6,
+            workingRange: range, tables: tables, availableWidth: 320, scale: 1)
+        let startsAfterDuplicate = await pipeline.taskStartCount
+        XCTAssertEqual(startsAfterDuplicate, 1, "Unchanged warmRange must not spawn a new task, regardless of leadingIndex")
+
+        // A different warmRange must re-trigger.
+        await pipeline.onIndexBoundary(
+            warmRange: 6..<10, leadingIndex: 6,
+            workingRange: range, tables: tables, availableWidth: 320, scale: 1)
+        let startsAfterChange = await pipeline.taskStartCount
+        XCTAssertEqual(startsAfterChange, 2, "A changed warmRange must spawn a new task")
     }
 }
 #endif

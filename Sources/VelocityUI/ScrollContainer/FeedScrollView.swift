@@ -4,6 +4,25 @@
 import UIKit
 import CoreGraphics
 
+/// How far outside the visible viewport a feed keeps content warm — measured, mounted, and
+/// prefetched — before the user scrolls there.
+///
+/// `.screens` is the geometrically correct unit: it degrades to a small item count for a
+/// single-column feed (1 item ~= 1 screen) and scales automatically for a grid or masonry layout
+/// where items-per-screen varies. `.items` is a fixed item count, independent of viewport
+/// geometry — only correct when items-per-screen is roughly constant and known ahead of time
+/// (e.g. a fixed single-column list). See `AsyncFeed.prefetchScreens(leading:trailing:)` and
+/// `AsyncFeed.prefetchWindow(ahead:behind:)`.
+public enum WarmWindow: Sendable, Equatable {
+    /// Warm window sized in viewport-height multiples. `leading` = screens to warm ahead in the
+    /// scroll direction; `trailing` = screens to keep warm behind. Fractional values allowed
+    /// (e.g. `1.5`).
+    case screens(leading: CGFloat, trailing: CGFloat)
+    /// Warm window sized in item counts, symmetric around the visible range regardless of
+    /// scroll direction.
+    case items(ahead: Int, behind: Int)
+}
+
 /// CALayer-backed vertical feed scroll container.
 ///
 /// Contract: `layoutSubviews` → `updateVisibleCells` is fully synchronous — zero `await`,
@@ -20,18 +39,14 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// Builds the DSL node tree for each item. Must be set before assigning `items`.
     public var cellBuilder: (@MainActor (Item) -> any RenderNode)?
 
-    /// Number of items to prefetch ahead of the visible leading edge.
-    /// Set at init — changing after construction requires a new FeedScrollView
-    /// because RenderPipeline is wired with these values at creation time.
-    public let prefetchAheadCount: Int
-
-    /// Number of items to keep warmed behind the visible trailing edge.
-    /// Set at init — same lifetime constraint as `prefetchAheadCount`.
-    public let prefetchBehindCount: Int
+    /// How far outside the visible viewport to keep content warm — screens (default) or items.
+    /// Set at init — changing after construction requires a new FeedScrollView, since
+    /// `warmRange(viewportTop:viewportBottom:)` and pipeline notification both read it directly.
+    public let warmWindow: WarmWindow
 
     /// How many items before the end of the list `onReachEnd` fires.
-    /// Independent of `prefetchBehindCount` — tuning the prefetch window
-    /// must not silently move the page-load trigger.
+    /// Independent of `warmWindow` — tuning the prefetch window must not silently move the
+    /// page-load trigger.
     public let reachEndThreshold: Int
 
     /// Called when a user taps a cell. Receives the tapped item and its frame in
@@ -137,7 +152,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     private var _recycleBuffer: [Int] = []
 
     /// Largest `keepRange.count` seen so far — only the driver knows the real working-range
-    /// shape (prefetchBehind + visible + prefetchAhead), and only after first layout, so
+    /// shape (`warmRange`'s trailing/behind + visible + leading/ahead), and only after first layout, so
     /// `FrozenBitmapStore`'s byte budget (fixed at the 16 MB default at construction, before
     /// this feed existed) is resized from this once it grows. Tracked monotonically-up so a
     /// transient shrink (e.g. rotation narrowing the viewport) never shrinks the live budget
@@ -164,7 +179,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
     /// Places every item's frame, and tells the scroll path what's visible and how tall the
     /// content is. Defaults to `VerticalLayoutProvider(spacing: layoutSpacing)` — same behavior
-    /// as before this was added. Set at init, like `prefetchAheadCount` — doesn't change later.
+    /// as before this was added. Set at init, like `warmWindow` — doesn't change later.
     public let layoutProvider: any LayoutProvider
 
     // MARK: - Debug hooks
@@ -219,6 +234,13 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// `estimatedItemHeight`-based math silently drifts once WorkingRange refines real heights.
     func _debugResolvedFrame(at index: Int) -> CGRect? {
         index < resolvedFrames.count ? resolvedFrames[index] : nil
+    }
+
+    /// Exercises the private `warmRange(viewportTop:viewportBottom:)` directly — the same
+    /// function `updateVisibleCells`/`notifyPipelineIfNeeded` call on the real scroll path —
+    /// against `resolvedFrames` as they stand after the test's own `layoutSubviews()` call.
+    func _testWarmRange(viewportTop: CGFloat, viewportBottom: CGFloat) -> Range<Int> {
+        warmRange(viewportTop: viewportTop, viewportBottom: viewportBottom)
     }
 
     /// Returns the root CALayer of the cell mounted at item index, or nil if not visible.
@@ -309,10 +331,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     ///   - environment: Composition root. Only `textPool`, `layoutCache`, `dimensionCache` are
     ///     used here; other collaborators are for downstream beads. Taking the whole
     ///     `RenderEnvironment` is an ergonomic convenience — per-collaborator init is tracked separately.
-    ///   - prefetchAheadCount / prefetchBehindCount: Prefetch/warm window around the visible
-    ///     range. Wired into `RenderPipeline` at construction time; fixed for the instance's lifetime.
+    ///   - warmWindow: How far outside the visible viewport to keep content warm. Defaults to
+    ///     `.items(ahead: 10, behind: 3)` — this type's own historical default, unrelated to
+    ///     `AsyncFeed`'s DSL-level default (`.screens(leading: 2, trailing: 1)`), which the DSL
+    ///     always passes explicitly.
     ///   - reachEndThreshold: Items before list end that trigger `onReachEnd` — deliberately
-    ///     separate from `prefetchBehindCount`.
+    ///     separate from `warmWindow`.
     ///   - estimatedItemHeight: Placeholder height (pt) for unmeasured items; affects initial
     ///     contentSize and visual jump when real layouts land.
     ///   - layoutSpacing: Vertical gap between cells (pt).
@@ -326,8 +350,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     public init(
         environment: RenderEnvironment,
         frame: CGRect = .zero,
-        prefetchAheadCount: Int = 10,
-        prefetchBehindCount: Int = 3,
+        warmWindow: WarmWindow = .items(ahead: 10, behind: 3),
         reachEndThreshold: Int = 3,
         estimatedItemHeight: CGFloat = 300,
         layoutSpacing: CGFloat = 8,
@@ -335,8 +358,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         notificationCenter: NotificationCenter = .default
     ) {
         self.environment = environment
-        self.prefetchAheadCount = prefetchAheadCount
-        self.prefetchBehindCount = prefetchBehindCount
+        self.warmWindow = warmWindow
         self.reachEndThreshold = reachEndThreshold
         self.estimatedItemHeight = estimatedItemHeight
         self.layoutSpacing = layoutSpacing
@@ -346,9 +368,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             textPool: environment.textPool,
             layoutCache: environment.layoutCache,
             imageActor: environment.imageActor,
-            frozenBitmapStore: environment.frozenBitmapStore,
-            prefetchAhead: prefetchAheadCount,
-            prefetchBehind: prefetchBehindCount
+            frozenBitmapStore: environment.frozenBitmapStore
         )
         self.workingRange = WorkingRange()
         self.differ = RenderDiffer(dimensionCache: environment.dimensionCache)
@@ -1347,10 +1367,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         _lastVisibleRange = visRange
         #endif
 
-        // Keep-range for recycle decisions: index-based, allocation-free.
-        let keepStart = max(0, visRange.lowerBound - prefetchBehindCount)
-        let keepEnd   = min(resolvedFrames.count, visRange.upperBound + prefetchAheadCount)
-        let keepRange = keepStart..<keepEnd
+        // Keep-range for recycle decisions: same warm window that drives pipeline notification.
+        let keepRange = warmRange(viewportTop: viewportTop, viewportBottom: viewportBottom)
 
         // FrozenBitmapStore is constructed (at RenderEnvironment composition-root time) before
         // this feed's real working-range shape is known — the driver is the only place that
@@ -1516,6 +1534,30 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         return visRange
     }
 
+    /// The index range to keep warm (measured, mounted, prefetched) around the visible viewport —
+    /// drives both `updateVisibleCells`'s recycle bounds and the pipeline measure window, so
+    /// mounting never asks for an index the pipeline was never told to warm. Same binary-search
+    /// primitive as the plain visible-range query, extended geometrically (screens mode) or by a
+    /// fixed item count (items mode).
+    ///
+    /// Runs on the scroll path (`layoutSubviews` → `updateVisibleCells`): allocation-free, O(log n)
+    /// — one extra `visibleIndexRange` binary search over the already-built `resolvedFrames`, same
+    /// class of work the plain visible-range search already does. No rebuild, no Task, no await.
+    private func warmRange(viewportTop: CGFloat, viewportBottom: CGFloat) -> Range<Int> {
+        switch warmWindow {
+        case .items(let ahead, let behind):
+            let vis = layoutProvider.visibleIndexRange(
+                in: resolvedFrames, viewportTop: viewportTop, viewportBottom: viewportBottom)
+            return max(0, vis.lowerBound - behind) ..< min(resolvedFrames.count, vis.upperBound + ahead)
+        case .screens(let leading, let trailing):
+            let H = bounds.height
+            return layoutProvider.visibleIndexRange(
+                in: resolvedFrames,
+                viewportTop:    viewportTop    - trailing * H,
+                viewportBottom: viewportBottom + leading  * H)
+        }
+    }
+
     /// One viewport above and below the visible bounds keeps nearby blocks warm without making
     /// a tall cell retain its entire layer tree.
     private func blockViewport(for cellFrame: CGRect) -> CGRect {
@@ -1542,6 +1584,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         guard leading != lastNotifiedLeadingIndex else { return }
         lastNotifiedLeadingIndex = leading
 
+        // The window actually sent to the pipeline — geometrically wider than `visRange` in
+        // screens mode, which is the fix: the trigger (`leading` changing) stays item-based, but
+        // the WIDTH of what gets measured now tracks the real viewport, not a fixed item count.
+        let capturedWarmRange = warmRange(viewportTop: visTop, viewportBottom: visBottom)
         let capturedTables = tables
         // The measure width, not the raw container width — RenderPipeline's CacheKey/measureNode
         // calls must key on the same width `measureWidth(for:)` produces everywhere else (colWidth
@@ -1558,7 +1604,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         Task { [weak self] in
             guard let self else { return }
             await self.pipeline.onIndexBoundary(
-                leading,
+                warmRange: capturedWarmRange,
+                leadingIndex: leading,
                 workingRange: self.workingRange,
                 tables: capturedTables,
                 availableWidth: capturedWidth,

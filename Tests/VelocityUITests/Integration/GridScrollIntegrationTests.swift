@@ -328,5 +328,193 @@ final class GridScrollIntegrationTests: XCTestCase {
 
         await drainFeedWork(feed)
     }
+
+    // MARK: - Real-content fixtures (VelocityUI-jc9z)
+
+    /// Serves a 2×2 JPEG synchronously — mirrors `RenderPipelineTests`/`ImagePrefetchIntegrationTests`'s
+    /// per-file counting protocol (duplicated per file: test-fixture helper, not production logic).
+    private final class GridScrollCountingProtocol: URLProtocol {
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for r: URLRequest) -> URLRequest { r }
+
+        override func startLoading() {
+            let fmt = UIGraphicsImageRendererFormat()
+            fmt.scale = 1
+            let data = UIGraphicsImageRenderer(
+                size: CGSize(width: 2, height: 2), format: fmt
+            ).jpegData(withCompressionQuality: 0.9) { ctx in
+                UIColor.systemBlue.setFill()
+                ctx.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+            }
+            let resp = URLResponse(
+                url: request.url!, mimeType: "image/jpeg",
+                expectedContentLength: data.count, textEncodingName: nil
+            )
+            client?.urlProtocol(self, didReceive: resp, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        }
+        override func stopLoading() {}
+    }
+
+    struct GridURLItem: Identifiable, Sendable {
+        let id: Int
+        let url: URL
+    }
+
+    private func makeURLItems(count: Int) -> [GridURLItem] {
+        (0..<count).map { GridURLItem(id: $0, url: URL(string: "https://grid-scroll.example.com/\($0).jpg")!) }
+    }
+
+    private func makeEnvironmentWithMockedSession() -> RenderEnvironment {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [GridScrollCountingProtocol.self]
+        let session = URLSession(configuration: config)
+        let dc = DimensionCache(session: session)
+        let videoPrep = VideoPreparationActor()
+        return RenderEnvironment(
+            textPool: TextMeasurementPool(),
+            layoutCache: LayoutCache(),
+            dimensionCache: dc,
+            imageActor: ImageActor(session: session, dimensionCache: dc),
+            gifActor: GIFActor(),
+            videoController: VideoController(videoPreparation: videoPrep),
+            videoPreparation: videoPrep,
+            frozenBitmapStore: FrozenBitmapStore(),
+            hotBlockRasterizerStore: HotBlockRasterizerStore()
+        )
+    }
+
+    // MARK: - 4. Screens-mode warms the whole first screen without any scroll (VelocityUI-jc9z)
+
+    /// Regression test for the actual reported bug: a 3-col grid packs ~18 tiles on one screen,
+    /// but the old items-mode default (ahead: 10) warmed FEWER items than fit on screen — the
+    /// lower rows stayed gray placeholders forever, without any scroll. `.screens(leading: 2,
+    /// trailing: 1)` — the new default — must warm the WHOLE first screen on mount, with zero
+    /// scrolling.
+    func testScreensModeRevealsFullFirstScreenWithoutScrolling() async throws {
+        let columns = 3
+        let spacing: CGFloat = 6
+        let width: CGFloat = 375
+        let height: CGFloat = 812
+        let itemCount = 300
+
+        let items = makeURLItems(count: itemCount)
+        let env = makeEnvironmentWithMockedSession()
+        let feed = FeedScrollView<GridURLItem>(
+            environment: env,
+            frame: CGRect(x: 0, y: 0, width: width, height: height),
+            warmWindow: .screens(leading: 2, trailing: 1),
+            layoutProvider: GridLayoutProvider(columns: columns, spacing: spacing)
+        )
+        feed.cellBuilder = { item in AsyncImageNode(url: item.url, aspectRatio: 1.0) }
+        feed.items = items
+        feed.layoutSubviews()
+
+        let visRange = feed._lastVisibleRange
+        XCTAssertGreaterThan(visRange.count, 0, "Sanity: some tiles must be visible at rest")
+        log.debug("[GridScreens] visRange=\(visRange.lowerBound)..<\(visRange.upperBound)")
+
+        // Poll: every tile in the FIRST viewport must drain out of the placeholder branch and
+        // reveal real content — with zero scrolling. Bounded at 200 x 10ms = 2s.
+        var retries = 0
+        while retries < 200 {
+            feed.layoutSubviews()
+            let allRevealed = visRange.allSatisfy { feed._debugIsContentRevealed(at: $0) }
+            if allRevealed, feed._pendingFragmentIndicesCount == 0 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+            retries += 1
+        }
+        feed.layoutSubviews()
+
+        for i in visRange {
+            XCTAssertTrue(
+                feed._debugIsContentRevealed(at: i),
+                "Tile \(i) in the first viewport must reveal real content without any scroll — "
+                + "screens(leading: 2) must warm the whole first screen"
+            )
+        }
+        XCTAssertEqual(
+            feed._pendingFragmentIndicesCount, 0,
+            "No tile in the first viewport should remain on the placeholder branch"
+        )
+
+        await drainFeedWork(feed)
+    }
+
+    // MARK: - 5. Screens-mode warm window stays ahead of a fast downward fling (VelocityUI-jc9z)
+
+    /// Flings down through many screens and asserts the warm window stays AHEAD of the
+    /// viewport — tiles entering view must already have real content (no sustained gray band),
+    /// because `screens(leading: 2, trailing: 1)` warms whole screens ahead, not a fixed item
+    /// count a dense grid can outrun.
+    func testScreensModeStaysAheadOfDownwardFling() async throws {
+        let columns = 3
+        let spacing: CGFloat = 6
+        let width: CGFloat = 375
+        let height: CGFloat = 812
+        let itemCount = 600
+
+        let items = makeURLItems(count: itemCount)
+        let env = makeEnvironmentWithMockedSession()
+        let feed = FeedScrollView<GridURLItem>(
+            environment: env,
+            frame: CGRect(x: 0, y: 0, width: width, height: height),
+            warmWindow: .screens(leading: 2, trailing: 1),
+            layoutProvider: GridLayoutProvider(columns: columns, spacing: spacing)
+        )
+        feed.cellBuilder = { item in AsyncImageNode(url: item.url, aspectRatio: 1.0) }
+        feed.items = items
+        feed.layoutSubviews()
+
+        // Let the first screen settle before flinging, matching the warm-up in the test above.
+        // `_pendingFragmentIndicesCount == 0` alone is not sufficient: a cell can leave the
+        // placeholder branch (fragments committed) while its image decode is still in flight —
+        // `_debugIsContentRevealed` is the actual pixels-on-screen signal (see
+        // `ImagePrefetchIntegrationTests.testPrefetchedIndexMountsWithContent`'s same polling shape).
+        var retries = 0
+        while retries < 200 {
+            feed.layoutSubviews()
+            let vr = feed._lastVisibleRange
+            if feed._pendingFragmentIndicesCount == 0, vr.allSatisfy({ feed._debugIsContentRevealed(at: $0) }) {
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+            retries += 1
+        }
+
+        let contentHeight = feed.contentSize.height
+        let flingSteps = 8
+        for step in 1...flingSteps {
+            let offsetY = min(max(0, contentHeight - height), CGFloat(step) * height)
+            feed.contentOffset = CGPoint(x: 0, y: offsetY)
+            feed.layoutSubviews()
+
+            // Bounded settle window at each landing spot — mirrors real scroll cadence
+            // (fling, pause, repeat) rather than a single instantaneous jump.
+            var settleRetries = 0
+            while settleRetries < 100 {
+                feed.layoutSubviews()
+                let vr = feed._lastVisibleRange
+                if feed._pendingFragmentIndicesCount == 0, vr.allSatisfy({ feed._debugIsContentRevealed(at: $0) }) {
+                    break
+                }
+                try await Task.sleep(nanoseconds: 10_000_000)
+                settleRetries += 1
+            }
+            feed.layoutSubviews()
+
+            let visRange = feed._lastVisibleRange
+            log.debug("[GridFling] step=\(step) offsetY=\(offsetY) visRange=\(visRange.lowerBound)..<\(visRange.upperBound)")
+            for i in visRange {
+                XCTAssertTrue(
+                    feed._debugIsContentRevealed(at: i),
+                    "step \(step): tile \(i) entering the viewport must already have real content — no sustained gray band"
+                )
+            }
+        }
+
+        await drainFeedWork(feed)
+    }
 }
 #endif
