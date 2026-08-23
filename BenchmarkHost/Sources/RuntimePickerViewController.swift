@@ -27,6 +27,12 @@ final class RuntimePickerViewController: UITableViewController {
     private static let streamDeferralRowTitle = "VelocityUI — Streaming Text (gesture-gated deferral)"
     private static let streamRowCount = 2
 
+    /// VelocityUI-0c5's `.grid(columns:spacing:)` DSL — same shape as the `Scenarios` section
+    /// above (live-only, not part of the `runtimes` matrix `makeRuntimeVC` drives generically):
+    /// there's no headless/measured path for it yet, just "open it, scroll it".
+    private static let gridSectionTitle = "Grid"
+    private static let gridRowTitle = "VelocityUI — Grid"
+
     init(items: [BenchmarkItem], imageSource: any ImageSource, harness: BenchmarkHarness) {
         self.items = items
         self.imageSource = imageSource
@@ -43,22 +49,33 @@ final class RuntimePickerViewController: UITableViewController {
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
     }
 
-    override func numberOfSections(in tableView: UITableView) -> Int { 2 }
+    override func numberOfSections(in tableView: UITableView) -> Int { 3 }
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        section == 0 ? runtimes.count : Self.streamRowCount
+        switch section {
+        case 0: return runtimes.count
+        case 1: return Self.streamRowCount
+        default: return 1
+        }
     }
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        section == 0 ? nil : Self.streamSectionTitle
+        switch section {
+        case 0: return nil
+        case 1: return Self.streamSectionTitle
+        default: return Self.gridSectionTitle
+        }
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath)
-        if indexPath.section == 0 {
+        switch indexPath.section {
+        case 0:
             cell.textLabel?.text = runtimes[indexPath.row].title
-        } else {
+        case 1:
             cell.textLabel?.text = indexPath.row == 0 ? Self.streamRowTitle : Self.streamDeferralRowTitle
+        default:
+            cell.textLabel?.text = Self.gridRowTitle
         }
         cell.accessoryType = .disclosureIndicator
         return cell
@@ -66,7 +83,12 @@ final class RuntimePickerViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        guard indexPath.section == 0 else {
+        switch indexPath.section {
+        case 0:
+            let runtime = runtimes[indexPath.row].runtime
+            let vc = makeRuntimeVC(runtime: runtime)
+            navigationController?.pushViewController(vc, animated: true)
+        case 1:
             // VelocityUI-0tbi: hot-rasterize/rate/text-only now read from LaunchArguments (were
             // hardcoded before this bead) — without this, configs C (--hot-rasterize off) and D
             // (--stream-rate 5) from the bead's measurement protocol had no manual/on-device path
@@ -81,11 +103,10 @@ final class RuntimePickerViewController: UITableViewController {
                 tokensPerSecond: args.streamTokensPerSecond
             )
             navigationController?.pushViewController(vc, animated: true)
-            return
+        default:
+            let vc = VelocityUIGridRuntimeViewController(items: items, harness: harness)
+            navigationController?.pushViewController(vc, animated: true)
         }
-        let runtime = runtimes[indexPath.row].runtime
-        let vc = makeRuntimeVC(runtime: runtime)
-        navigationController?.pushViewController(vc, animated: true)
     }
 
     private func makeRuntimeVC(runtime: LaunchArguments.Runtime) -> UIViewController {

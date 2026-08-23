@@ -179,6 +179,20 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// without needing to round-trip through `RenderPipeline`/`ImageActor`.
     private(set) var _lastScrollDirection: ScrollDirection = .down
 
+    /// Mirrors the `visRange` computed at the top of `updateVisibleCells()` — the range
+    /// FeedScrollView actually used to mount cells for this layout pass. Lets a test compare the
+    /// real wired read path against an independently-computed oracle, instead of only inferring
+    /// the mounted range indirectly from cell-layer presence.
+    private(set) var _lastVisibleRange: Range<Int> = 0..<0
+
+    /// Count of currently-mounted cells. Test-only observability for asserting the mounted set
+    /// stays bounded to the working-range window rather than growing with total item count.
+    var _visibleCellCount: Int { visibleCells.count }
+
+    /// `WorkingRange.currentRangeStart` passthrough — `workingRange` itself is a private
+    /// FeedScrollView property, unreachable from tests without this accessor.
+    var _debugWorkingRangeStart: Int { workingRange.currentRangeStart }
+
     /// Branch counters for `AsyncFeed.itemsDiffer`'s buffer-identity fast path (case b, O(1))
     /// vs the `Equatable` deep-comparison fallback (case c, O(n)). Incremented by `itemsDiffer`
     /// itself (a different file in the same module — not `private(set)`, so it can assign here).
@@ -1329,6 +1343,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             viewportTop: viewportTop,
             viewportBottom: viewportBottom
         )
+        #if canImport(XCTest)
+        _lastVisibleRange = visRange
+        #endif
 
         // Keep-range for recycle decisions: index-based, allocation-free.
         let keepStart = max(0, visRange.lowerBound - prefetchBehindCount)
