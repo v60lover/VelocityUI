@@ -31,10 +31,24 @@ enum StreamDataset {
         // the reproducible prose run, so it never shifts an existing block index.
         chunks += literal("Streaming benchmark response\n")
         chunks += literal("===\n")
+        chunks += markdownFeatureShowcase()
         chunks += literal("\n")
         chunks += prose(sentenceCount: 5, rng: &rng)
         chunks += literal("\n\n")
-        chunks += markdownFeatureShowcase()
+        chunks += prose(sentenceCount: 5, rng: &rng)
+        chunks += literal("\n\n")
+        chunks += prose(sentenceCount: 5, rng: &rng)
+        chunks += literal("\n\n")
+        chunks += prose(sentenceCount: 5, rng: &rng)
+        chunks += literal("\n\n")
+        chunks += prose(sentenceCount: 5, rng: &rng)
+        chunks += literal("\n\n")
+        chunks += prose(sentenceCount: 5, rng: &rng)
+        chunks += literal("\n\n")
+        chunks += prose(sentenceCount: 10, rng: &rng)
+        chunks += literal("\n\n")
+        chunks += prose(sentenceCount: 5, rng: &rng)
+        chunks += literal("\n\n")
         return chunks
     }
 
@@ -73,12 +87,12 @@ enum StreamDataset {
         result.reserveCapacity(textNodes.count + (parser.frontier / 2) + 1)
         for (index, node) in textNodes.enumerated() {
             result.append(node)
-//            if index >= imageAfterBlockIndex, index.isMultiple(of: 2) == false, parser.frontier > index {
-//                result.append(
-//                    AsyncImageNode(url: imageURL, aspectRatio: 16.0 / 9.0, contentMode: .fill)
-//                        .renderID("stream-image-after-\(index)")
-//                )
-//            }
+            if index >= imageAfterBlockIndex, index.isMultiple(of: 2) == false, parser.frontier > index, ![0, 1, 2, 3].contains(index) {
+                result.append(
+                    AsyncImageNode(url: imageURL, aspectRatio: 16.0 / 9.0, contentMode: .fill)
+                        .renderID("stream-image-after-\(index)")
+                )
+            }
 //            if index == ruleAfterBlockIndex, parser.frontier > ruleAfterBlockIndex {
 //                result.append(SpacerNode(minLength: 12).renderID("stream-rule-after-\(index)"))
 //            }
