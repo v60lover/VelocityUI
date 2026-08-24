@@ -290,4 +290,114 @@ final class IncrementalMarkdownParserExtensionsTests: XCTestCase {
             InlineRun(text: " item", style: [], url: nil),
         ], "the '- ' marker must never leak into the tokenized runs")
     }
+
+    // MARK: - VelocityUI-fzvf.2: InlineRun -> TextRun mapping onto TextDescriptor.runs
+
+    private func descriptor(for markdown: String) -> TextDescriptor {
+        var parser = IncrementalMarkdownParser()
+        parser.append(markdown)
+        let blocks = parser.blockList(itemID: "msg", width: 300)
+        guard case .text(let descriptor) = blocks[0].fragment.content else {
+            fatalError("must render as .text")
+        }
+        return descriptor
+    }
+
+    /// Content must be rebuilt from the tokenized runs, not the raw markdown source — the bug
+    /// this bead fixes: markdown delimiters used to ride straight through into rendered content.
+    func testMixedInlineMarkdown_ContentHasNoLeftoverDelimitersAndRunsCoverItExactly() {
+        let d = descriptor(for: "**bold** *italic* ***both*** `code` ~~strike~~ [link](https://example.com)\n\n")
+        XCTAssertFalse(d.content.contains("*"), "asterisks must not leak into rendered content")
+        XCTAssertFalse(d.content.contains("`"), "backticks must not leak into rendered content")
+        XCTAssertFalse(d.content.contains("~"), "tildes must not leak into rendered content")
+        XCTAssertFalse(d.content.contains("["), "link brackets must not leak into rendered content")
+        let totalRunLength = d.runs.reduce(0) { $0 + $1.length }
+        XCTAssertEqual(totalRunLength, d.content.utf16.count, "run lengths must sum to exactly the rendered content")
+    }
+
+    func testBold_MapsToBoldWeight() {
+        let d = descriptor(for: "**bold**\n\n")
+        XCTAssertEqual(d.runs.count, 1)
+        XCTAssertEqual(d.runs[0].font.weight, VFontDescriptor.boldWeight)
+    }
+
+    func testItalic_MapsToItalicTraitAtRegularWeight() {
+        let d = descriptor(for: "*italic*\n\n")
+        XCTAssertEqual(d.runs.count, 1)
+        XCTAssertTrue(d.runs[0].font.traits.contains(.italic))
+        XCTAssertEqual(d.runs[0].font.weight, VFontDescriptor.regularWeight)
+    }
+
+    func testBoldItalic_MapsToBoldWeightAndItalicTraitTogether() {
+        let d = descriptor(for: "***both***\n\n")
+        XCTAssertEqual(d.runs.count, 1)
+        XCTAssertEqual(d.runs[0].font.weight, VFontDescriptor.boldWeight)
+        XCTAssertTrue(d.runs[0].font.traits.contains(.italic))
+    }
+
+    func testInlineCode_MapsToMonoFamilyAndBackgroundPill() {
+        let d = descriptor(for: "`code`\n\n")
+        XCTAssertEqual(d.runs.count, 1)
+        XCTAssertEqual(d.runs[0].font.family, "Menlo")
+        XCTAssertNotNil(d.runs[0].backgroundColor, "inline code must carry a background pill drawn into the bitmap")
+    }
+
+    func testStrikethrough_SetsStrikethroughStyle() {
+        let d = descriptor(for: "~~strike~~\n\n")
+        XCTAssertEqual(d.runs.count, 1)
+        XCTAssertEqual(d.runs[0].strikethroughStyle, VUnderlineStyle.single.rawValue)
+    }
+
+    func testLink_CarriesURLAndRecolors() {
+        let d = descriptor(for: "[tap me](https://example.com)\n\n")
+        XCTAssertEqual(d.runs.count, 1)
+        XCTAssertEqual(d.runs[0].linkURL, URL(string: "https://example.com"))
+        XCTAssertNotEqual(d.runs[0].color, VColorDescriptor.primary, "a link must recolor away from the base ink color")
+    }
+
+    /// The nested-style acceptance criterion: a code span inside bold text must render BOTH —
+    /// bold weight AND the mono family + pill, not just one or the other.
+    func testNestedBoldContainingCode_RendersBothStyles() {
+        let d = descriptor(for: "**bold `code` text**\n\n")
+        guard let codeRun = d.runs.first(where: { $0.font.family == "Menlo" }) else {
+            return XCTFail("must contain a run carrying the mono family")
+        }
+        XCTAssertEqual(codeRun.font.weight, VFontDescriptor.boldWeight, "the nested code span must keep the enclosing bold weight")
+        XCTAssertNotNil(codeRun.backgroundColor, "the nested code span must still carry its background pill")
+    }
+
+    func testListItemPrefix_StaysBaseStyleEvenWhenFirstSpanIsStyled() {
+        var parser = IncrementalMarkdownParser()
+        parser.append("- **bold** item\n\n")
+        let blocks = parser.blockList(itemID: "msg", width: 300)
+        guard case .text(let d) = blocks[0].fragment.content else {
+            return XCTFail("must render as .text")
+        }
+        XCTAssertTrue(d.content.hasPrefix("• "), "the bullet prefix must render before the styled text")
+        XCTAssertEqual(d.runs.first?.length, "• ".utf16.count, "the prefix must be its own leading run")
+        XCTAssertEqual(d.runs.first?.font.weight, VFontDescriptor.regularWeight, "the bullet prefix must never inherit the first span's emphasis")
+    }
+
+    /// Regression guard for the hash-collision bug found while implementing this bead: plain
+    /// "bold" text and "**bold**" markdown both render to the SAME content ("bold"), but they
+    /// must NOT collide onto the same contentHash — HotBlockRasterizerStore/BlockDiff key their
+    /// cached raster off Block.contentHash, so a collision would serve a stale bitmap for one of
+    /// the two after only the other one's styling changed.
+    func testDifferentInlineStylingWithIdenticalRenderedText_ProducesDifferentContentHash() {
+        var plainParser = IncrementalMarkdownParser()
+        plainParser.append("bold\n\n")
+        let plainBlock = plainParser.blockList(itemID: "msg", width: 300)[0]
+
+        var boldParser = IncrementalMarkdownParser()
+        boldParser.append("**bold**\n\n")
+        let boldBlock = boldParser.blockList(itemID: "msg", width: 300)[0]
+
+        guard case .text(let plainDescriptor) = plainBlock.fragment.content,
+              case .text(let boldDescriptor) = boldBlock.fragment.content else {
+            return XCTFail("both must render as .text")
+        }
+        XCTAssertEqual(plainDescriptor.content, boldDescriptor.content, "both must render to the same visible text")
+        XCTAssertNotEqual(plainBlock.contentHash, boldBlock.contentHash,
+            "identical rendered text with different inline styling must not collide onto the same contentHash")
+    }
 }

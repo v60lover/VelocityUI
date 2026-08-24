@@ -225,6 +225,57 @@ final class MultiRunTextDescriptorTests: XCTestCase {
         XCTAssertNotEqual(regularHasher.finalize(), boldHasher.finalize())
     }
 
+    // MARK: - VelocityUI-fzvf.2: mixed markdown through the real parser pipeline
+
+    /// The bead's own acceptance criterion, driven end to end: parse mixed markdown, then hold
+    /// the same measure == render parity contract every other TextDescriptor is held to.
+    func testMixedMarkdownThroughParser_MeasuredEqualsRenderedWithinOnePoint() {
+        var parser = IncrementalMarkdownParser()
+        parser.append("**bold** *italic* ***both*** `code` ~~strike~~ [link](https://example.com)\n\n")
+        let blocks = parser.blockList(itemID: "msg", width: 400)
+        guard case .text(let descriptor) = blocks[0].fragment.content else {
+            return XCTFail("must render as .text")
+        }
+        XCTAssertFalse(descriptor.runs.isEmpty)
+
+        let measureCtx = TextMeasurementContext()
+        let measured = measureCtx.measure(descriptor, width: 400)
+        XCTAssertGreaterThan(measured.width, 0)
+        XCTAssertGreaterThan(measured.height, 0)
+
+        guard let image = rasterizeText(descriptor, size: measured) else {
+            XCTFail("rasterizeText returned nil for a mixed-markdown descriptor"); return
+        }
+        let inkHeight = actualContentHeight(in: image)
+        XCTAssertLessThanOrEqual(
+            inkHeight, measured.height + 1,
+            "mixed-markdown ink \(inkHeight)pt overflowed measured \(measured.height)pt by more than 1pt"
+        )
+    }
+
+    /// Data-plumbing half of "link hit-testing returns the right URL": a later hit-test pass
+    /// (InteractionOverlay-based tap routing, VelocityUI-b6u, not yet built) resolves taps against
+    /// exactly this `.link` attribute — this proves the attribute lands at the right range with
+    /// the right URL through the real parser -> TextDescriptor pipeline, not just a hand-built run.
+    func testLinkThroughParser_AttributedStringCarriesCorrectURLAtLinkRange() {
+        var parser = IncrementalMarkdownParser()
+        parser.append("before [tap me](https://example.com) after\n\n")
+        let blocks = parser.blockList(itemID: "msg", width: 400)
+        guard case .text(let descriptor) = blocks[0].fragment.content else {
+            return XCTFail("must render as .text")
+        }
+
+        let linkRange = (descriptor.content as NSString).range(of: "tap me")
+        XCTAssertNotEqual(linkRange.location, NSNotFound)
+
+        let attrs = descriptor.attributedString
+        let resolved = attrs.attribute(.link, at: linkRange.location, effectiveRange: nil) as? URL
+        XCTAssertEqual(resolved, URL(string: "https://example.com"))
+
+        let beforeLink = attrs.attribute(.link, at: 0, effectiveRange: nil) as? URL
+        XCTAssertNil(beforeLink, "text outside the link span must not carry the link attribute")
+    }
+
     // MARK: - Helpers
 
     /// Mirrors TextAttributeBuilderTests' helper of the same shape.

@@ -235,16 +235,20 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
 
     /// A block's rendered text plus its font — shared by `makeDescriptor` and `renderNodes`
     /// so the two representations can't silently diverge. Color/line-break are each
-    /// caller's own separate default.
+    /// caller's own separate default. `runs` is empty for kinds `tokenizableRuns` never
+    /// tokenizes (codeFence/tableRow/thematicBreak) or when `parsed.runs` itself is empty —
+    /// `renderNodes` (TextNode has no multi-run support yet) ignores it.
     struct StyledText {
         var content: String
         var font: VFontDescriptor
+        var runs: [TextRun] = []
     }
 
     static func style(_ parsed: ParsedMDBlock) -> StyledText {
         let size: CGFloat
         let weight: Int
         var content = parsed.text
+        var prefix = ""
         switch parsed.kind {
         case .heading(let level):
             size = CGFloat(max(15, 28 - (level - 1) * 3))
@@ -270,8 +274,8 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             size = 20
             weight = VFontDescriptor.regularWeight
             let indent = String(repeating: "  ", count: depth)
-            let marker = ordered ? "\(number). " : "• "
-            content = indent + marker + Self.stripListMarker(content)
+            prefix = indent + (ordered ? "\(number). " : "• ")
+            content = Self.stripListMarker(content)
         case .blockquote:
             size = 20
             weight = VFontDescriptor.regularWeight
@@ -282,23 +286,107 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             size = 20
             weight = VFontDescriptor.regularWeight
         }
-        return StyledText(content: content, font: VFontDescriptor(size: size, weight: weight))
+        let font = VFontDescriptor(size: size, weight: weight)
+        let baseColor = VColorDescriptor.primary
+        let (finalContent, runs) = Self.styledContentAndRuns(
+            parsed, fallbackContent: content, prefix: prefix, baseFont: font, baseColor: baseColor
+        )
+        return StyledText(content: finalContent, font: font, runs: runs)
+    }
+
+    /// Folds `parsed.runs` (the tokenized inline spans) into the block's final rendered content
+    /// and matching `TextRun`s. `fallbackContent` — already fence-stripped/marker-stripped by
+    /// `style()` — is used verbatim when `parsed.runs` is empty (codeFence/tableRow/thematicBreak,
+    /// or a tokenizable block whose text tokenized to nothing): those kinds render as single-style
+    /// text, same as before this bead. `prefix` (a listItem's indent + bullet/number) always
+    /// renders in the base style ahead of the tokenized spans, so it never picks up the first
+    /// span's emphasis.
+    private static func styledContentAndRuns(
+        _ parsed: ParsedMDBlock, fallbackContent: String, prefix: String,
+        baseFont: VFontDescriptor, baseColor: VColorDescriptor
+    ) -> (content: String, runs: [TextRun]) {
+        guard !parsed.runs.isEmpty else { return (prefix + fallbackContent, []) }
+
+        var content = prefix
+        var runs: [TextRun] = []
+        if !prefix.isEmpty {
+            runs.append(TextRun(length: prefix.utf16.count, font: baseFont, color: baseColor))
+        }
+        for run in parsed.runs {
+            content += run.text
+            runs.append(Self.textRun(for: run, baseFont: baseFont, baseColor: baseColor))
+        }
+        return (content, runs)
+    }
+
+    /// Subtle background pill for inline code, drawn into the raster via `.backgroundColor` —
+    /// never a CALayer cornerRadius.
+    private static let codeBackgroundColor = VColorDescriptor(red: 0.51, green: 0.55, blue: 0.59, alpha: 0.2)
+    private static let codeFontFamily = "Menlo"
+    /// Matches UIColor.link's light-mode RGB (0, 122, 255).
+    private static let linkColor = VColorDescriptor(red: 0, green: 0.478, blue: 1, alpha: 1)
+
+    /// One `InlineRun`'s markdown emphasis mapped onto a `TextRun` layered over `baseFont`/
+    /// `baseColor`. Bold becomes a heavier weight — `VFontTraits` only defines `.italic`
+    /// (NodeTable.swift:37), so bold is never a symbolic trait. Flags combine freely: a code
+    /// span nested inside bold gets both the heavier weight AND the mono family + pill.
+    private static func textRun(for run: InlineRun, baseFont: VFontDescriptor, baseColor: VColorDescriptor) -> TextRun {
+        var weight = baseFont.weight
+        var traits = baseFont.traits
+        var family = baseFont.family
+        var color = baseColor
+        var backgroundColor: VColorDescriptor?
+        var strikethroughStyle = 0
+        var linkURL: URL?
+
+        if run.style.contains(.bold) {
+            weight = VFontDescriptor.boldWeight
+        }
+        if run.style.contains(.italic) {
+            traits.insert(.italic)
+        }
+        if run.style.contains(.code) {
+            family = Self.codeFontFamily
+            backgroundColor = Self.codeBackgroundColor
+        }
+        if run.style.contains(.strike) {
+            strikethroughStyle = VUnderlineStyle.single.rawValue
+        }
+        if run.style.contains(.link) {
+            color = Self.linkColor
+            linkURL = run.url.flatMap(URL.init(string:))
+        }
+
+        return TextRun(
+            length: run.text.utf16.count,
+            font: VFontDescriptor(size: baseFont.size, weight: weight, family: family, traits: traits),
+            color: color,
+            strikethroughStyle: strikethroughStyle,
+            backgroundColor: backgroundColor,
+            linkURL: linkURL
+        )
     }
 
     private static func makeDescriptor(_ parsed: ParsedMDBlock) -> TextDescriptor {
         let styled = style(parsed)
 
+        // `styled.runs` must fold into the hash: two blocks with identical rendered content but
+        // different inline styling (e.g. plain "bold" vs "**bold**", both rendering to the
+        // content "bold") would otherwise collide onto the same layoutHash/appearanceHash and
+        // serve a stale cached raster from HotBlockRasterizerStore/BlockDiff.
         var hasher = Hasher()
         hasher.combine(parsed.kind)
         hasher.combine(styled.content)
+        hasher.combine(styled.runs)
         let hash = hasher.finalize()
 
         return TextDescriptor(
             content: styled.content,
             font: styled.font,
-            color: VColorDescriptor(red: 0, green: 0, blue: 0, alpha: 1),
+            color: VColorDescriptor.primary,
             lineLimit: nil,
             lineBreakMode: 0,
+            runs: styled.runs,
             layoutHash: hash,
             appearanceHash: hash
         )
