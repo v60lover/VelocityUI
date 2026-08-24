@@ -51,6 +51,16 @@ extension VFontDescriptor {
     /// Regular-weight body text (17pt, weight 0 = UIFont.Weight.regular).
     public static let body = VFontDescriptor(size: 17, weight: 0)
 
+    /// `weight` stores `UIFont.Weight`'s raw `Double`, bit-pattern-encoded into an `Int` (see
+    /// `TextRasteriser.uiFontWeight`, which decodes it back). A plain literal like `4` or `7`
+    /// decodes to a near-zero subnormal, not the weight you meant — use these instead.
+    public static let regularWeight = encodeWeight(0.0)
+    public static let boldWeight = encodeWeight(0.4)
+
+    private static func encodeWeight(_ rawValue: Double) -> Int {
+        Int(Int64(bitPattern: rawValue.bitPattern))
+    }
+
     /// Returns a copy using the given custom font family. Falls back to the system font
     /// deterministically at render time if the family can't be loaded.
     public func family(_ name: String) -> VFontDescriptor {

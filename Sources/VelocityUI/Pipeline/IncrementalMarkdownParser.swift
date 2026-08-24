@@ -13,19 +13,137 @@ public enum MarkdownBlockKind: Sendable, Equatable, Hashable {
     case paragraph
     case heading(level: Int)
     case codeFence(language: String?)
-    case listItem(ordered: Bool)
+    /// `number` is the literal digit run the source used (e.g. `3.` -> 3), meaningless when
+    /// `ordered` is false. `depth` is the nesting level inferred from leading indentation.
+    case listItem(ordered: Bool, number: Int, depth: Int)
     case blockquote
     /// GFM table row — `isHeader` is true only for the row retroactively joined with its
     /// delimiter row. Body rows that follow append with `false`.
     case tableRow(isHeader: Bool)
+    /// A `---`/`***`/`___` rule line.
+    case thematicBreak
+}
+
+/// A styled span within a text block's content, produced by `inlineRuns(_:)`. `url` is only
+/// meaningful when `style` contains `.link`.
+struct InlineRun: Equatable, Sendable {
+    var text: String
+    var style: StyleFlags
+    var url: String?
+}
+
+/// Inline markdown emphasis a run can carry, independent of the block-level `MarkdownBlockKind`.
+/// Mirrors `VFontTraits`'s OptionSet shape (NodeTable.swift).
+struct StyleFlags: OptionSet, Sendable, Hashable {
+    let rawValue: Int
+
+    init(rawValue: Int) {
+        self.rawValue = rawValue
+    }
+
+    static let bold = StyleFlags(rawValue: 1 << 0)
+    static let italic = StyleFlags(rawValue: 1 << 1)
+    static let code = StyleFlags(rawValue: 1 << 2)
+    static let strike = StyleFlags(rawValue: 1 << 3)
+    static let link = StyleFlags(rawValue: 1 << 4)
+}
+
+/// Tokenizes one text block's content into styled spans. Pure and deterministic: toggles a
+/// `StyleFlags` accumulator on delimiter runs, treats code spans as literal, and recurses into
+/// `[text](url)` bodies for their own emphasis. Unclosed/malformed syntax degrades to literal
+/// text instead of mis-nesting.
+nonisolated func inlineRuns(_ text: String) -> [InlineRun] {
+    var runs: [InlineRun] = []
+    var buffer = ""
+    var flags: StyleFlags = []
+
+    func flush() {
+        guard !buffer.isEmpty else { return }
+        runs.append(InlineRun(text: buffer, style: flags, url: nil))
+        buffer = ""
+    }
+
+    var chars = Substring(text)
+    while !chars.isEmpty {
+        if chars.hasPrefix("***") || chars.hasPrefix("___") {
+            flush()
+            flags.formSymmetricDifference([.bold, .italic])
+            chars = chars.dropFirst(3)
+            continue
+        }
+        if chars.hasPrefix("**") || chars.hasPrefix("__") {
+            flush()
+            flags.formSymmetricDifference(.bold)
+            chars = chars.dropFirst(2)
+            continue
+        }
+        if chars.hasPrefix("~~") {
+            flush()
+            flags.formSymmetricDifference(.strike)
+            chars = chars.dropFirst(2)
+            continue
+        }
+        if let first = chars.first, first == "*" || first == "_" {
+            flush()
+            flags.formSymmetricDifference(.italic)
+            chars = chars.dropFirst(1)
+            continue
+        }
+        if chars.first == "`" {
+            let markerLen = chars.prefix { $0 == "`" }.count
+            let marker = String(repeating: "`", count: markerLen)
+            let afterOpen = chars.dropFirst(markerLen)
+            if let closeRange = afterOpen.range(of: marker) {
+                flush()
+                let code = String(afterOpen[afterOpen.startIndex..<closeRange.lowerBound])
+                runs.append(InlineRun(text: code, style: flags.union(.code), url: nil))
+                chars = afterOpen[closeRange.upperBound...]
+                continue
+            }
+            // No matching close yet — still streaming. Treat the marker literally.
+            buffer.append(contentsOf: chars.prefix(markerLen))
+            chars = chars.dropFirst(markerLen)
+            continue
+        }
+        if chars.first == "[" {
+            if let closeBracket = chars.dropFirst().firstIndex(of: "]") {
+                let afterBracket = chars.index(after: closeBracket)
+                if afterBracket < chars.endIndex, chars[afterBracket] == "(",
+                   let closeParen = chars[afterBracket...].firstIndex(of: ")") {
+                    let linkText = String(chars[chars.index(after: chars.startIndex)..<closeBracket])
+                    let linkURL = String(chars[chars.index(after: afterBracket)..<closeParen])
+                    flush()
+                    let innerRuns = inlineRuns(linkText)
+                    if innerRuns.isEmpty {
+                        runs.append(InlineRun(text: "", style: flags.union(.link), url: linkURL))
+                    } else {
+                        for inner in innerRuns {
+                            runs.append(InlineRun(text: inner.text, style: flags.union(inner.style).union(.link), url: linkURL))
+                        }
+                    }
+                    chars = chars[chars.index(after: closeParen)...]
+                    continue
+                }
+            }
+            buffer.append("[")
+            chars = chars.dropFirst()
+            continue
+        }
+        buffer.append(chars.first!)
+        chars = chars.dropFirst()
+    }
+    flush()
+    return runs
 }
 
 /// One markdown block the incremental parser has classified: a kind plus its raw source text
 /// (lines joined by `\n`, marker/underline syntax stripped where it isn't part of the rendered
-/// content — e.g. a setext `===` underline or a table delimiter row).
+/// content — e.g. a setext `===` underline or a table delimiter row) plus its tokenized inline
+/// spans (empty for kinds that don't render as free-form styled text).
 struct ParsedMDBlock: Equatable {
     var kind: MarkdownBlockKind
     var text: String
+    var runs: [InlineRun] = []
 }
 
 // MARK: - IncrementalMarkdownParser
@@ -130,10 +248,10 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         switch parsed.kind {
         case .heading(let level):
             size = CGFloat(max(15, 28 - (level - 1) * 3))
-            weight = 7  // bold
+            weight = VFontDescriptor.boldWeight
         case .codeFence:
             size = 20
-            weight = 4
+            weight = VFontDescriptor.regularWeight
             // Strip the fence marker lines. The opening line always exists; only drop the
             // closing line when it's actually shaped like one — otherwise a still-streaming
             // fence would hide its most recently typed line.
@@ -147,17 +265,22 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             content = lines.joined(separator: "\n")
         case .tableRow:
             size = 20
-            weight = 4
-        case .listItem:
+            weight = VFontDescriptor.regularWeight
+        case .listItem(let ordered, let number, let depth):
             size = 20
-            weight = 4
-            content = "• " + Self.stripListMarker(content)
+            weight = VFontDescriptor.regularWeight
+            let indent = String(repeating: "  ", count: depth)
+            let marker = ordered ? "\(number). " : "• "
+            content = indent + marker + Self.stripListMarker(content)
         case .blockquote:
             size = 20
-            weight = 4
+            weight = VFontDescriptor.regularWeight
         case .paragraph:
             size = 20
-            weight = 4
+            weight = VFontDescriptor.regularWeight
+        case .thematicBreak:
+            size = 20
+            weight = VFontDescriptor.regularWeight
         }
         return StyledText(content: content, font: VFontDescriptor(size: size, weight: weight))
     }
@@ -186,6 +309,20 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         s = s.drop { $0 == " " }
         s = s.drop { $0 == "-" || $0 == "*" || $0 == "+" || $0.isNumber || $0 == "." || $0 == ")" }
         return s.drop { $0 == " " }.description
+    }
+
+    /// listItem tokenizes the same marker-stripped text `style()` renders, via the same
+    /// `stripListMarker` helper, so runs never disagree with what's painted. codeFence/tableRow/
+    /// thematicBreak never render as free-form styled text, so they get no runs.
+    private static func tokenizableRuns(for kind: MarkdownBlockKind, text: String) -> [InlineRun] {
+        switch kind {
+        case .paragraph, .heading, .blockquote:
+            return inlineRuns(text)
+        case .listItem:
+            return inlineRuns(Self.stripListMarker(text))
+        case .codeFence, .tableRow, .thematicBreak:
+            return []
+        }
     }
 
     /// True when `line` is a run of >= 3 backticks or tildes (CommonMark's fence-marker
@@ -237,7 +374,8 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
 
         func finalizeOpenBlock() {
             guard let kind = openKind, !openLines.isEmpty else { return }
-            blocks.append(ParsedMDBlock(kind: kind, text: openLines.map(String.init).joined(separator: "\n")))
+            let text = openLines.map(String.init).joined(separator: "\n")
+            blocks.append(ParsedMDBlock(kind: kind, text: text, runs: Self.tokenizableRuns(for: kind, text: text)))
             openKind = nil
             openLines = []
         }
@@ -248,11 +386,19 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         func leadingSpaces(_ line: Substring) -> Int {
             line.prefix { $0 == " " }.count
         }
-        func isFenceOpen(_ line: Substring) -> Substring? {
+        func isFenceOpen(_ line: Substring) -> (marker: Substring, language: String?)? {
             let trimmed = line.drop { $0 == " " }
-            if trimmed.hasPrefix("```") { return trimmed.prefix { $0 == "`" } }
-            if trimmed.hasPrefix("~~~") { return trimmed.prefix { $0 == "~" } }
-            return nil
+            let marker: Substring
+            if trimmed.hasPrefix("```") {
+                marker = trimmed.prefix { $0 == "`" }
+            } else if trimmed.hasPrefix("~~~") {
+                marker = trimmed.prefix { $0 == "~" }
+            } else {
+                return nil
+            }
+            let info = trimmed.dropFirst(marker.count).trimmingCharacters(in: .whitespaces)
+            let language = info.split(separator: " ").first.map(String.init)
+            return (marker, language)
         }
         func isFenceClose(_ line: Substring, opening: Substring) -> Bool {
             guard let openChar = opening.first else { return false }
@@ -265,13 +411,16 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             guard count >= opening.count else { return false }
             return trimmed.allSatisfy { $0 == " " || $0 == "\t" }
         }
-        func isListMarker(_ line: Substring) -> Bool {
-            guard leadingSpaces(line) <= 3 else { return false }
+        func listMarkerInfo(_ line: Substring) -> (ordered: Bool, number: Int, depth: Int)? {
+            let spaces = leadingSpaces(line)
+            guard spaces <= 3 else { return nil }
             let rest = line.drop { $0 == " " }
-            guard let first = rest.first else { return false }
+            guard let first = rest.first else { return nil }
+            let depth = spaces / 2
             if "-*+".contains(first) {
                 let after = rest.index(after: rest.startIndex)
-                return after < rest.endIndex && rest[after] == " "
+                guard after < rest.endIndex, rest[after] == " " else { return nil }
+                return (ordered: false, number: 0, depth: depth)
             }
             var idx = rest.startIndex
             var digits = 0
@@ -279,9 +428,50 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
                 idx = rest.index(after: idx)
                 digits += 1
             }
-            guard digits > 0, idx < rest.endIndex, rest[idx] == "." || rest[idx] == ")" else { return false }
+            guard digits > 0, idx < rest.endIndex, rest[idx] == "." || rest[idx] == ")" else { return nil }
             let after = rest.index(after: idx)
-            return after < rest.endIndex && rest[after] == " "
+            guard after < rest.endIndex, rest[after] == " " else { return nil }
+            let number = Int(rest[rest.startIndex..<idx]) ?? 1
+            return (ordered: true, number: number, depth: depth)
+        }
+        func isListMarker(_ line: Substring) -> Bool {
+            listMarkerInfo(line) != nil
+        }
+        func isATXHeading(_ line: Substring) -> (level: Int, content: String)? {
+            guard leadingSpaces(line) == 0, line.first == "#" else { return nil }
+            var rest = line
+            var level = 0
+            while rest.first == "#" {
+                rest = rest.dropFirst()
+                level += 1
+                if level > 6 { return nil }
+            }
+            guard rest.isEmpty || rest.first == " " else { return nil }
+            var text = rest.drop { $0 == " " }
+            while let last = text.last, last == " " || last == "\t" {
+                text = text.dropLast()
+            }
+            // Optional CommonMark closing sequence: a trailing run of '#' preceded by
+            // whitespace (or nothing but the run itself) is stripped too.
+            var probe = text
+            var trailingHashes = 0
+            while probe.last == "#" {
+                probe = probe.dropLast()
+                trailingHashes += 1
+            }
+            if trailingHashes > 0, probe.isEmpty || probe.last == " " || probe.last == "\t" {
+                text = probe
+                while let last = text.last, last == " " || last == "\t" {
+                    text = text.dropLast()
+                }
+            }
+            return (level, String(text))
+        }
+        func isThematicBreak(_ line: Substring) -> Bool {
+            guard leadingSpaces(line) == 0 else { return false }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.count >= 3, let first = trimmed.first, "-*_".contains(first) else { return false }
+            return trimmed.allSatisfy { $0 == first }
         }
         func isBlockquoteMarker(_ line: Substring) -> Bool {
             guard leadingSpaces(line) <= 3 else { return false }
@@ -332,19 +522,39 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
                 continue
             }
 
-            if let marker = isFenceOpen(line) {
+            if let (marker, language) = isFenceOpen(line) {
                 finalizeOpenBlock()
                 inContainer = false
                 containerBlankSeen = false
                 inFence = true
                 fenceMarker = marker
-                openKind = .codeFence(language: nil)
+                openKind = .codeFence(language: language)
                 openLines = [line]
+                continue
+            }
+
+            if let (level, headingText) = isATXHeading(line) {
+                finalizeOpenBlock()
+                inContainer = false
+                containerBlankSeen = false
+                openKind = .heading(level: level)
+                openLines = [Substring(headingText)]
+                finalizeOpenBlock()
                 continue
             }
 
             if case .paragraph = openKind, openLines.count == 1, let level = isSetextUnderline(line) {
                 openKind = .heading(level: level)
+                continue
+            }
+
+            if isThematicBreak(line) {
+                finalizeOpenBlock()
+                inContainer = false
+                containerBlankSeen = false
+                openKind = .thematicBreak
+                openLines = [line]
+                finalizeOpenBlock()
                 continue
             }
 
@@ -370,13 +580,11 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
                 containerBlankCut = nil
             }
 
-            if isListMarker(line) {
+            if let info = listMarkerInfo(line) {
                 finalizeOpenBlock()
                 inContainer = true
                 containerBlankSeen = false
-                let rest = line.drop { $0 == " " }
-                let ordered = rest.first?.isNumber == true
-                openKind = .listItem(ordered: ordered)
+                openKind = .listItem(ordered: info.ordered, number: info.number, depth: info.depth)
                 openLines = [line]
                 finalizeOpenBlock()  // each list marker line is its own block
                 continue
@@ -411,7 +619,8 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         let sealed = Array(blocks[0..<sealedCount])
         var hot = Array(blocks[sealedCount...])
         if let kind = openKind, !openLines.isEmpty {
-            hot.append(ParsedMDBlock(kind: kind, text: openLines.map(String.init).joined(separator: "\n")))
+            let text = openLines.map(String.init).joined(separator: "\n")
+            hot.append(ParsedMDBlock(kind: kind, text: text, runs: Self.tokenizableRuns(for: kind, text: text)))
         }
         return TailParseResult(sealed: sealed, hot: hot, cutIndex: pendingSealCut)
     }

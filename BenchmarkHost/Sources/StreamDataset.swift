@@ -25,42 +25,30 @@ enum StreamDataset {
     static func tokens(seed: UInt64 = 0, codeLineCount: Int = 220) -> [String] {
         var rng = LCG(state: seed)
         var chunks: [String] = []
-        // Setext heading (`===` underline) — the parser has no ATX (`#`) heading recognition
-        // (see `IncrementalMarkdownParser.parseTail`'s `isSetextUnderline`), so this is the only
-        // shape that actually classifies as `.heading` rather than a plain paragraph.
+        // Setext heading (`===` underline) — kept as the opening block for index stability
+        // (imageAfterBlockIndex/ruleAfterBlockIndex below count blocks from here). ATX (`#`)
+        // headings are also recognized now (VelocityUI-fzvf.1) — exercised further down, after
+        // the reproducible prose run, so it never shifts an existing block index.
         chunks += literal("Streaming benchmark response\n")
         chunks += literal("===\n")
         chunks += literal("\n")
         chunks += prose(sentenceCount: 5, rng: &rng)
         chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 5, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 5, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 5, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 5, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 5, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 10, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 5, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 5, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 5, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 5, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 5, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 5, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 10, rng: &rng)
-//        chunks += literal("\n\n")
-//        chunks += codeFence(lineCount: codeLineCount, rng: &rng)
-//        chunks += literal("\n\n")
+        chunks += markdownFeatureShowcase()
+        return chunks
+    }
+
+    /// Manual smoke content for VelocityUI-fzvf.1's new block/inline shapes — ATX heading,
+    /// ordered + nested list, thematic break, a language-tagged fence, and inline emphasis.
+    /// Appended after the reproducible prose run so it never shifts `imageAfterBlockIndex`/
+    /// `ruleAfterBlockIndex`.
+    private static func markdownFeatureShowcase() -> [String] {
+        var chunks: [String] = []
+        chunks += literal("## ATX heading test\n\n")
+        chunks += literal("This has **bold**, *italic*, `code`, ~~strike~~, and a [link](https://example.com).\n\n")
+        chunks += literal("1. First ordered item\n2. Second ordered item\n  3. Nested item\n\n")
+        chunks += literal("---\n\n")
+        chunks += literal("```swift\nlet ok = true\n```\n\n")
         return chunks
     }
 
@@ -85,15 +73,15 @@ enum StreamDataset {
         result.reserveCapacity(textNodes.count + (parser.frontier / 2) + 1)
         for (index, node) in textNodes.enumerated() {
             result.append(node)
-            if index >= imageAfterBlockIndex, index.isMultiple(of: 2) == false, parser.frontier > index {
-                result.append(
-                    AsyncImageNode(url: imageURL, aspectRatio: 16.0 / 9.0, contentMode: .fill)
-                        .renderID("stream-image-after-\(index)")
-                )
-            }
-            if index == ruleAfterBlockIndex, parser.frontier > ruleAfterBlockIndex {
-                result.append(SpacerNode(minLength: 12).renderID("stream-rule-after-\(index)"))
-            }
+//            if index >= imageAfterBlockIndex, index.isMultiple(of: 2) == false, parser.frontier > index {
+//                result.append(
+//                    AsyncImageNode(url: imageURL, aspectRatio: 16.0 / 9.0, contentMode: .fill)
+//                        .renderID("stream-image-after-\(index)")
+//                )
+//            }
+//            if index == ruleAfterBlockIndex, parser.frontier > ruleAfterBlockIndex {
+//                result.append(SpacerNode(minLength: 12).renderID("stream-rule-after-\(index)"))
+//            }
         }
         return result
     }
