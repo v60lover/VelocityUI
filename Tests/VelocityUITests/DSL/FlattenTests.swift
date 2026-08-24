@@ -221,6 +221,19 @@ final class FlattenTests: XCTestCase {
         XCTAssertEqual(d.lineSpacing, 4)
     }
 
+    /// VelocityUI-qmx5: `runs` must round-trip from TextNode through flatten() into TextDescriptor —
+    /// this is the wiring that closes the renderNodes → Flattener side of the styled-runs bridge.
+    @MainActor func testFlatten_textNode_mapsRuns() {
+        let runs = [
+            TextRun(length: 4, font: VFontDescriptor(size: 20, weight: VFontDescriptor.boldWeight), color: .primary),
+            TextRun(length: 3, font: VFontDescriptor(size: 20, weight: 0), color: .primary, strikethroughStyle: 1)
+        ]
+        let node = TextNode("boldrest", runs: runs)
+        let table = flatten(VStackNode { node }, itemID: "i")
+        guard case .text(let d) = table.nodes[1] else { XCTFail(); return }
+        XCTAssertEqual(d.runs, runs)
+    }
+
     @MainActor func testFlatten_vstackDescriptor_mapsAlignmentSpacingAndHashes() {
         let node = VStackNode(alignment: .trailing, spacing: 12) { TextNode("x") }
         let table = flatten(node, itemID: "i")

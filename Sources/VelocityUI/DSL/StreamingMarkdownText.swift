@@ -17,7 +17,7 @@ extension IncrementalMarkdownParser {
             let (parsed, blockID) = pair
             let styled = Self.style(parsed)
             let lifecycle: BlockLifecycle = index < sealedBlocks.count ? .sealed : .hot
-            return TextNode(styled.content, font: styled.font, blockID: blockID, blockLifecycle: lifecycle)
+            return TextNode(styled.content, font: styled.font, runs: styled.runs, blockID: blockID, blockLifecycle: lifecycle)
         }
     }
 }

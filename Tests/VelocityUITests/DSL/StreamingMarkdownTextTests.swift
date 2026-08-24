@@ -59,6 +59,34 @@ final class StreamingMarkdownTextTests: XCTestCase {
         }
     }
 
+    /// VelocityUI-qmx5: `renderNodes` (flattened through `flatten()` into `TextDescriptor.runs`) and
+    /// `blockList(itemID:width:)` must agree on inline styling (bold/italic/code/strike/link), not
+    /// just plain content — the second half of the parity fzvf.2 established for the plain-text path.
+    @MainActor
+    func testRenderNodes_RunsMatchBlockList_ForInlineStyledMarkdown() {
+        var parser = IncrementalMarkdownParser()
+        parser.append(
+            "**bold** _italic_ `code` ~~strike~~ [link](https://example.com)\n\n"
+        )
+
+        let root = VStackNode { parser.renderNodes }
+        let table = flatten(root, itemID: "msg")
+        let blocks = parser.blockList(itemID: "msg", width: 300)
+
+        let flattenedRuns: [[TextRun]] = table.children(of: 0).compactMap { index in
+            guard case .text(let d) = table.nodes[index] else { return nil }
+            return d.runs
+        }
+        let blockRuns: [[TextRun]] = blocks.compactMap { block in
+            guard case .text(let d) = block.fragment.content else { return nil }
+            return d.runs
+        }
+
+        XCTAssertEqual(flattenedRuns.count, blockRuns.count, "Precondition: same block count on both sides")
+        XCTAssertFalse(flattenedRuns.allSatisfy(\.isEmpty), "Precondition: fixture must actually produce styled runs")
+        XCTAssertEqual(flattenedRuns, blockRuns)
+    }
+
     // MARK: - Equatable
 
     func testEquatable_SameAppendHistory_AreEqual() {

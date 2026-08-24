@@ -218,6 +218,11 @@ public struct TextNode: RenderNode {
     public let kerning: CGFloat
     /// Extra spacing between lines, in points. 0 = no adjustment.
     public let lineSpacing: CGFloat
+    /// Ordered per-span styling, same shape and precedence as `TextDescriptor.runs`: empty (the
+    /// default) is the legacy single-style path where `font`/`color`/`underlineStyle`/
+    /// `strikethroughStyle` apply to the whole string. Non-empty runs win — those scalar fields
+    /// are ignored for run-covered text.
+    public let runs: [TextRun]
 
     public init(
         _ content: String,
@@ -229,6 +234,7 @@ public struct TextNode: RenderNode {
         strikethroughStyle: VUnderlineStyle = .none,
         kerning: CGFloat = 0,
         lineSpacing: CGFloat = 0,
+        runs: [TextRun] = [],
         blockID: BlockID? = nil,
         blockLifecycle: BlockLifecycle = .positional
     ) {
@@ -243,10 +249,12 @@ public struct TextNode: RenderNode {
         self.strikethroughStyle = strikethroughStyle
         self.kerning = kerning
         self.lineSpacing = lineSpacing
+        self.runs = runs
     }
 
     /// layoutHash covers all properties that affect geometry: content, font metrics
-    /// (size, weight, family, traits), line limit, line break mode, kerning, line spacing.
+    /// (size, weight, family, traits), line limit, line break mode, kerning, line spacing,
+    /// and each run's length + font (the run fields that affect glyph advances/wrapping).
     public var layoutHash: Int {
         var h = Hasher()
         h.combine(content)
@@ -258,16 +266,28 @@ public struct TextNode: RenderNode {
         h.combine(lineBreakMode)
         h.combine(kerning)
         h.combine(lineSpacing)
+        for run in runs {
+            h.combine(run.length)
+            h.combine(run.font)
+        }
         return h.finalize()
     }
 
-    /// appearanceHash covers color and decoration ink (underline/strikethrough) —
-    /// none of these affect glyph advances or line wrapping.
+    /// appearanceHash covers color and decoration ink (underline/strikethrough) — none of these
+    /// affect glyph advances or line wrapping — plus each run's paint-only fields (color,
+    /// underline/strikethrough style, background color, link URL).
     public var appearanceHash: Int {
         var h = Hasher()
         h.combine(color)
         h.combine(underlineStyle)
         h.combine(strikethroughStyle)
+        for run in runs {
+            h.combine(run.color)
+            h.combine(run.underlineStyle)
+            h.combine(run.strikethroughStyle)
+            h.combine(run.backgroundColor)
+            h.combine(run.linkURL)
+        }
         return h.finalize()
     }
 
@@ -275,7 +295,7 @@ public struct TextNode: RenderNode {
         TextNode(
             content, font: newFont, color: color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
             underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
-            kerning: kerning, lineSpacing: lineSpacing, blockID: blockID, blockLifecycle: blockLifecycle
+            kerning: kerning, lineSpacing: lineSpacing, runs: runs, blockID: blockID, blockLifecycle: blockLifecycle
         )
     }
 
@@ -283,7 +303,7 @@ public struct TextNode: RenderNode {
         TextNode(
             content, font: font, color: color, lineLimit: limit, lineBreakMode: lineBreakMode,
             underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
-            kerning: kerning, lineSpacing: lineSpacing, blockID: blockID, blockLifecycle: blockLifecycle
+            kerning: kerning, lineSpacing: lineSpacing, runs: runs, blockID: blockID, blockLifecycle: blockLifecycle
         )
     }
 
@@ -291,7 +311,7 @@ public struct TextNode: RenderNode {
         TextNode(
             content, font: font, color: color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
             underlineStyle: style, strikethroughStyle: strikethroughStyle,
-            kerning: kerning, lineSpacing: lineSpacing, blockID: blockID, blockLifecycle: blockLifecycle
+            kerning: kerning, lineSpacing: lineSpacing, runs: runs, blockID: blockID, blockLifecycle: blockLifecycle
         )
     }
 
@@ -299,7 +319,7 @@ public struct TextNode: RenderNode {
         TextNode(
             content, font: font, color: color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
             underlineStyle: underlineStyle, strikethroughStyle: style,
-            kerning: kerning, lineSpacing: lineSpacing, blockID: blockID, blockLifecycle: blockLifecycle
+            kerning: kerning, lineSpacing: lineSpacing, runs: runs, blockID: blockID, blockLifecycle: blockLifecycle
         )
     }
 
@@ -307,7 +327,7 @@ public struct TextNode: RenderNode {
         TextNode(
             content, font: font, color: color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
             underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
-            kerning: value, lineSpacing: lineSpacing, blockID: blockID, blockLifecycle: blockLifecycle
+            kerning: value, lineSpacing: lineSpacing, runs: runs, blockID: blockID, blockLifecycle: blockLifecycle
         )
     }
 
@@ -315,7 +335,7 @@ public struct TextNode: RenderNode {
         TextNode(
             content, font: font, color: color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
             underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
-            kerning: kerning, lineSpacing: value, blockID: blockID, blockLifecycle: blockLifecycle
+            kerning: kerning, lineSpacing: value, runs: runs, blockID: blockID, blockLifecycle: blockLifecycle
         )
     }
 }

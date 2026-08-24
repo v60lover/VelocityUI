@@ -237,7 +237,8 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
     /// so the two representations can't silently diverge. Color/line-break are each
     /// caller's own separate default. `runs` is empty for kinds `tokenizableRuns` never
     /// tokenizes (codeFence/tableRow/thematicBreak) or when `parsed.runs` itself is empty —
-    /// `renderNodes` (TextNode has no multi-run support yet) ignores it.
+    /// both `makeDescriptor` and `renderNodes` pass it straight through to their respective
+    /// `TextDescriptor`/`TextNode`.
     struct StyledText {
         var content: String
         var font: VFontDescriptor

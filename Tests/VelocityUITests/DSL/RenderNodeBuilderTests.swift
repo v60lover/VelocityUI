@@ -200,6 +200,92 @@ struct NodeHashTests {
         #expect(a.appearanceHash != b.appearanceHash)
     }
 
+    // MARK: TextNode.runs hash rules — one TextRun field differing per test, per VelocityUI-qmx5
+
+    private static let baseRun = TextRun(
+        length: 5, font: VFontDescriptor(size: 17, weight: 0), color: .primary
+    )
+
+    @Test("TextNode: run length change perturbs layoutHash only")
+    func runLengthPerturbsLayoutOnly() {
+        let a = TextNode("hello", runs: [Self.baseRun])
+        let b = TextNode("hello", runs: [TextRun(length: 3, font: Self.baseRun.font, color: Self.baseRun.color)])
+        #expect(a.layoutHash != b.layoutHash)
+        #expect(a.appearanceHash == b.appearanceHash)
+    }
+
+    @Test("TextNode: run font change perturbs layoutHash only")
+    func runFontPerturbsLayoutOnly() {
+        let a = TextNode("hello", runs: [Self.baseRun])
+        let b = TextNode("hello", runs: [
+            TextRun(length: Self.baseRun.length, font: VFontDescriptor(size: 22, weight: 0), color: Self.baseRun.color)
+        ])
+        #expect(a.layoutHash != b.layoutHash)
+        #expect(a.appearanceHash == b.appearanceHash)
+    }
+
+    @Test("TextNode: run color change perturbs appearanceHash only")
+    func runColorPerturbsAppearanceOnly() {
+        let a = TextNode("hello", runs: [Self.baseRun])
+        let b = TextNode("hello", runs: [
+            TextRun(length: Self.baseRun.length, font: Self.baseRun.font, color: .white)
+        ])
+        #expect(a.layoutHash == b.layoutHash)
+        #expect(a.appearanceHash != b.appearanceHash)
+    }
+
+    @Test("TextNode: run underlineStyle change perturbs appearanceHash only")
+    func runUnderlineStylePerturbsAppearanceOnly() {
+        let a = TextNode("hello", runs: [Self.baseRun])
+        let b = TextNode("hello", runs: [
+            TextRun(length: Self.baseRun.length, font: Self.baseRun.font, color: Self.baseRun.color, underlineStyle: 1)
+        ])
+        #expect(a.layoutHash == b.layoutHash)
+        #expect(a.appearanceHash != b.appearanceHash)
+    }
+
+    @Test("TextNode: run strikethroughStyle change perturbs appearanceHash only")
+    func runStrikethroughStylePerturbsAppearanceOnly() {
+        let a = TextNode("hello", runs: [Self.baseRun])
+        let b = TextNode("hello", runs: [
+            TextRun(length: Self.baseRun.length, font: Self.baseRun.font, color: Self.baseRun.color, strikethroughStyle: 1)
+        ])
+        #expect(a.layoutHash == b.layoutHash)
+        #expect(a.appearanceHash != b.appearanceHash)
+    }
+
+    @Test("TextNode: run backgroundColor change perturbs appearanceHash only")
+    func runBackgroundColorPerturbsAppearanceOnly() {
+        let a = TextNode("hello", runs: [Self.baseRun])
+        let b = TextNode("hello", runs: [
+            TextRun(
+                length: Self.baseRun.length, font: Self.baseRun.font, color: Self.baseRun.color,
+                backgroundColor: VColorDescriptor(red: 0.5, green: 0.5, blue: 0.5, alpha: 0.2)
+            )
+        ])
+        #expect(a.layoutHash == b.layoutHash)
+        #expect(a.appearanceHash != b.appearanceHash)
+    }
+
+    @Test("TextNode: run linkURL change perturbs appearanceHash only")
+    func runLinkURLPerturbsAppearanceOnly() {
+        let a = TextNode("hello", runs: [Self.baseRun])
+        let b = TextNode("hello", runs: [
+            TextRun(
+                length: Self.baseRun.length, font: Self.baseRun.font, color: Self.baseRun.color,
+                linkURL: URL(string: "https://example.com")
+            )
+        ])
+        #expect(a.layoutHash == b.layoutHash)
+        #expect(a.appearanceHash != b.appearanceHash)
+    }
+
+    @Test("TextNode: runs survive chained builders")
+    func runsSurviveChainedBuilders() {
+        let node = TextNode("hello", runs: [Self.baseRun]).lineLimit(3).underline()
+        #expect(node.runs == [Self.baseRun])
+    }
+
     // MARK: AsyncImageNode hash rules
 
     @Test("AsyncImageNode: url change perturbs layoutHash")
