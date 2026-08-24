@@ -2,22 +2,109 @@
 
 extension IncrementalMarkdownParser {
 
-    /// Layer-1 DSL bridge: one `TextNode` per block the parser currently holds (sealed blocks then
-    /// the open hot region), styled via the shared `style(_:)` helper.
-    ///
-    /// The parser is caller-owned value-type state, mutated with `.append(_:)` as tokens arrive.
-    /// `renderNodes` re-derives the tree from whatever the parser holds at read time:
+    /// One block's identity/lifecycle plus its parsed content, so a caching owner can decide
+    /// per block whether to reuse a stored `TextNode` or call `style(_:)`.
+    struct RenderableBlock {
+        var blockID: BlockID
+        var isSealed: Bool
+        var parsed: ParsedMDBlock
+    }
+
+    /// Sealed blocks then the open hot region — the raw material `renderNodes` styles into
+    /// `TextNode`s.
+    var renderableBlocks: [RenderableBlock] {
+        zip(sealedBlocks + hotBlocksState, sealedBlockIDs + hotBlockIDs).enumerated().map { index, pair in
+            RenderableBlock(blockID: pair.1, isSealed: index < sealedBlocks.count, parsed: pair.0)
+        }
+    }
+
+    /// Layer-1 DSL bridge: one `TextNode` per block, sealed then hot, re-derived from scratch
+    /// on every read via `style(_:)`.
     ///
     ///     VStackNode(alignment: .leading, spacing: 8) { message.markdownParser.renderNodes }
     ///
-    /// Flattens to a plain `.vstack` of `.text` children, so unchanged blocks reuse
-    /// `FrozenBitmapStore` and only new/changed blocks re-measure per streaming update.
+    /// Fine when block count is bounded (a viewport); for an unboundedly growing transcript use
+    /// `StreamingMarkdownController` below, which memoizes sealed blocks instead.
     public var renderNodes: [any RenderNode] {
-        zip(sealedBlocks + hotBlocksState, sealedBlockIDs + hotBlockIDs).enumerated().map { index, pair in
-            let (parsed, blockID) = pair
-            let styled = Self.style(parsed)
-            let lifecycle: BlockLifecycle = index < sealedBlocks.count ? .sealed : .hot
-            return TextNode(styled.content, font: styled.font, runs: styled.runs, blockID: blockID, blockLifecycle: lifecycle)
+        _renderNodes(theme: .default)
+    }
+
+    /// Themed variant of `renderNodes`. Pass the same `MarkdownTheme` you give the measurement
+    /// path (`blockList(itemID:width:theme:)`) so styled font and measured layout agree.
+    public func renderNodes(theme: MarkdownTheme) -> [any RenderNode] {
+        _renderNodes(theme: theme)
+    }
+
+    private func _renderNodes(theme: MarkdownTheme) -> [any RenderNode] {
+        renderableBlocks.map { block in
+            let styled = Self.style(block.parsed, theme: theme)
+            return TextNode(
+                styled.content, font: styled.font, runs: styled.runs,
+                blockID: block.blockID, blockLifecycle: block.isSealed ? .sealed : .hot
+            )
         }
     }
+}
+
+// MARK: - StreamingMarkdownController
+
+/// Caches `TextNode`s for sealed blocks so `renderNodes` costs O(hot blocks) per read, not
+/// O(blocks appended so far). Lives outside `IncrementalMarkdownParser` on purpose — the parser
+/// stays a pure value type, this cache is Layer-1 DSL state.
+///
+/// Sealed blocks never change (parser contract), so each one is styled once, on the read where
+/// it first appears sealed, then served from cache forever after. The hot tail always rebuilds.
+///
+/// Lifetime matches whatever owns this controller (typically one chat message) — not a
+/// feed-wide collaborator, so it isn't registered on `RenderEnvironment`.
+///
+///     let message = StreamingMarkdownController()
+///     message.append(token)
+///     VStackNode(alignment: .leading, spacing: 8) { message.renderNodes }
+@MainActor
+public final class StreamingMarkdownController {
+    public private(set) var parser: IncrementalMarkdownParser
+    /// Fonts every block styles against. Fixed for this controller's lifetime — set it here at
+    /// construction; sealed blocks are cached, so changing it later won't restyle them.
+    public let theme: MarkdownTheme
+    private var sealedNodes: [BlockID: TextNode] = [:]
+
+    public init(
+        parser: IncrementalMarkdownParser = IncrementalMarkdownParser(),
+        theme: MarkdownTheme = .default
+    ) {
+        self.parser = parser
+        self.theme = theme
+    }
+
+    public func append(_ text: String) {
+        parser.append(text)
+    }
+
+    /// Same shape/order as `IncrementalMarkdownParser.renderNodes`. Sealed + cached -> returned
+    /// as-is. Everything else is built via `style(_:)` and, if sealed, cached.
+    public var renderNodes: [any RenderNode] {
+        parser.renderableBlocks.map { block in
+            if block.isSealed, let cached = sealedNodes[block.blockID] {
+                return cached
+            }
+            #if canImport(XCTest)
+            _styleCallCount += 1
+            #endif
+            let styled = IncrementalMarkdownParser.style(block.parsed, theme: theme)
+            let node = TextNode(
+                styled.content, font: styled.font, runs: styled.runs,
+                blockID: block.blockID, blockLifecycle: block.isSealed ? .sealed : .hot
+            )
+            if block.isSealed {
+                sealedNodes[block.blockID] = node
+            }
+            return node
+        }
+    }
+
+    #if canImport(XCTest)
+    /// Test-only: counts `style()` calls from `renderNodes` — a cache hit must not increment it.
+    private(set) var _styleCallCount: Int = 0
+    #endif
 }

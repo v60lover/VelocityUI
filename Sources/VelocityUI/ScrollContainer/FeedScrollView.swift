@@ -24,7 +24,7 @@ public enum WarmWindow: Sendable, Equatable {
 /// `layer` is a plain CALayer; cell layers are direct sublayers. UIScrollView scrolls by
 /// adjusting `bounds.origin` — no CAScrollLayer override needed.
 @MainActor
-public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView where Item.ID: Sendable {
+public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, UIScrollViewDelegate where Item.ID: Sendable {
 
     // MARK: - Configuration
 
@@ -106,6 +106,13 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// `contentOffset.y` observed on the previous `layoutSubviews` pass. Compared against
     /// the current value each pass to derive `scrollDirection` from a real scroll metric.
     private var lastScrollOffsetY: CGFloat = 0
+
+    /// Content-height growth that was withheld while an edge rubber-band (bounce) was active.
+    /// `resolvedFrames` already reflects this growth — the tail keeps painting; this is only the
+    /// portion not yet written to `contentSize.height`. Committed in one write once the scroll
+    /// leaves the bounce region. Writing `contentSize.height` mid-bounce moves the animation's
+    /// target and jumps the viewport, so the write is deferred, not the paint.
+    private var _deferredContentSizeDelta: CGFloat = 0
 
     /// Direction of travel along the scroll axis, from the sign of the `contentOffset.y` delta.
     /// Holds its last value at rest (avoids flicker at rubber-band edges). Threaded into
@@ -277,6 +284,24 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
     /// `isDragging`/`isDecelerating` can't be set without a live touch. `nil` (default) falls
     /// back to the real UIKit signals.
     var _debugGestureActiveOverride: Bool?
+
+    /// Overrides `isInBounceRegion` for tests, since driving a real edge rubber-band needs a live
+    /// pan gesture. `nil` (default) falls back to the real `contentOffset`/`contentSize` check.
+    var _debugBounceRegionOverride: Bool?
+
+    /// Overrides `isInTopBounceRegion` for tests — the edge distinction that decides whether a
+    /// streamed grow defers its `contentSize` write (top over-pull) or writes it immediately
+    /// (bottom over-pull). `nil` (default) falls back to the real `contentOffset.y < 0` check.
+    var _debugTopBounceRegionOverride: Bool?
+
+    /// Overrides `isScrollAtRest` for tests — the real `isTracking`/`isDragging`/`isDecelerating`
+    /// signals can't be set without a live touch. `nil` (default) falls back to them.
+    var _debugScrollAtRestOverride: Bool?
+
+    /// The pending, not-yet-committed content-height growth accumulated while in the bounce
+    /// region. Non-zero only during an edge over-pull; returns to 0 once the deferred delta is
+    /// flushed. Test-only observability for the defer/flush cycle.
+    var _debugDeferredContentSizeDelta: CGFloat { _deferredContentSizeDelta }
     #endif
 
     // MARK: - Init
@@ -323,6 +348,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         super.init(frame: frame)
         showsVerticalScrollIndicator = true
         showsHorizontalScrollIndicator = false
+        // Self-delegate purely to catch bounce/deceleration end (the deferred-contentSize flush,
+        // below). VelocityUI otherwise makes no use of the scroll delegate.
+        delegate = self
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
         addGestureRecognizer(tap)
 
@@ -386,6 +414,13 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
 
     override public func layoutSubviews() {
         super.layoutSubviews()
+
+        // Commit any height growth withheld during an edge bounce, now that the bounce has
+        // settled — before anything below reads or writes contentSize this pass. The bounce
+        // animation already drives a layoutSubviews pass every frame, so relying on it (rather
+        // than forcing extra passes with setNeedsLayout) is what keeps the main thread free —
+        // forcing layout here would starve the deceleration and hang at the edge.
+        flushDeferredContentSizeIfNeeded()
 
         // Drain any coalesced `items` burst first — refineKnownFrames/updateVisibleCells below
         // read state that only itemsDidChange updates. itemsDidChange clears
@@ -559,7 +594,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                            scale: scale
                        ) {
                         let delta = VerticalLayoutProvider.refineFrames(&resolvedFrames, at: nextIdx, newHeight: result.height)
-                        if delta != 0 { contentSize.height += delta }
+                        applyContentHeightDelta(delta)
                         estimatedIndices.remove(nextIdx)
                         cell.layer.frame = resolvedFrames[nextIdx]
                         // Merge image cache hits with the block-diff's freshly-resolved text
@@ -1008,7 +1043,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         ) else { return false }
 
         let delta = VerticalLayoutProvider.refineFrames(&resolvedFrames, at: lastIdx, newHeight: result.height)
-        if delta != 0 { contentSize.height += delta }
+        applyContentHeightDelta(delta)
         cell.layer.frame = resolvedFrames[lastIdx]
 
         var syncMap = buildSyncMap(for: result.fragments, itemID: newTable.itemID)
@@ -1132,7 +1167,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
             guard realHeight > 0 else { continue }
 
             let delta = VerticalLayoutProvider.refineFrames(&resolvedFrames, at: index, newHeight: realHeight)
-            if delta != 0 { contentSize.height += delta }
+            applyContentHeightDelta(delta)
             refined.append(index)
 
             // Deliver real fragments to cells that were mounted during a WorkingRange miss.
@@ -1162,9 +1197,93 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
         }
     }
 
+    /// True while the scroll sits in an edge rubber-band — over-pulled past the top (`< 0`) or
+    /// bottom (`> maxOffset`) end. Mutating `contentSize.height` here moves the in-flight bounce
+    /// animation's target, so UIScrollView re-solves and the viewport visibly jumps. Height
+    /// writes are deferred until this is false again. False for all normal mid-content scrolling
+    /// and inertia, so those paths are unchanged.
+    private var isInBounceRegion: Bool {
+        #if canImport(XCTest)
+        if let override = _debugBounceRegionOverride { return override }
+        #endif
+        let maxOffset = max(0, contentSize.height - bounds.height)
+        return contentOffset.y < 0 || contentOffset.y > maxOffset
+    }
+
+    /// True only while over-pulled past the TOP (`contentOffset.y < 0`). This is the one edge where
+    /// a streamed grow must defer its `contentSize.height` write: the top rubber-band settles toward
+    /// a fixed target and a mid-bounce height write jumps the viewport. The BOTTOM over-pull is the
+    /// opposite case (see `applyContentHeightDelta`) — there we WANT the height to grow into the
+    /// over-scrolled gap so the pulled-open "void" fills with the streaming tail instead of
+    /// rubber-banding back up.
+    private var isInTopBounceRegion: Bool {
+        #if canImport(XCTest)
+        if let override = _debugTopBounceRegionOverride { return override }
+        #endif
+        return contentOffset.y < 0
+    }
+
+    /// Applies an incremental content-height change from a refined/grown frame. Writes immediately
+    /// in the common case, and also on a BOTTOM over-pull — growing the height there fills the gap
+    /// the user pulled open below the tail, so streaming text lands in that space rather than
+    /// snapping back to a frozen edge. Only a TOP over-pull defers (accumulates) the delta, since a
+    /// mid-bounce height write against the fixed top target jumps the viewport. The paint
+    /// (resolvedFrames + cell layer) is done by the caller regardless — only this height write is
+    /// gated.
+    private func applyContentHeightDelta(_ delta: CGFloat) {
+        guard delta != 0 else { return }
+        if isInTopBounceRegion {
+            _deferredContentSizeDelta += delta
+        } else {
+            contentSize.height += delta
+        }
+    }
+
+    /// True when no gesture or bounce animation is in flight — nothing left to perturb, so a
+    /// deferred height write is safe to commit even if `contentOffset` still sits at the edge.
+    private var isScrollAtRest: Bool {
+        #if canImport(XCTest)
+        if let override = _debugScrollAtRestOverride { return override }
+        #endif
+        return !isTracking && !isDragging && !isDecelerating
+    }
+
+    /// Commits any height growth withheld during an edge bounce, in a single write. Fires once the
+    /// scroll has left the bounce region OR the scroll has come to rest. The at-rest branch is
+    /// essential: a rubber-band settle can land exactly at the frozen edge (`isInBounceRegion`
+    /// still true by rounding) without ever producing an out-of-bounce layout pass. Without it the
+    /// growth strands until the user manually scrolls — and at the bottom, with `contentSize`
+    /// frozen, the only possible direction is up, which was the reported bug.
+    private func flushDeferredContentSizeIfNeeded() {
+        guard _deferredContentSizeDelta != 0, !isInBounceRegion || isScrollAtRest else { return }
+        contentSize.height += _deferredContentSizeDelta
+        _deferredContentSizeDelta = 0
+    }
+
+    // MARK: - Scroll-settle delegate (deferred contentSize flush)
+
+    /// The reliable "edge rubber-band has settled" signal. Commit the withheld growth in one write
+    /// here — a single flush, not the per-frame `setNeedsLayout` that would starve the bounce
+    /// animation and hang the edge. `layoutSubviews`' own flush covers the streaming-active case;
+    /// this covers a settle with no token arriving to drive a layout pass.
+    public func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        flushDeferredContentSizeIfNeeded()
+    }
+
+    /// Finger lifted without a subsequent deceleration (released at rest) — same one-shot flush.
+    public func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        if !decelerate { flushDeferredContentSizeIfNeeded() }
+    }
+
     private func syncContentSize() {
+        // In an edge bounce, defer: writing the authoritative height now perturbs the animation.
+        // resolvedFrames stays truthful, so the post-settle flush lands the correct height.
+        guard !isInBounceRegion else { return }
         let height = layoutProvider.contentHeight(for: resolvedFrames)
         let target = CGSize(width: containerWidth, height: height)
+        // Absolute write already carries the full truth from resolvedFrames — any accumulated
+        // delta is now subsumed, so clear it to avoid a double-apply on the next flush.
+        _deferredContentSizeDelta = 0
         if contentSize != target { contentSize = target }
     }
 
@@ -1321,7 +1440,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView w
                 if realHeight > 0 {
                     let delta = VerticalLayoutProvider.refineFrames(&resolvedFrames, at: index, newHeight: realHeight)
                     if delta != 0 {
-                        contentSize.height += delta
+                        applyContentHeightDelta(delta)
                         didRefineDuringMount = true
                     }
                     mountFrame = resolvedFrames[index]

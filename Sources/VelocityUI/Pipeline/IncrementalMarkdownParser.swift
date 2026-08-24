@@ -197,12 +197,14 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
     /// Builds the `[Block]` list a caller feeds into `diff(previous:new:frontier:)` —
     /// `sealed + hot`, with `Block.key.index` matching each block's position in that combined
     /// list (so `BlockKey`'s positional identity lines up with `frontier`).
-    public func blockList<ID: Hashable & Sendable>(itemID: ID, width: CGFloat) -> [Block] {
+    public func blockList<ID: Hashable & Sendable>(
+        itemID: ID, width: CGFloat, theme: MarkdownTheme = .default
+    ) -> [Block] {
         var blocks: [Block] = []
         blocks.reserveCapacity(sealedBlocks.count + hotBlocksState.count)
         for (index, pair) in zip(sealedBlocks + hotBlocksState, sealedBlockIDs + hotBlockIDs).enumerated() {
             let lifecycle: BlockLifecycle = index < sealedBlocks.count ? .sealed : .hot
-            blocks.append(Self.makeBlock(pair.0, itemID: itemID, index: index, blockID: pair.1, width: width, lifecycle: lifecycle))
+            blocks.append(Self.makeBlock(pair.0, itemID: itemID, index: index, blockID: pair.1, width: width, lifecycle: lifecycle, theme: theme))
         }
         return blocks
     }
@@ -211,9 +213,9 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
 
     private static func makeBlock<ID: Hashable & Sendable>(
         _ parsed: ParsedMDBlock, itemID: ID, index: Int, blockID: BlockID, width: CGFloat,
-        lifecycle: BlockLifecycle
+        lifecycle: BlockLifecycle, theme: MarkdownTheme
     ) -> Block {
-        let descriptor = makeDescriptor(parsed)
+        let descriptor = makeDescriptor(parsed, theme: theme)
         let frame = CGRect(x: 0, y: 0, width: width, height: 0)
         let fragment = Fragment(id: index, blockID: blockID, content: .text(descriptor), frame: frame)
         return Block(
@@ -245,18 +247,15 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         var runs: [TextRun] = []
     }
 
-    static func style(_ parsed: ParsedMDBlock) -> StyledText {
-        let size: CGFloat
-        let weight: Int
+    static func style(_ parsed: ParsedMDBlock, theme: MarkdownTheme = .default) -> StyledText {
+        let font: VFontDescriptor
         var content = parsed.text
         var prefix = ""
         switch parsed.kind {
         case .heading(let level):
-            size = CGFloat(max(15, 28 - (level - 1) * 3))
-            weight = VFontDescriptor.boldWeight
+            font = theme.heading(level: level)
         case .codeFence:
-            size = 20
-            weight = VFontDescriptor.regularWeight
+            font = theme.code
             // Strip the fence marker lines. The opening line always exists; only drop the
             // closing line when it's actually shaped like one — otherwise a still-streaming
             // fence would hide its most recently typed line.
@@ -269,25 +268,19 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             }
             content = lines.joined(separator: "\n")
         case .tableRow:
-            size = 20
-            weight = VFontDescriptor.regularWeight
+            font = theme.body
         case .listItem(let ordered, let number, let depth):
-            size = 20
-            weight = VFontDescriptor.regularWeight
+            font = theme.body
             let indent = String(repeating: "  ", count: depth)
             prefix = indent + (ordered ? "\(number). " : "• ")
             content = Self.stripListMarker(content)
         case .blockquote:
-            size = 20
-            weight = VFontDescriptor.regularWeight
+            font = theme.body
         case .paragraph:
-            size = 20
-            weight = VFontDescriptor.regularWeight
+            font = theme.body
         case .thematicBreak:
-            size = 20
-            weight = VFontDescriptor.regularWeight
+            font = theme.body
         }
-        let font = VFontDescriptor(size: size, weight: weight)
         let baseColor = VColorDescriptor.primary
         let (finalContent, runs) = Self.styledContentAndRuns(
             parsed, fallbackContent: content, prefix: prefix, baseFont: font, baseColor: baseColor
@@ -368,8 +361,8 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         )
     }
 
-    private static func makeDescriptor(_ parsed: ParsedMDBlock) -> TextDescriptor {
-        let styled = style(parsed)
+    private static func makeDescriptor(_ parsed: ParsedMDBlock, theme: MarkdownTheme) -> TextDescriptor {
+        let styled = style(parsed, theme: theme)
 
         // `styled.runs` must fold into the hash: two blocks with identical rendered content but
         // different inline styling (e.g. plain "bold" vs "**bold**", both rendering to the

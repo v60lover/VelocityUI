@@ -270,5 +270,194 @@ final class FeedScrollViewGrowHotBlockTests: XCTestCase {
 
         await drainFeedWork(feed)
     }
+
+    // MARK: - VelocityUI-ylux (B2): defer contentSize growth during an edge bounce
+
+    /// While the scroll sits in a TOP edge rubber-band, a streamed grow must still PAINT (the cell
+    /// layer + resolvedFrames grow, tokens fill the opened gap live) but must NOT write
+    /// contentSize.height — mutating it mid-bounce moves the animation target and jumps the
+    /// viewport. The withheld growth is accumulated and committed in one write once the bounce
+    /// settles (the scroll leaves the bounce region). The BOTTOM edge is the opposite case, covered
+    /// by `testBottomBounceRegion_WritesContentSizeImmediately_FillsTheGap`.
+    func testTopBounceRegion_PaintsButDefersContentSizeWrite_ThenFlushesOnLeave() async throws {
+        let feed = makeChatFeed()
+        feed.items = [ChatItem(id: 0, blocks: ["seed"])]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+
+        let contentSizeBefore = feed.contentSize.height
+        let heightBefore = feed._debugResolvedFrame(at: 0)?.height ?? -1
+        XCTAssertGreaterThan(heightBefore, 0, "Precondition: last item must have a real measured height")
+        XCTAssertEqual(feed._debugDeferredContentSizeDelta, 0, "Precondition: nothing deferred yet")
+
+        feed._debugGestureActiveOverride = true
+        feed._debugBounceRegionOverride = true      // simulate an active edge over-pull
+        feed._debugTopBounceRegionOverride = true   // ...specifically at the TOP, where growth defers
+
+        let longText = (0..<40).map { "word\($0)" }.joined(separator: " ")
+        XCTAssertTrue(feed.growHotBlock(ChatItem(id: 0, blocks: [longText])),
+            "the side-channel must still paint during an edge bounce (variant B: paint stays on)")
+
+        // PAINT happened: resolvedFrames and the cell layer both grew by the same delta.
+        let heightAfter = feed._debugResolvedFrame(at: 0)?.height ?? -1
+        let delta = heightAfter - heightBefore
+        XCTAssertGreaterThan(delta, 0, "the grown tail must be reflected in resolvedFrames immediately")
+        let cellLayerHeight = try XCTUnwrap(feed._cellLayer(at: 0)?.frame.height)
+        XCTAssertEqual(cellLayerHeight, heightAfter, accuracy: 0.01,
+            "the cell layer must grow with the painted tail even inside the bounce region")
+
+        // RESIZE deferred: contentSize.height was NOT written during the pull; the growth is held.
+        XCTAssertEqual(feed.contentSize.height, contentSizeBefore, accuracy: 0.01,
+            "contentSize.height must not be written while the edge bounce is active — that is the jump")
+        XCTAssertEqual(feed._debugDeferredContentSizeDelta, delta, accuracy: 0.01,
+            "the withheld growth must be accumulated, not dropped")
+
+        // Bounce settles -> leave the region -> one flush lands the authoritative height.
+        feed._debugBounceRegionOverride = false
+        feed._debugTopBounceRegionOverride = false
+        feed.layoutSubviews()
+
+        XCTAssertEqual(feed._debugDeferredContentSizeDelta, 0, accuracy: 0.01,
+            "the accumulator must be cleared once the deferred delta is committed")
+        XCTAssertEqual(feed.contentSize.height, contentSizeBefore + delta, accuracy: 0.01,
+            "on leaving the bounce region the deferred delta commits in one write — "
+            + "contentSize.height now equals the authoritative content height from resolvedFrames")
+
+        await drainFeedWork(feed)
+    }
+
+    /// The user-facing fix: at the BOTTOM edge, following a live generation, a streamed grow must
+    /// write contentSize.height IMMEDIATELY — never defer. The user has over-pulled below the tail
+    /// into empty space; growing the height there fills that gap with the incoming text, so the
+    /// scroll settles smoothly into real content instead of rubber-banding back up to a frozen edge
+    /// (the "bounces up" symptom). Nothing is accumulated in the deferral channel.
+    func testBottomBounceRegion_WritesContentSizeImmediately_FillsTheGap() async {
+        let feed = makeChatFeed()
+        feed.items = [ChatItem(id: 0, blocks: ["seed"])]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+
+        let contentSizeBefore = feed.contentSize.height
+        let heightBefore = feed._debugResolvedFrame(at: 0)?.height ?? -1
+
+        feed._debugGestureActiveOverride = true
+        feed._debugBounceRegionOverride = true       // over-pulled at an edge...
+        feed._debugTopBounceRegionOverride = false   // ...the BOTTOM, not the top
+
+        let longText = (0..<40).map { "word\($0)" }.joined(separator: " ")
+        XCTAssertTrue(feed.growHotBlock(ChatItem(id: 0, blocks: [longText])))
+
+        let heightAfter = feed._debugResolvedFrame(at: 0)?.height ?? -1
+        let delta = heightAfter - heightBefore
+        XCTAssertGreaterThan(delta, 0, "the grown tail must be reflected in resolvedFrames")
+        XCTAssertEqual(feed.contentSize.height, contentSizeBefore + delta, accuracy: 0.01,
+            "at the bottom edge contentSize must grow immediately so the over-scrolled gap fills — "
+            + "this is what replaces the bounce-back-up with a smooth fill")
+        XCTAssertEqual(feed._debugDeferredContentSizeDelta, 0,
+            "a bottom over-pull must not defer growth — nothing may sit in the deferral channel")
+
+        await drainFeedWork(feed)
+    }
+
+    /// The gate must be false everywhere except an actual edge over-pull: with no bounce, a
+    /// streamed grow writes contentSize.height immediately (current behavior) and never touches
+    /// the deferral accumulator. Guards the common mid-content-streaming path against regression.
+    func testNotInBounceRegion_WritesContentSizeImmediately_NoDeferral() async {
+        let feed = makeChatFeed()
+        feed.items = [ChatItem(id: 0, blocks: ["seed"])]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+
+        let contentSizeBefore = feed.contentSize.height
+        let heightBefore = feed._debugResolvedFrame(at: 0)?.height ?? -1
+
+        feed._debugGestureActiveOverride = true
+        feed._debugBounceRegionOverride = false   // explicitly not in an edge over-pull
+
+        let longText = (0..<40).map { "word\($0)" }.joined(separator: " ")
+        XCTAssertTrue(feed.growHotBlock(ChatItem(id: 0, blocks: [longText])))
+
+        let heightAfter = feed._debugResolvedFrame(at: 0)?.height ?? -1
+        let delta = heightAfter - heightBefore
+        XCTAssertGreaterThan(delta, 0)
+        XCTAssertEqual(feed.contentSize.height, contentSizeBefore + delta, accuracy: 0.01,
+            "outside the bounce region contentSize must grow immediately by the item's delta")
+        XCTAssertEqual(feed._debugDeferredContentSizeDelta, 0,
+            "nothing may be accumulated when not in the bounce region")
+
+        await drainFeedWork(feed)
+    }
+
+    /// Regression for the stranded-flush bug: a rubber-band can settle EXACTLY at the frozen edge,
+    /// so `isInBounceRegion` never flips false, yet the scroll IS at rest. Gating the flush only on
+    /// leaving the region strands the deferred growth — contentSize stays frozen, the bottom is
+    /// unreachable, and the only motion that revives layout is scrolling up (the reported symptom).
+    /// The at-rest branch must commit it the moment the scroll comes to rest.
+    func testBounceRegion_StrandedAtFrozenEdge_FlushesWhenScrollComesToRest() async {
+        let feed = makeChatFeed()
+        feed.items = [ChatItem(id: 0, blocks: ["seed"])]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+
+        let contentSizeBefore = feed.contentSize.height
+
+        feed._debugGestureActiveOverride = true
+        feed._debugBounceRegionOverride = true      // over-pulled at the edge...
+        feed._debugTopBounceRegionOverride = true   // ...the TOP, where growth defers
+        feed._debugScrollAtRestOverride = false     // finger down / bounce still animating
+
+        let longText = (0..<40).map { "word\($0)" }.joined(separator: " ")
+        XCTAssertTrue(feed.growHotBlock(ChatItem(id: 0, blocks: [longText])))
+
+        let delta = feed._debugDeferredContentSizeDelta
+        XCTAssertGreaterThan(delta, 0, "the growth must be deferred while the bounce is active")
+        XCTAssertEqual(feed.contentSize.height, contentSizeBefore, accuracy: 0.01,
+            "contentSize stays frozen during the pull")
+
+        // The bounce settles AT the frozen edge: still flagged in-bounce (rounding), but at rest.
+        // A layout pass must now commit the stranded delta rather than wait for a manual scroll.
+        feed._debugScrollAtRestOverride = true
+        feed.layoutSubviews()
+
+        XCTAssertEqual(feed._debugDeferredContentSizeDelta, 0, accuracy: 0.01,
+            "coming to rest must flush the deferred growth even while still flagged in-bounce")
+        XCTAssertEqual(feed.contentSize.height, contentSizeBefore + delta, accuracy: 0.01,
+            "contentSize must catch up to the real content height once the scroll rests — "
+            + "not stay frozen until the user scrolls up")
+
+        await drainFeedWork(feed)
+    }
+
+    /// The settle delegate hook (`scrollViewDidEndDecelerating`) must commit the deferred growth in
+    /// one shot when a bounce ends — the reliable signal that does not depend on a streamed token
+    /// arriving to drive a layout pass, and (unlike a per-frame `setNeedsLayout` pump) does not
+    /// starve the deceleration and hang the edge.
+    func testScrollSettleDelegate_FlushesDeferredGrowthWithoutLayoutPump() async {
+        let feed = makeChatFeed()
+        feed.items = [ChatItem(id: 0, blocks: ["seed"])]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+
+        let contentSizeBefore = feed.contentSize.height
+        feed._debugGestureActiveOverride = true
+        feed._debugBounceRegionOverride = true
+        feed._debugTopBounceRegionOverride = true   // TOP over-pull: growth defers
+
+        let longText = (0..<40).map { "word\($0)" }.joined(separator: " ")
+        XCTAssertTrue(feed.growHotBlock(ChatItem(id: 0, blocks: [longText])))
+        let delta = feed._debugDeferredContentSizeDelta
+        XCTAssertGreaterThan(delta, 0, "growth must be deferred during the bounce")
+        XCTAssertEqual(feed.contentSize.height, contentSizeBefore, accuracy: 0.01)
+
+        // Bounce ends -> UIKit calls the settle delegate. It must flush in one shot, no layout pump.
+        feed.scrollViewDidEndDecelerating(feed)
+
+        XCTAssertEqual(feed._debugDeferredContentSizeDelta, 0, accuracy: 0.01,
+            "the settle delegate must commit the deferred growth")
+        XCTAssertEqual(feed.contentSize.height, contentSizeBefore + delta, accuracy: 0.01,
+            "contentSize must catch up to the real content height on settle")
+
+        await drainFeedWork(feed)
+    }
 }
 #endif

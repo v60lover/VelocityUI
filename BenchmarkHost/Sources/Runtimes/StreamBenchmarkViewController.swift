@@ -8,9 +8,10 @@ import VelocityUI
 /// `VelocityUIRuntimeViewController`, not a modification of it (that one is scroll-scenario
 /// specific: it wires `ScrollDriver` via `orchestrator?.scrollViewReady`, which this scenario has
 /// nothing to drive). Hosts a SwiftUI `AsyncFeed` over a single growing `StreamMessage`, fed by
-/// `StreamDriver` through the public streaming API (VelocityUI-zuot) — `IncrementalMarkdownParser
-/// .append(_:)` on the message, then a fresh value pushed into `store.message` so `AsyncFeed`
-/// observes the change through ordinary SwiftUI state, never a private hook.
+/// `StreamDriver` through the public streaming API (VelocityUI-zuot) — `StreamStore` appends each
+/// token into a `StreamingMarkdownController` (VelocityUI-8g6l), then pushes a fresh
+/// `StreamMessage` into `store.messages` so `AsyncFeed` observes the change through ordinary
+/// SwiftUI state, never a private hook.
 @MainActor
 final class StreamBenchmarkViewController: UIViewController {
     private let harness: BenchmarkHarness
@@ -114,11 +115,20 @@ final class StreamBenchmarkViewController: UIViewController {
 private final class StreamStore: ObservableObject {
     @Published var messages: [StreamMessage] = [StreamMessage(id: 0, parser: IncrementalMarkdownParser())]
 
-    /// Tracked separately from `messages[0].parser` so tokens keep accumulating even while a
+    /// One memoizing controller per message id (VelocityUI-8g6l), so sealed-block styling stays
+    /// cached across republishes instead of being rederived from `message.parser` on every read.
+    /// `message.parser` still exists purely to give `AsyncFeed`'s Equatable diff a changing value
+    /// to key on — the controller (kept here, off the Sendable `StreamMessage`) is what actually
+    /// backs rendering. Tokens keep accumulating into the controller even while a
     /// `StreamGestureCoalescer` is buffering (not publishing) — the buffered path must never lose
     /// a token just because the last few appends happened during an active gesture.
-    private var currentParser = IncrementalMarkdownParser()
+    private let controllers: [Int: StreamingMarkdownController] = [0: StreamingMarkdownController()]
     private var coalescer: StreamGestureCoalescer?
+
+    /// The only message id this scenario ever drives is 0; a lookup miss is a programmer error.
+    func controller(for id: Int) -> StreamingMarkdownController {
+        controllers[id]!
+    }
 
     /// Enables VelocityUI-0tbi's "gesture-gated deferral" toggle: while `scrollView` reports
     /// isTracking||isDragging||isDecelerating, `append(_:)` stops republishing `messages` (so
@@ -136,11 +146,12 @@ private final class StreamStore: ObservableObject {
     }
 
     func append(_ token: String) {
-        currentParser.append(token)
+        let controller = controller(for: 0)
+        controller.append(token)
         if let coalescer {
-            coalescer.submit(currentParser)
+            coalescer.submit(controller.parser)
         } else {
-            messages = [StreamMessage(id: 0, parser: currentParser)]
+            messages = [StreamMessage(id: 0, parser: controller.parser)]
         }
     }
 }
@@ -154,7 +165,13 @@ private struct StreamFeedView: View {
 
     var body: some View {
         AsyncFeed(items: store.messages, environment: environment) { message in
-            StreamBenchmarkCell(message: message, includeInterleavedBlocks: includeInterleavedBlocks)
+            let controller = store.controller(for: message.id)
+            let nodes = StreamDataset.interleavedRenderNodes(
+                textNodes: controller.renderNodes,
+                frontier: controller.parser.frontier,
+                includeInterleavedBlocks: includeInterleavedBlocks
+            )
+            return StreamBenchmarkCell(nodes: nodes)
         }
         .prefetchWindow(ahead: 10, behind: 3)
     }
@@ -162,13 +179,17 @@ private struct StreamFeedView: View {
 
 // MARK: - Cell DSL
 
+/// Holds already-derived `[any RenderNode]` rather than a `StreamMessage`/controller reference —
+/// `RenderView` requires `Sendable` (RenderNode.swift:17) and `StreamingMarkdownController` is a
+/// deliberately non-Sendable `@MainActor` class, so it can't be a stored property here. `nodes`
+/// is derived on `@MainActor` in `StreamFeedView.body` (where the controller lives) and handed in
+/// as a plain `Sendable` array (`RenderNode: Sendable`).
 private struct StreamBenchmarkCell: RenderView {
-    let message: StreamMessage
-    let includeInterleavedBlocks: Bool
+    let nodes: [any RenderNode]
 
     var renderBody: some RenderNode {
         VStackNode(alignment: .leading, spacing: 8) {
-            StreamDataset.interleavedRenderNodes(for: message.parser, includeInterleavedBlocks: includeInterleavedBlocks)
+            nodes
         }
     }
 }
