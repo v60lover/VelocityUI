@@ -60,11 +60,17 @@ extension TextDescriptor {
     /// same size/weight. Italic traits layer on afterward, then Dynamic Type scaling — all
     /// driven from `self.contentSizeCategory`, never a global read.
     private var resolvedFont: UIFont {
+        resolvedFont(for: font)
+    }
+
+    /// Same as `resolvedFont`, generalized so a run's own font resolves through the same path.
+    fileprivate func resolvedFont(for font: VFontDescriptor) -> UIFont {
+        let weightRaw = Double(bitPattern: UInt64(bitPattern: Int64(font.weight)))
         var uiFont: UIFont
         if let family = font.family, let named = UIFont(name: family, size: font.size) {
             uiFont = named
         } else {
-            uiFont = UIFont.systemFont(ofSize: font.size, weight: uiFontWeight)
+            uiFont = UIFont.systemFont(ofSize: font.size, weight: UIFont.Weight(rawValue: weightRaw))
         }
         if font.traits.contains(.italic) {
             let symbolic = uiFont.fontDescriptor.symbolicTraits.union(.traitItalic)
@@ -77,6 +83,16 @@ extension TextDescriptor {
             uiFont = UIFontMetrics.default.scaledFont(for: uiFont, compatibleWith: traits)
         }
         return uiFont
+    }
+
+    /// Shared across every run so multi-run text wraps as one paragraph, not one per run.
+    fileprivate var paragraphStyleIfNeeded: NSParagraphStyle? {
+        guard lineBreakMode != NSLineBreakMode.byWordWrapping.rawValue || lineLimit != nil || lineSpacing != 0
+        else { return nil } 
+        let para = NSMutableParagraphStyle()
+        para.lineBreakMode = NSLineBreakMode(rawValue: lineBreakMode) ?? .byWordWrapping
+        para.lineSpacing = lineSpacing
+        return para
     }
 
     /// Single source of truth for the attribute dictionary, shared by measure and rasterizeText
@@ -100,20 +116,70 @@ extension TextDescriptor {
         if strikethroughStyle != 0 {
             attrs[.strikethroughStyle] = strikethroughStyle
         }
-        // Without this branch, a lineBreakMode-only descriptor (no lineLimit/lineSpacing) would
-        // silently fall back to NSMutableParagraphStyle's default, dropping the requested mode.
-        if lineBreakMode != NSLineBreakMode.byWordWrapping.rawValue || lineLimit != nil || lineSpacing != 0 {
-            let para = NSMutableParagraphStyle()
-            para.lineBreakMode = NSLineBreakMode(rawValue: lineBreakMode) ?? .byWordWrapping
-            para.lineSpacing = lineSpacing
-            attrs[.paragraphStyle] = para
+        if let paragraphStyleIfNeeded {
+            attrs[.paragraphStyle] = paragraphStyleIfNeeded
         }
         return attrs
     }
 
-    /// NSAttributedString built from `makeAttributes()`, shared with `TextMeasurementContext.measure`.
+    /// Single-style when `runs` is empty (legacy path), otherwise each run's own attributes
+    /// laid end-to-end. Shared by `measure` and `rasterizeText`, so they can't diverge.
     var attributedString: NSAttributedString {
-        NSAttributedString(string: content, attributes: makeAttributes())
+        guard !runs.isEmpty else {
+            return NSAttributedString(string: content, attributes: makeAttributes())
+        }
+
+        let result = NSMutableAttributedString()
+        let ns = content as NSString
+        var cursor = 0
+        for run in runs {
+            let length = min(run.length, ns.length - cursor)
+            guard length > 0 else { continue }
+            let span = ns.substring(with: NSRange(location: cursor, length: length))
+            result.append(NSAttributedString(string: span, attributes: run.makeAttributes(base: self)))
+            cursor += length
+        }
+        // Under-covering runs: append the remainder in base style instead of dropping it.
+        if cursor < ns.length {
+            let remainder = ns.substring(from: cursor)
+            result.append(NSAttributedString(string: remainder, attributes: makeAttributes()))
+        }
+        return result
+    }
+}
+
+extension TextRun {
+    /// This run's own font/color/underline/strike/background/link, plus `base`'s shared
+    /// kerning and paragraph style.
+    fileprivate func makeAttributes(base: TextDescriptor) -> [NSAttributedString.Key: Any] {
+        var attrs: [NSAttributedString.Key: Any] = [
+            .font: base.resolvedFont(for: font),
+            .foregroundColor: UIColor(
+                displayP3Red: color.red, green: color.green, blue: color.blue, alpha: color.alpha
+            )
+        ]
+        if base.kerning != 0 {
+            attrs[.kern] = base.kerning
+        }
+        if underlineStyle != 0 {
+            attrs[.underlineStyle] = underlineStyle
+        }
+        if strikethroughStyle != 0 {
+            attrs[.strikethroughStyle] = strikethroughStyle
+        }
+        if let backgroundColor {
+            attrs[.backgroundColor] = UIColor(
+                displayP3Red: backgroundColor.red, green: backgroundColor.green,
+                blue: backgroundColor.blue, alpha: backgroundColor.alpha
+            )
+        }
+        if let linkURL {
+            attrs[.link] = linkURL
+        }
+        if let paragraphStyle = base.paragraphStyleIfNeeded {
+            attrs[.paragraphStyle] = paragraphStyle
+        }
+        return attrs
     }
 }
 

@@ -120,6 +120,44 @@ public struct ZStackDescriptor: Sendable {
     }
 }
 
+/// One styled span within a multi-run `TextDescriptor`, in document order. `length` is the
+/// number of UTF-16 units this run consumes from `TextDescriptor.content`; run lengths should
+/// sum to `content.utf16.count`.
+///
+/// Producers folding runs into a hash: `length`/`font` affect layout, the rest is paint-only —
+/// same split as `TextNode.layoutHash`/`appearanceHash`.
+public struct TextRun: Sendable, Hashable {
+    public let length: Int
+    public let font: VFontDescriptor
+    public let color: VColorDescriptor
+    /// Raw NSUnderlineStyle.rawValue. 0 = no underline.
+    public let underlineStyle: Int
+    /// Raw NSUnderlineStyle.rawValue, applied as strikethrough. 0 = none.
+    public let strikethroughStyle: Int
+    /// Drawn into the bitmap as a `.backgroundColor` attribute — never a CALayer cornerRadius.
+    public let backgroundColor: VColorDescriptor?
+    /// Carried as an `.link` attribute for a later hit-test pass to resolve.
+    public let linkURL: URL?
+
+    public init(
+        length: Int,
+        font: VFontDescriptor,
+        color: VColorDescriptor,
+        underlineStyle: Int = 0,
+        strikethroughStyle: Int = 0,
+        backgroundColor: VColorDescriptor? = nil,
+        linkURL: URL? = nil
+    ) {
+        self.length = length
+        self.font = font
+        self.color = color
+        self.underlineStyle = underlineStyle
+        self.strikethroughStyle = strikethroughStyle
+        self.backgroundColor = backgroundColor
+        self.linkURL = linkURL
+    }
+}
+
 public struct TextDescriptor: Sendable {
     public let content: String
     public let font: VFontDescriptor
@@ -139,6 +177,10 @@ public struct TextDescriptor: Sendable {
     /// default) skips scaling entirely. `flatten()` is the only production writer of a non-default
     /// value, and folds it into `layoutHash` so a category change misses `LayoutCache` and re-measures.
     public let contentSizeCategory: VContentSizeCategory
+    /// Ordered per-span styling within `content`. Empty (the default) is the legacy single-style
+    /// path — `font`/`color`/etc. apply to the whole string. Non-empty runs are applied
+    /// left-to-right, each consuming `TextRun.length` UTF-16 units of `content`.
+    public let runs: [TextRun]
     public let layoutHash: Int
     public let appearanceHash: Int
 
@@ -156,6 +198,7 @@ public struct TextDescriptor: Sendable {
         kerning: CGFloat = 0,
         lineSpacing: CGFloat = 0,
         contentSizeCategory: VContentSizeCategory = .unspecified,
+        runs: [TextRun] = [],
         layoutHash: Int,
         appearanceHash: Int
     ) {
@@ -169,6 +212,7 @@ public struct TextDescriptor: Sendable {
         self.kerning = kerning
         self.lineSpacing = lineSpacing
         self.contentSizeCategory = contentSizeCategory
+        self.runs = runs
         self.layoutHash = layoutHash
         self.appearanceHash = appearanceHash
     }
