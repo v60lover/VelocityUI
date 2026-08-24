@@ -75,6 +75,12 @@ final class HotBlockMeasurer {
     @discardableResult
     func measure(_ descriptor: TextDescriptor, width: CGFloat) -> (height: CGFloat, appended: Bool) {
         let appended = isAppendOnly(descriptor, width: width)
+        // KNOWN GAP: `makeAttributes()` uses the base font only and IGNORES `descriptor.runs`,
+        // whereas TextMeasurementContext / rasterizeText measure via the run-aware
+        // `attributedString`. For a block whose runs differ from the base font (e.g. a monospace
+        // inline-`code` run), this hot height can diverge from the sealed/layout height — the
+        // height-axis twin of the heading width bug. Not yet observed, but latent: switch this to
+        // `descriptor.attributedString` if a styled hot block ever measures/paints at the wrong height.
         let attributes = descriptor.makeAttributes()
 
         if appended {

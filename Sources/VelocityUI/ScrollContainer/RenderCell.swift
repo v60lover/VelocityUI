@@ -232,6 +232,11 @@ public final class RenderCell {
             } else if case .text = fragment.content {
                 // Text has no async delivery path — set unconditionally so a cache miss can't
                 // retain a previous fragment's pixels after reclassification at the same id.
+                // INVARIANT: for text, `fragment.frame.size` MUST equal the bitmap's point size.
+                // `contentsGravity` is unset → defaults to `.resize`, so any width/height mismatch
+                // silently stretches the glyphs instead of failing (this was the "heading in a
+                // stretched font" bug; producers keep them equal — see FeedScrollView.recordTextResult).
+                // If a future mismatch slips in, set an explicit gravity or assert size-equality here.
                 sub.contents = synchronousContent[fragment.id]
                 sub.backgroundColor = nil
                 mediaFragmentIDs.remove(fragment.id)

@@ -801,7 +801,14 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
             _ result: (height: CGFloat, bitmap: CGImage?), for block: Block, at index: Int
         ) {
             heights[index] = result.height
-            localFragmentFrames[index] = CGRect(x: 0, y: 0, width: width, height: result.height)
+            // The frame width must equal the bitmap's own width, not the full cell width. Short
+            // text (a heading, a `---` rule) is rasterised tight to its glyphs, so a full-width
+            // frame makes contentsGravity=resize stretch that narrow bitmap sideways — the
+            // "heading in a stretched font" bug. Full-width bitmaps (wrapped prose, hot blocks
+            // rasterised at block.width) already match this, so it's a no-op for them. Mirrors the
+            // initial-layout path, which already frames text to its measured width.
+            let frameWidth = result.bitmap.map { CGFloat($0.width) / scale } ?? width
+            localFragmentFrames[index] = CGRect(x: 0, y: 0, width: frameWidth, height: result.height)
             textBitmaps[block.fragment.id] = result.bitmap
         }
 

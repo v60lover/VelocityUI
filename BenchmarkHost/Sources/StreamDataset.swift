@@ -39,7 +39,7 @@ enum StreamDataset {
         chunks += literal("\n\n")
         chunks += markdownFeatureShowcase()
         chunks += prose(sentenceCount: 15, rng: &rng)
-        chunks += literal("\n\n")
+        chunks += literal("\n")
         chunks += literal("## A single append, traced\n\n")
         chunks += literal("Here's the shape of one `append(_:)` call while a fence is still open — a line streams in, the fence stays hot, and nothing before it moves:\n\n")
         chunks += codeFence(lineCount: codeLineCount, rng: &rng)
