@@ -14,6 +14,29 @@ extension FeedScrollView {
         _pendingItemsDiffBase = nil
         guard let builder = cellBuilder else { return }
 
+        let nextTables = buildNextTables(using: builder)
+        let nextSnapshot = LayoutSnapshot(tables: nextTables)
+        let changeSet = differ.diff(prev: snapshot, next: nextSnapshot)
+
+        guard changeSet.hasChanges else {
+            snapshot = nextSnapshot
+            tables = nextTables
+            return
+        }
+
+        let (oldFrames, survivors) = computeSurvivorsAndRecycleRemoved(changeSet: changeSet)
+        let plan = decideInvalidation(changeSet: changeSet, survivors: survivors)
+
+        commitSnapshot(nextSnapshot, nextTables: nextTables, oldFrames: oldFrames, survivors: survivors)
+
+        let tookInPlaceFastPath = reconcileVisibleCells(changeSet: changeSet, plan: plan)
+
+        finishItemsChange(itemCountGrew: items.count > oldItems.count, tookInPlaceFastPath: tookInPlaceFastPath)
+    }
+
+    /// Builds `nextTables` from `items`, reusing a cached table when `itemSignature` reports an
+    /// unchanged signature and evicting cache entries for items no longer present.
+    private func buildNextTables(using builder: @MainActor (Item) -> any RenderNode) -> [NodeTable] {
         var nextTables: [NodeTable] = []
         nextTables.reserveCapacity(items.count)
         if let signature = itemSignature {
@@ -37,17 +60,17 @@ extension FeedScrollView {
                 nextTables.append(flatten(builder(item), itemID: item.id, contentSizeCategory: contentSizeCategory))
             }
         }
-        let nextSnapshot = LayoutSnapshot(tables: nextTables)
-        let changeSet = differ.diff(prev: snapshot, next: nextSnapshot)
+        return nextTables
+    }
 
-        guard changeSet.hasChanges else {
-            snapshot = nextSnapshot
-            tables = nextTables
-            return
-        }
-
-        // Capture old frames and build (prevIdx, nextIdx) survivors before clobbering them.
-        // Covers all items with a known previous height. Int-keyed — zero AnyHashable boxing.
+    /// Captures old frames and builds (prevIdx, nextIdx) survivors before clobbering them —
+    /// covers all items with a known previous height, Int-keyed so there's zero AnyHashable
+    /// boxing — then recycles cells for removed items (prevIdx is the old index in
+    /// `visibleCells`). Must run before `tables`/`snapshot` are overwritten with the next
+    /// generation.
+    private func computeSurvivorsAndRecycleRemoved(
+        changeSet: ChangeSet
+    ) -> (oldFrames: [CGRect], survivors: [(prevIdx: Int, nextIdx: Int)]) {
         let oldFrames = resolvedFrames
         var survivors: [(prevIdx: Int, nextIdx: Int)] = []
         survivors.reserveCapacity(tables.count)
@@ -56,13 +79,29 @@ extension FeedScrollView {
         for e in changeSet.appearanceChanged { survivors.append((prevIdx: e.prevIdx, nextIdx: e.nextIdx)) }
         for e in changeSet.mediaChanged  { survivors.append((prevIdx: e.prevIdx, nextIdx: e.nextIdx)) }
 
-        // Recycle cells for removed items — prevIdx is the old index in visibleCells.
         for r in changeSet.removed {
             if let cell = visibleCells.removeValue(forKey: r.prevIdx) {
                 returnToPool(cell)
             }
         }
+        return (oldFrames, survivors)
+    }
 
+    /// Small value-type carrier passed from `decideInvalidation` to `reconcileVisibleCells` —
+    /// replaces the long-lived shared locals the pre-decomposition `itemsDidChange` glued its
+    /// phases together with.
+    private struct DiffPlan {
+        let survivors: [(prevIdx: Int, nextIdx: Int)]
+        let needsFullInvalidation: Bool
+        let canDeferInvalidation: Bool
+        let blockDiffInputs: [Int: (previousTable: NodeTable, newTable: NodeTable, previousFragments: [Fragment])]
+    }
+
+    /// Decides whether this change needs a full `WorkingRange` invalidation, and whether that
+    /// invalidation can be deferred pending an in-place block diff.
+    private func decideInvalidation(
+        changeSet: ChangeSet, survivors: [(prevIdx: Int, nextIdx: Int)]
+    ) -> DiffPlan {
         // Invalidate WorkingRange when any layout-impacting change exists.
         let needsFullInvalidation = !changeSet.layoutChanged.isEmpty ||
                                     !changeSet.removed.isEmpty ||
@@ -98,139 +137,220 @@ extension FeedScrollView {
             }
         }
 
+        return DiffPlan(
+            survivors: survivors,
+            needsFullInvalidation: needsFullInvalidation,
+            canDeferInvalidation: canDeferInvalidation,
+            blockDiffInputs: blockDiffInputs
+        )
+    }
+
+    private func commitSnapshot(
+        _ nextSnapshot: LayoutSnapshot,
+        nextTables: [NodeTable],
+        oldFrames: [CGRect],
+        survivors: [(prevIdx: Int, nextIdx: Int)]
+    ) {
         snapshot = nextSnapshot
         tables = nextTables
-
         rebuildFrames(oldFrames: oldFrames, survivors: survivors)
+    }
 
-        // Set only by the fully-resolved fast path below (every layoutChanged entry patched
-        // WorkingRange directly, no invalidation) — gates the `lastNotifiedLeadingIndex` reset
-        // near the end of this method.
+    /// Reconciles `visibleCells` against the new `tables`/`plan` — either the full reuse/recycle
+    /// loop (when layout-impacting changes exist) or a lightweight appearance/media re-fetch.
+    /// Returns whether every layout-changed survivor resolved via the in-place block-diff fast
+    /// path (no WorkingRange invalidation needed) — set only by the fully-resolved fast path,
+    /// gating the `lastNotifiedLeadingIndex` reset in `finishItemsChange`.
+    private func reconcileVisibleCells(changeSet: ChangeSet, plan: DiffPlan) -> Bool {
+        guard plan.needsFullInvalidation else {
+            refreshAppearanceAndMediaChanged(changeSet: changeSet)
+            return false
+        }
+        return reuseOrRecycleVisibleCells(changeSet: changeSet, plan: plan)
+    }
+
+    private func refreshAppearanceAndMediaChanged(changeSet: ChangeSet) {
+        for e in changeSet.appearanceChanged {
+            guard let cell = visibleCells[e.nextIdx],
+                  let wrEntry = workingRange.entry(at: e.nextIdx) else { continue }
+            let freshFragments = extractFragments(table: e.next, layout: wrEntry.layout)
+            cell.cancelPendingMedia()
+            spawnMediaFetches(for: cell, fragments: freshFragments, itemID: e.next.itemID)
+        }
+        for e in changeSet.mediaChanged {
+            guard let cell = visibleCells[e.nextIdx],
+                  let wrEntry = workingRange.entry(at: e.nextIdx) else { continue }
+            let freshFragments = extractFragments(table: e.next, layout: wrEntry.layout)
+            cell.cancelPendingMedia()
+            spawnMediaFetches(for: cell, fragments: freshFragments, itemID: e.next.itemID)
+        }
+    }
+
+    private enum CellReuseResult {
+        case recycled
+        case kept(nextIdx: Int, blockDiffResolved: Bool, workingRangeCommit: (layout: ResolvedLayout, fragments: [Fragment])?)
+    }
+
+    private func reuseOrRecycleVisibleCells(changeSet: ChangeSet, plan: DiffPlan) -> Bool {
+        // reuseDecision gates recycling explicitly rather than trusting that survivors always
+        // match identity — makes the decision rule the one source of truth and testable.
+        var survivorByPrevIdx: [Int: Int] = [:]
+        survivorByPrevIdx.reserveCapacity(plan.survivors.count)
+        for s in plan.survivors { survivorByPrevIdx[s.prevIdx] = s.nextIdx }
+
+        var keptCells: [Int: RenderCell] = [:]
+        keptCells.reserveCapacity(visibleCells.count)
+        // Indices the block-diff path below already resolved synchronously — excluded from
+        // the _pendingFragmentIndices re-enroll so refineKnownFrames doesn't redo the work.
+        var blockDiffResolvedIndices: Set<Int> = []
+        // WorkingRange patches for the fast path, applied after the loop iff every
+        // layoutChanged entry resolved — a synthetic ResolvedLayout mirroring what
+        // extractFragments would derive, so later appearance/media classification stays correct.
+        var blockDiffWorkingRangeCommits: [Int: (layout: ResolvedLayout, fragments: [Fragment])] = [:]
+        let width = measureWidth(for: containerWidth)
+        let scale = max(1, traitCollection.displayScale)
+
+        for (prevIdx, cell) in visibleCells {
+            switch reconcileCell(
+                prevIdx: prevIdx, cell: cell, survivorByPrevIdx: survivorByPrevIdx,
+                blockDiffInputs: plan.blockDiffInputs, canDeferInvalidation: plan.canDeferInvalidation,
+                width: width, scale: scale
+            ) {
+            case .recycled:
+                continue
+            case .kept(let nextIdx, let blockDiffResolved, let workingRangeCommit):
+                keptCells[nextIdx] = cell
+                if blockDiffResolved {
+                    blockDiffResolvedIndices.insert(nextIdx)
+                    if let workingRangeCommit {
+                        blockDiffWorkingRangeCommits[nextIdx] = workingRangeCommit
+                    }
+                }
+            }
+        }
+        visibleCells = keptCells
+
+        return resolveDeferredInvalidation(
+            changeSet: changeSet, plan: plan, keptCells: keptCells,
+            blockDiffResolvedIndices: blockDiffResolvedIndices,
+            blockDiffWorkingRangeCommits: blockDiffWorkingRangeCommits
+        )
+    }
+
+    /// Resolves the deferred invalidation decision `decideInvalidation` only established
+    /// eligibility for: whether each layout-changed entry actually resolved via block-diff is
+    /// known only now, after the reuse loop ran. All-resolved: patch WorkingRange directly,
+    /// skipping full-window invalidate + pipeline re-measure. Partial failure: fall back to full
+    /// invalidate + markInvalidated. Also re-enrolls kept-but-unresolved indices into
+    /// `_pendingFragmentIndices` so `refineKnownFrames` refreshes their content once WorkingRange
+    /// recommits — without this, a same-id survivor freezes on stale content until it re-mounts.
+    private func resolveDeferredInvalidation(
+        changeSet: ChangeSet,
+        plan: DiffPlan,
+        keptCells: [Int: RenderCell],
+        blockDiffResolvedIndices: Set<Int>,
+        blockDiffWorkingRangeCommits: [Int: (layout: ResolvedLayout, fragments: [Fragment])]
+    ) -> Bool {
         var tookInPlaceFastPath = false
-
-        if needsFullInvalidation {
-            // reuseDecision gates recycling explicitly rather than trusting that survivors always
-            // match identity — makes the decision rule the one source of truth and testable.
-            var survivorByPrevIdx: [Int: Int] = [:]
-            survivorByPrevIdx.reserveCapacity(survivors.count)
-            for s in survivors { survivorByPrevIdx[s.prevIdx] = s.nextIdx }
-
-            var keptCells: [Int: RenderCell] = [:]
-            keptCells.reserveCapacity(visibleCells.count)
-            // Indices the block-diff path below already resolved synchronously — excluded from
-            // the _pendingFragmentIndices re-enroll so refineKnownFrames doesn't redo the work.
-            var blockDiffResolvedIndices: Set<Int> = []
-            // WorkingRange patches for the fast path, applied after the loop iff every
-            // layoutChanged entry resolved — a synthetic ResolvedLayout mirroring what
-            // extractFragments would derive, so later appearance/media classification stays correct.
-            var blockDiffWorkingRangeCommits: [Int: (layout: ResolvedLayout, fragments: [Fragment])] = [:]
-            let width = measureWidth(for: containerWidth)
-            let scale = max(1, traitCollection.displayScale)
-            for (prevIdx, cell) in visibleCells {
-                if let nextIdx = survivorByPrevIdx[prevIdx], nextIdx < tables.count,
-                   reuseDecision(oldID: cell.currentItemID, newID: tables[nextIdx].itemID) == .inPlace {
-                    // Detach without repositioning: survivor indices can shift relative to items
-                    // still to be mounted this pass (e.g. a prepend). updateVisibleCells' mount
-                    // loop re-attaches in ascending visible-index order to preserve z-order.
-                    cell.layer.removeFromSuperlayer()
-                    keptCells[nextIdx] = cell
-
-                    // Per-block diff: unchanged blocks reused verbatim from FrozenBitmapStore,
-                    // only the hot tail touched. Returns nil when it can't guarantee correct
-                    // content cheaply, falling through to the full-refresh path.
-                    if let inputs = blockDiffInputs[prevIdx], nextIdx < items.count,
-                       let result = applyInPlaceBlockDiff(
-                           previousTable: inputs.previousTable,
-                           previousFragments: inputs.previousFragments,
-                           newTable: inputs.newTable,
-                           itemID: items[nextIdx].id,
-                           width: width,
-                           scale: scale
-                       ) {
-                        let delta = VerticalLayoutProvider.refineFrames(&resolvedFrames, at: nextIdx, newHeight: result.height)
-                        applyContentHeightDelta(delta)
-                        estimatedIndices.remove(nextIdx)
-                        cell.layer.frame = resolvedFrames[nextIdx]
-                        // Merge image cache hits with the block-diff's freshly-resolved text
-                        // bitmaps — fragment ids never collide across content kinds within one
-                        // item's NodeTable, so a plain overwrite-merge is safe.
-                        var syncMap = buildSyncMap(for: result.fragments, itemID: inputs.newTable.itemID)
-                        for (id, bitmap) in result.textBitmaps { syncMap[id] = bitmap }
-                        let entering = cell.updateBlockViewport(
-                            fragments: result.fragments,
-                            viewportInCell: blockViewport(for: cell.layer.frame),
-                            synchronousContent: syncMap
-                        )
-                        spawnMediaFetches(for: cell, fragments: entering, itemID: inputs.newTable.itemID,
-                                          syncMap: syncMap)
-                        blockDiffResolvedIndices.insert(nextIdx)
-                        if canDeferInvalidation {
-                            let syntheticLayout = ResolvedLayout(
-                                totalFrame: CGRect(x: 0, y: 0, width: width, height: result.height),
-                                children: result.fragments.map { ResolvedLayout(totalFrame: $0.frame, nodeIndex: $0.id) },
-                                nodeIndex: 0
-                            )
-                            blockDiffWorkingRangeCommits[nextIdx] = (syntheticLayout, result.fragments)
-                        }
-                    }
-                } else {
-                    cell.layer.removeFromSuperlayer()
-                    returnToPool(cell)
+        if plan.canDeferInvalidation {
+            if blockDiffResolvedIndices.count == changeSet.layoutChanged.count {
+                for (nextIdx, commit) in blockDiffWorkingRangeCommits {
+                    workingRange.commit(commit.layout, commit.fragments, at: nextIdx)
                 }
-            }
-            visibleCells = keptCells
-
-            // Resolve the deferred invalidation decision: canDeferInvalidation only established
-            // eligibility; whether each entry actually resolved via block-diff is known only now.
-            // All-resolved: patch WorkingRange directly, skipping full-window invalidate + pipeline
-            // re-measure. Partial failure: fall back to full invalidate + markInvalidated.
-            if canDeferInvalidation {
-                if blockDiffResolvedIndices.count == changeSet.layoutChanged.count {
-                    for (nextIdx, commit) in blockDiffWorkingRangeCommits {
-                        workingRange.commit(commit.layout, commit.fragments, at: nextIdx)
-                    }
-                    tookInPlaceFastPath = true
-                } else {
-                    workingRange.invalidateAll()
-                    let pipeline = self.pipeline
-                    Task { await pipeline.markInvalidated() }
-                }
-            }
-
-            _pendingFragmentIndices.removeAll(keepingCapacity: true)
-            // Re-enroll every kept .inPlace index (except ones the block-diff path already
-            // resolved) so refineKnownFrames refreshes content once WorkingRange recommits.
-            // Without this, a same-id survivor freezes on stale content until it re-mounts.
-            _pendingFragmentIndices.formUnion(keptCells.keys.filter { !blockDiffResolvedIndices.contains($0) })
-        } else {
-            for e in changeSet.appearanceChanged {
-                guard let cell = visibleCells[e.nextIdx],
-                      let wrEntry = workingRange.entry(at: e.nextIdx) else { continue }
-                let freshFragments = extractFragments(table: e.next, layout: wrEntry.layout)
-                cell.cancelPendingMedia()
-                spawnMediaFetches(for: cell, fragments: freshFragments, itemID: e.next.itemID)
-            }
-            for e in changeSet.mediaChanged {
-                guard let cell = visibleCells[e.nextIdx],
-                      let wrEntry = workingRange.entry(at: e.nextIdx) else { continue }
-                let freshFragments = extractFragments(table: e.next, layout: wrEntry.layout)
-                cell.cancelPendingMedia()
-                spawnMediaFetches(for: cell, fragments: freshFragments, itemID: e.next.itemID)
+                tookInPlaceFastPath = true
+            } else {
+                workingRange.invalidateAll()
+                let pipeline = self.pipeline
+                Task { await pipeline.markInvalidated() }
             }
         }
 
-        // Reset reachEnd gate if item count grew (new page arrived).
-        if items.count > oldItems.count {
+        _pendingFragmentIndices.removeAll(keepingCapacity: true)
+        _pendingFragmentIndices.formUnion(keptCells.keys.filter { !blockDiffResolvedIndices.contains($0) })
+
+        return tookInPlaceFastPath
+    }
+
+    /// One visible cell's reuse decision for `reuseOrRecycleVisibleCells`'s loop: recycle it back
+    /// to the pool, or keep it (detached, re-attached later by `updateVisibleCells`'s mount loop)
+    /// and attempt the per-block diff fast path.
+    private func reconcileCell(
+        prevIdx: Int,
+        cell: RenderCell,
+        survivorByPrevIdx: [Int: Int],
+        blockDiffInputs: [Int: (previousTable: NodeTable, newTable: NodeTable, previousFragments: [Fragment])],
+        canDeferInvalidation: Bool,
+        width: CGFloat,
+        scale: CGFloat
+    ) -> CellReuseResult {
+        guard let nextIdx = survivorByPrevIdx[prevIdx], nextIdx < tables.count,
+              reuseDecision(oldID: cell.currentItemID, newID: tables[nextIdx].itemID) == .inPlace
+        else {
+            cell.layer.removeFromSuperlayer()
+            returnToPool(cell)
+            return .recycled
+        }
+
+        // Detach without repositioning: survivor indices can shift relative to items still to be
+        // mounted this pass (e.g. a prepend). updateVisibleCells' mount loop re-attaches in
+        // ascending visible-index order to preserve z-order.
+        cell.layer.removeFromSuperlayer()
+
+        // Per-block diff: unchanged blocks reused verbatim from FrozenBitmapStore, only the hot
+        // tail touched. Returns nil when it can't guarantee correct content cheaply, falling
+        // through to the full-refresh path.
+        guard let inputs = blockDiffInputs[prevIdx], nextIdx < items.count,
+              let result = applyInPlaceBlockDiff(
+                  previousTable: inputs.previousTable,
+                  previousFragments: inputs.previousFragments,
+                  newTable: inputs.newTable,
+                  itemID: items[nextIdx].id,
+                  width: width,
+                  scale: scale
+              )
+        else {
+            return .kept(nextIdx: nextIdx, blockDiffResolved: false, workingRangeCommit: nil)
+        }
+
+        let delta = VerticalLayoutProvider.refineFrames(&resolvedFrames, at: nextIdx, newHeight: result.height)
+        applyContentHeightDelta(delta)
+        estimatedIndices.remove(nextIdx)
+        cell.layer.frame = resolvedFrames[nextIdx]
+        // Merge image cache hits with the block-diff's freshly-resolved text bitmaps — fragment
+        // ids never collide across content kinds within one item's NodeTable, so a plain
+        // overwrite-merge is safe.
+        var syncMap = buildSyncMap(for: result.fragments, itemID: inputs.newTable.itemID)
+        for (id, bitmap) in result.textBitmaps { syncMap[id] = bitmap }
+        let entering = cell.updateBlockViewport(
+            fragments: result.fragments,
+            viewportInCell: blockViewport(for: cell.layer.frame),
+            synchronousContent: syncMap
+        )
+        spawnMediaFetches(for: cell, fragments: entering, itemID: inputs.newTable.itemID, syncMap: syncMap)
+
+        var workingRangeCommit: (layout: ResolvedLayout, fragments: [Fragment])?
+        if canDeferInvalidation {
+            let syntheticLayout = ResolvedLayout(
+                totalFrame: CGRect(x: 0, y: 0, width: width, height: result.height),
+                children: result.fragments.map { ResolvedLayout(totalFrame: $0.frame, nodeIndex: $0.id) },
+                nodeIndex: 0
+            )
+            workingRangeCommit = (syntheticLayout, result.fragments)
+        }
+        return .kept(nextIdx: nextIdx, blockDiffResolved: true, workingRangeCommit: workingRangeCommit)
+    }
+
+    /// Reset reachEnd gate if item count grew (new page arrived). On the fully-resolved fast
+    /// path, WorkingRange was patched directly (not invalidated), so nothing needs a pipeline
+    /// re-measure — re-notifying would just spawn a wasted Task that early-returns inside
+    /// onIndexBoundary.
+    private func finishItemsChange(itemCountGrew: Bool, tookInPlaceFastPath: Bool) {
+        if itemCountGrew {
             reachEndFired = false
         }
-
-        // On the fully-resolved fast path, WorkingRange was patched directly (not invalidated),
-        // so nothing needs a pipeline re-measure. Re-notifying would just spawn a wasted Task
-        // that early-returns inside onIndexBoundary.
         if !tookInPlaceFastPath {
             lastNotifiedLeadingIndex = -1
         }
-
         syncContentSize()
         setNeedsLayout()
     }
