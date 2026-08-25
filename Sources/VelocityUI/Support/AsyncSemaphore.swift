@@ -14,7 +14,9 @@ public actor AsyncSemaphore {
     private var count: Int
     // Indexed by DecodePriority.rawValue. One FIFO queue per tier; signal() scans tiers
     // low-to-high and pops the first non-empty one.
-    private var waiterTiers: [[(id: UUID, cont: CheckedContinuation<Void, any Error>)]] =
+    /// `internal`, not `private`: `_waiterCount(priority:)` in AsyncSemaphore+TestHooks.swift
+    /// reads this.
+    var waiterTiers: [[(id: UUID, cont: CheckedContinuation<Void, any Error>)]] =
         Array(repeating: [], count: DecodePriority.allCases.count)
     // Mirrors the total count across all tiers so signal()'s no-waiter branch stays a single
     // Int comparison — no per-tier array probing.
@@ -95,14 +97,6 @@ public actor AsyncSemaphore {
             return
         }
     }
-
-    #if canImport(XCTest)
-    /// Test-only: number of waiters queued in the given tier — a deterministic anchor tests can poll
-    /// on instead of sleeping a fixed duration.
-    func _waiterCount(priority: DecodePriority) -> Int {
-        waiterTiers[priority.rawValue].count
-    }
-    #endif
 }
 
 #endif

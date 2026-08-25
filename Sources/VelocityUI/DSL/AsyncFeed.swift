@@ -17,7 +17,8 @@ public struct AsyncFeed<
 
     // MARK: - Stored properties (value-type copies for modifier chaining)
 
-    private let items: [Item]
+    /// `internal`, not `private`: `_testItemsDiffer(uiView:)` in AsyncFeed+TestHooks.swift reads this.
+    let items: [Item]
     private let environment: RenderEnvironment
     private let layout: GridLayout
     private let cellBuilder: @MainActor (Item) -> Cell
@@ -134,7 +135,8 @@ public struct AsyncFeed<
 
     /// Shared body of `makeUIView(context:)`, factored out so it can be exercised without a SwiftUI
     /// `Context` (no public initializer, can't be constructed outside SwiftUI's runtime).
-    private func buildUIView(coordinator: Coordinator) -> FeedScrollView<Item> {
+    /// `internal`, not `private`: `_testMakeUIView(coordinator:)` in AsyncFeed+TestHooks.swift calls this.
+    func buildUIView(coordinator: Coordinator) -> FeedScrollView<Item> {
         coordinator.cellBuilder = cellBuilder
         coordinator.onTap = onTap
         coordinator.onReachEnd = onReachEnd
@@ -290,7 +292,8 @@ public struct AsyncFeed<
     // extend here rather than adding CATransaction calls at other sites.
     private func shouldAnimate(context: Context) -> Bool { false }
 
-    private func itemsDiffer(_ a: [Item], _ b: [Item], on uiView: FeedScrollView<Item>) -> Bool {
+    /// `internal`, not `private`: `_testItemsDiffer(uiView:)` in AsyncFeed+TestHooks.swift calls this.
+    func itemsDiffer(_ a: [Item], _ b: [Item], on uiView: FeedScrollView<Item>) -> Bool {
         // (a) Count mismatch — O(1), catches "page appended" case.
         if a.count != b.count { return true }
         // (b) Buffer identity — O(1), catches CoW-preserved arrays.
@@ -305,22 +308,5 @@ public struct AsyncFeed<
         uiView._testHooks.itemsDifferDeepEqualCount += 1
         return a != b
     }
-
-    // MARK: - Test hooks
-
-    #if canImport(XCTest)
-    /// Test-only: exercises the same coordinator-wiring path as `makeUIView(context:)` without a
-    /// SwiftUI `Context` (no public initializer). Pass the same `Coordinator` across repeated calls
-    /// to simulate SwiftUI re-invoking `makeUIView` for one view identity.
-    func _testMakeUIView(coordinator: Coordinator) -> FeedScrollView<Item> {
-        buildUIView(coordinator: coordinator)
-    }
-
-    /// Test-only: exercises `itemsDiffer` exactly as `updateUIView` does — comparing `uiView.items`
-    /// against this struct's `items` — without requiring a SwiftUI `Context`.
-    func _testItemsDiffer(uiView: FeedScrollView<Item>) -> Bool {
-        itemsDiffer(uiView.items, items, on: uiView)
-    }
-    #endif
 }
 #endif

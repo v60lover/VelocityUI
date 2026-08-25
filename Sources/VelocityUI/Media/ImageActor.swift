@@ -29,7 +29,9 @@ private struct DecodeResult: @unchecked Sendable {
     let rawSourceSize: CGSize?  // pixel dimensions from source header, for DimensionCache
 }
 
-private final class ImageCacheKey: NSObject {
+/// `internal`, not `private`: `_testInFlightDecodePriority(...)` in ImageActor+TestHooks.swift
+/// constructs a key to look up `inFlightDecodes`.
+final class ImageCacheKey: NSObject {
     let url: URL
     let pixelWidth: Int    // Int(targetSize.width * scale, rounded) — avoids CGFloat equality
     let pixelHeight: Int
@@ -88,7 +90,9 @@ public actor ImageActor {
         attributes: .concurrent
     )
     private static let maxConcurrentDecodes = 3
-    private let decodeSemaphore = AsyncSemaphore(value: ImageActor.maxConcurrentDecodes)
+    /// `internal`, not `private`: `_testDecodeSemaphoreWaiterCount(priority:)` in
+    /// ImageActor+TestHooks.swift reads this.
+    let decodeSemaphore = AsyncSemaphore(value: ImageActor.maxConcurrentDecodes)
 
     /// Upper bound on the scale (screen points → pixels) used for the cache key and decode target
     /// size. Clamps real display scale (e.g. 3x) down before decode, so the 64 MB NSCache holds
@@ -102,7 +106,9 @@ public actor ImageActor {
     /// Per-key admission record for the in-flight decode's `decodeSemaphore` waiter, kept in lockstep
     /// with `inFlight`. Lets a later, higher-priority joiner elevate the waiter via
     /// `AsyncSemaphore.elevate(id:to:)` instead of silently inheriting the original priority.
-    private var inFlightDecodes: [ImageCacheKey: (id: UUID, priority: DecodePriority)] = [:]
+    /// `internal`, not `private`: `_testInFlightDecodePriority(...)` in ImageActor+TestHooks.swift
+    /// reads this.
+    var inFlightDecodes: [ImageCacheKey: (id: UUID, priority: DecodePriority)] = [:]
     private let session: URLSession
     /// `nonisolated` so RenderEnvironment can check identity (===) in its designated init.
     nonisolated let dimensionCache: DimensionCache
@@ -122,10 +128,8 @@ public actor ImageActor {
         self.session = session
         self.dimensionCache = dimensionCache
         self.decodeScaleCeiling = decodeScaleCeiling
-        #if canImport(XCTest)
         // Tag decodeQueue so the async closure can verify it is on the right queue.
         decodeQueue.setSpecific(key: _testDecodeQueueKey, value: true)
-        #endif
     }
 
     /// Test-only convenience: creates a private DimensionCache not shared with any other
@@ -136,103 +140,18 @@ public actor ImageActor {
 
     // MARK: - Test hooks
 
-    #if canImport(XCTest)
     /// DispatchSpecificKey set on decodeQueue so the decode closure can assert it's running on the
-    /// expected queue, not the cooperative pool.
+    /// expected queue, not the cooperative pool. `nonisolated`, not actor-isolated — read from inside
+    /// the raw `decodeQueue.async` closure, which isn't on the actor. A stored instance property, so
+    /// it can't move to ImageActor+TestHooks.swift (extensions forbid stored instance properties);
+    /// always present (no XCTest guard) since `init` and the decode closure reference it unconditionally.
     nonisolated let _testDecodeQueueKey = DispatchSpecificKey<Bool>()
 
-    /// Counts decode closures that ran on velocityui.image.decode (expected) vs other queues.
-    /// Assumes one `ImageActor` under test at a time — call `_testDecodeResetCounts()` before each
-    /// reading test, or risk false-passing/under-counted results.
-    nonisolated(unsafe) private static let _testDecodeLock = NSLock()
-    nonisolated(unsafe) static var _testDecodeOnQueueCount: Int = 0
-    nonisolated(unsafe) static var _testDecodeTotalCount: Int = 0
-
-    nonisolated static func _testDecodeRecord(onQueue: Bool) {
-        ImageActor._testDecodeLock.lock()
-        defer { ImageActor._testDecodeLock.unlock() }
-        ImageActor._testDecodeTotalCount += 1
-        if onQueue { ImageActor._testDecodeOnQueueCount += 1 }
-    }
-
-    /// Reset counters before each test that checks decode queue isolation.
-    nonisolated static func _testDecodeResetCounts() {
-        ImageActor._testDecodeLock.lock()
-        defer { ImageActor._testDecodeLock.unlock() }
-        ImageActor._testDecodeOnQueueCount = 0
-        ImageActor._testDecodeTotalCount = 0
-    }
-
-    /// Test-only interposer: when non-nil, `image()` suspends here before the cache-hit check, letting
-    /// tests hold a decode in-flight past a cross-item recycle. Not cancellation-aware. Test-only.
-    var _testDecodeGateHook: (@Sendable () async -> Void)?
-
-    /// Sets `_testDecodeGateHook` from test code; actor-isolated so the assignment is safe across executor boundaries.
-    func set_testDecodeGateHook(_ hook: (@Sendable () async -> Void)?) {
-        _testDecodeGateHook = hook
-    }
-
-    /// Test-only interposer in `preload()`, firing before the decode Task is created. Cancelling the
-    /// outer task here doesn't cancel the inner decode Task (unstructured). Test-only.
-    var _testPreloadGateHook: (@Sendable () async -> Void)?
-
-    /// Sets `_testPreloadGateHook` from test code.
-    func set_testPreloadGateHook(_ hook: (@Sendable () async -> Void)?) {
-        _testPreloadGateHook = hook
-    }
-
-    /// Test-only interposer in `prefetch()`, firing before the inner decode Task is created — use to
-    /// observe actor state at the inFlight boundary.
-    var _testPrefetchGateHook: (@Sendable () async -> Void)?
-
-    /// Sets `_testPrefetchGateHook` from test code.
-    func set_testPrefetchGateHook(_ hook: (@Sendable () async -> Void)?) {
-        _testPrefetchGateHook = hook
-    }
-
-    /// Test-only interposer in `_decode()`, after the decode slot is acquired — cancel the inner Task
-    /// here to verify slot release. Gates `image()`, `preload()`, and `prefetch()` (all funnel through
-    /// `_decode()`). Test-only.
-    var _testDecodeBodyGateHook: (@Sendable () async -> Void)?
-
-    func set_testDecodeBodyGateHook(_ hook: (@Sendable () async -> Void)?) {
-        _testDecodeBodyGateHook = hook
-    }
-
-    /// URLs that reached the cold-path inside `prefetch()`, after the inFlight/cache checks pass.
-    /// Actor-isolated; access with `await actor._testGetPrefetchedURLs()`.
-    private(set) var _testPrefetchedURLs: [URL] = []
-
-    func _testGetPrefetchedURLs() -> [URL] { _testPrefetchedURLs }
-    func _testResetPrefetchedURLs() { _testPrefetchedURLs.removeAll() }
-
-    /// Test seam: the `priority` argument each cold-path `prefetch()` call carried, paired with its
-    /// URL, in the same order as `_testPrefetchedURLs`. Lets tests verify per-call admission tier
-    /// without threading a fake ImageActor through RenderPipeline.
-    private(set) var _testPrefetchedPriorities: [(url: URL, priority: DecodePriority)] = []
-
-    func _testGetPrefetchedPriorities() -> [(url: URL, priority: DecodePriority)] { _testPrefetchedPriorities }
-    func _testResetPrefetchedPriorities() { _testPrefetchedPriorities.removeAll() }
-
-    /// Test-only: number of decode-gate waiters queued at `priority` on `decodeSemaphore` — a
-    /// deterministic anchor tests can poll on instead of sleeping a fixed duration.
-    func _testDecodeSemaphoreWaiterCount(priority: DecodePriority) async -> Int {
-        await decodeSemaphore._waiterCount(priority: priority)
-    }
-
-    /// Test-only: the admission priority currently recorded in `inFlightDecodes` for the key built
-    /// from these parameters (`ImageCacheKey` is file-private, so tests can't construct one directly).
-    /// Lets a test observe a priority elevation directly, independent of `AsyncSemaphore`'s bookkeeping.
-    func _testInFlightDecodePriority(
-        url: URL,
-        targetSize: CGSize,
-        cornerRadius: CGFloat,
-        scale: CGFloat
-    ) -> DecodePriority? {
-        let key = ImageCacheKey(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: min(scale, decodeScaleCeiling))
-        return inFlightDecodes[key]?.priority
-    }
-    #endif
+    /// Stored test-only observability state that must stay actor-isolated (gate hooks, prefetch
+    /// tracking) — as opposed to `_testDecodeQueueKey` above, which deliberately isn't. Always
+    /// present (no XCTest guard) — production code (`image()`, `preload()`, `prefetch()`, `_decode()`)
+    /// references it unconditionally. See `ImageActorTestHooks` in ImageActor+TestHooks.swift.
+    let _testHooks = ImageActorTestHooks()
 
     // MARK: - Public API
 
@@ -251,11 +170,9 @@ public actor ImageActor {
         cornerRadius: CGFloat,
         scale: CGFloat
     ) async -> CGImage? {
-        #if canImport(XCTest)
         // Test gate: suspends here so a test can control timing relative to a cross-item recycle.
         // Not cancellation-aware — resumes only when the test explicitly signals.
-        if let hook = _testDecodeGateHook { await hook() }
-        #endif
+        if let hook = _testHooks.decodeGateHook { await hook() }
 
         let decodeScale = min(scale, decodeScaleCeiling)
         let key = ImageCacheKey(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: decodeScale)
@@ -320,9 +237,7 @@ public actor ImageActor {
 
         guard !Task.isCancelled else { return }
 
-        #if canImport(XCTest)
-        if let hook = _testPreloadGateHook { await hook() }
-        #endif
+        if let hook = _testHooks.preloadGateHook { await hook() }
 
         let capturedData = data
         let capturedTargetSize = targetSize
@@ -382,18 +297,14 @@ public actor ImageActor {
 
         guard !Task.isCancelled else { return }
 
-        #if canImport(XCTest)
-        if let hook = _testPrefetchGateHook { await hook() }
-        #endif
+        if let hook = _testHooks.prefetchGateHook { await hook() }
 
         // Generation guard: check immediately before spawning — no await between check
         // and Task creation ensures the check-and-spawn pair is effectively atomic.
         if let isCurrent, !isCurrent() { return }
 
-        #if canImport(XCTest)
-        _testPrefetchedURLs.append(url)
-        _testPrefetchedPriorities.append((url, priority))
-        #endif
+        _testHooks.prefetchedURLs.append(url)
+        _testHooks.prefetchedPriorities.append((url, priority))
 
         let task = Task<DecodeResult, Never>(priority: .utility) {
             await self._networkFetchAndDecode(key: key, url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: decodeScale, priority: priority)
@@ -480,22 +391,18 @@ public actor ImageActor {
             return DecodeResult(image: nil, rawSourceSize: nil)
         }
 
-        #if canImport(XCTest)
         // Gate fires with the decode slot held — cancel the inner Task during this hook
         // then signal; the guard below releases the slot on resumed cancellation.
-        if let hook = _testDecodeBodyGateHook { await hook() }
+        if let hook = _testHooks.decodeBodyGateHook { await hook() }
         guard !Task.isCancelled else {
             Task { await decodeSemaphore.signal() }
             return DecodeResult(image: nil, rawSourceSize: nil)
         }
-        #endif
 
         let sem = decodeSemaphore
-        #if canImport(XCTest)
         // Capture before the continuation (actor-isolated context) so the @Sendable
         // closure can call DispatchQueue.getSpecific without retaining self.
         let capturedQueueKey = _testDecodeQueueKey
-        #endif
         return await withCheckedContinuation { cont in
             let capturedData = data
             let capturedSize = targetSize
@@ -505,10 +412,8 @@ public actor ImageActor {
             // TODO: decodeQueue runs at .userInitiated regardless of the calling Task's priority.
             // Prefetch decodes should run at .utility — deferred to fling-handling.
             decodeQueue.async {
-                #if canImport(XCTest)
                 let onDecodeQueue = DispatchQueue.getSpecific(key: capturedQueueKey) == true
                 ImageActor._testDecodeRecord(onQueue: onDecodeQueue)
-                #endif
                 #if DEBUG
                 let decodeStart = CFAbsoluteTimeGetCurrent()
                 #endif

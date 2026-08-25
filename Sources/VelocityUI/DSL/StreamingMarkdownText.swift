@@ -88,9 +88,7 @@ public final class StreamingMarkdownController {
             if block.isSealed, let cached = sealedNodes[block.blockID] {
                 return cached
             }
-            #if canImport(XCTest)
-            _styleCallCount += 1
-            #endif
+            _testHooks.styleCount += 1
             let styled = IncrementalMarkdownParser.style(block.parsed, theme: theme)
             let node = TextNode(
                 styled.content, font: styled.font, runs: styled.runs,
@@ -103,8 +101,8 @@ public final class StreamingMarkdownController {
         }
     }
 
-    #if canImport(XCTest)
-    /// Test-only: counts `style()` calls from `renderNodes` — a cache hit must not increment it.
-    private(set) var _styleCallCount: Int = 0
-    #endif
+    /// Stored test-only observability state. Always present (no XCTest guard) — production code
+    /// (`renderNodes`) references it unconditionally. See `StreamingMarkdownControllerTestHooks`
+    /// in StreamingMarkdownText+TestHooks.swift.
+    let _testHooks = StreamingMarkdownControllerTestHooks()
 }

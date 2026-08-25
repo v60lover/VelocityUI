@@ -13,11 +13,10 @@ final class HotBlockRasterizer {
     private var lastSize: CGSize = .zero
     private var previousFragmentCount: Int = 0
 
-    #if canImport(XCTest)
-    /// Test-only: fragments redrawn by the most recent `append(_:width:scale:)` call.
-    /// Lets a flatness test assert this stays constant per token-kind as the block grows.
-    private(set) var _debugLastRedrawnFragmentCount: Int = 0
-    #endif
+    /// Stored test-only observability state. Always present (no XCTest guard) — production code
+    /// (`append(_:width:scale:)`) references it unconditionally. See `HotBlockRasterizerTestHooks`
+    /// in HotBlockRasterizer+TestHooks.swift.
+    let _testHooks = HotBlockRasterizerTestHooks()
 
     /// Appends `descriptor`'s current content (its full text so far — `HotBlockMeasurer`
     /// computes the delta internally) at `width`, returning the new height and the
@@ -40,9 +39,7 @@ final class HotBlockRasterizer {
         guard size.width > 0, size.height > 0 else {
             image = nil
             previousFragmentCount = newFragments.count
-            #if canImport(XCTest)
-            _debugLastRedrawnFragmentCount = 0
-            #endif
+            _testHooks.lastRedrawnFragmentCount = 0
             return (height, nil)
         }
 
@@ -73,16 +70,12 @@ final class HotBlockRasterizer {
                     fragment.draw(at: fragment.layoutFragmentFrame.origin, in: ctx.cgContext)
                 }
             }.cgImage
-            #if canImport(XCTest)
-            _debugLastRedrawnFragmentCount = redrawFragments.count
-            #endif
+            _testHooks.lastRedrawnFragmentCount = redrawFragments.count
         } else {
             // Non-append (first call, or a full-reset fallback): the block changed
             // everywhere, so a full rasterize is correct here, not a missed optimization.
             image = rasterizeText(descriptor, size: size, scale: scale)
-            #if canImport(XCTest)
-            _debugLastRedrawnFragmentCount = newFragments.count
-            #endif
+            _testHooks.lastRedrawnFragmentCount = newFragments.count
         }
 
         previousFragmentCount = newFragments.count
