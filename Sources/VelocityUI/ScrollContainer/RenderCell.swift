@@ -34,14 +34,14 @@ public final class MediaHandle: Sendable {
 /// once all media loads.
 @MainActor
 public final class RenderCell {
-    private enum LayerIdentity: Hashable {
+    enum LayerIdentity: Hashable {
         case block(BlockID)
         case positional(Int)
     }
 
     public let layer = CALayer()
     private let placeholderLayer: CAGradientLayer
-    private let contentLayer = CALayer()
+    let contentLayer = CALayer()
 
     /// Set at init; stored as let so future per-kind pools can dispatch on this value.
     public let kind: CellKind
@@ -52,8 +52,8 @@ public final class RenderCell {
 
     /// Layers follow an explicit block identity through insertions; positional fragments retain
     /// the legacy node-index identity.
-    private var sublayers: [LayerIdentity: CALayer] = [:]
-    private var layerIdentityByFragmentID: [Int: LayerIdentity] = [:]
+    var sublayers: [LayerIdentity: CALayer] = [:]
+    var layerIdentityByFragmentID: [Int: LayerIdentity] = [:]
     /// Ordered frame metadata survives while offscreen block layers are released.
     /// It lets the scroll path find the next resident span without recreating the full cell.
     private var blockFragments: [Fragment] = []
@@ -335,37 +335,6 @@ public final class RenderCell {
         case fromThumbnailPlaceholder
     }
 
-    #if canImport(XCTest)
-    /// Counts applyContent privacy-guard rejections (stale itemID deliveries). Should stay zero
-    /// in normal operation; nonzero indicates a cancellation-propagation gap.
-    nonisolated(unsafe) static var _privacyGuardFiredCount: Int = 0
-
-    /// True once `contentLayer` is visible: all images have loaded, or a paintable text bitmap
-    /// arrived before a pending image. Tests must not infer this from async-delivery counters.
-    var _debugIsContentRevealed: Bool { contentLayer.opacity == 1 }
-
-    /// Every fragment id currently painting a `CGImage`, mapped to that exact instance.
-    /// Test-only — lets tests assert pixel identity, not just frame height.
-    var _debugPaintedBitmaps: [Int: CGImage] {
-        var result: [Int: CGImage] = [:]
-        for (id, identity) in layerIdentityByFragmentID {
-            guard let layer = sublayers[identity] else { continue }
-            // `contents as? CGImage` always succeeds for any CF-bridged Any — CFGetTypeID is the
-            // correct way to check a CF type identity before the cast.
-            guard let contents = layer.contents else { continue }
-            let cf = contents as CFTypeRef
-            guard CFGetTypeID(cf) == CGImage.typeID else { continue }
-            result[id] = (cf as! CGImage)
-        }
-        return result
-    }
-
-    /// Total count of successful `applyContent` deliveries across all cells. Test-only — used
-    /// to assert the sync mount-time paint path bypasses `applyContent` entirely.
-    nonisolated(unsafe) static var _debugApplyContentCount: Int = 0
-    nonisolated static func _debugResetApplyContentCount() { _debugApplyContentCount = 0 }
-    #endif
-
     /// Apply a pre-decoded BGRA8888-normalised image. Crossfades over 0.2s via CATransition
     /// (`CALayer.contents` has no default CA action, so an instant swap would otherwise occur),
     /// then fades out the placeholder once all image fragments have arrived.
@@ -378,9 +347,7 @@ public final class RenderCell {
         // Privacy guard: reject stale callbacks from a previous item's fetch.
         // nil currentItemID means the cell is fresh/unbound — any delivery is accepted.
         if let currentID = currentItemID, currentID != itemID {
-            #if canImport(XCTest)
             RenderCell._privacyGuardFiredCount += 1
-            #endif
             return nil
         }
         guard let sub = layer(for: id) else { return nil }
@@ -403,9 +370,7 @@ public final class RenderCell {
 
         fadeOutPlaceholderIfAllReady()
 
-        #if canImport(XCTest)
         RenderCell._debugApplyContentCount += 1
-        #endif
 
         return transitionKind
     }

@@ -298,15 +298,11 @@ public struct AsyncFeed<
             b.withUnsafeBufferPointer { bp in ap.baseAddress == bp.baseAddress }
         }
         if sameBuffer {
-            #if canImport(XCTest)
-            uiView._itemsDiffer_bufferHitCount += 1
-            #endif
+            uiView._testHooks.itemsDifferBufferHitCount += 1
             return false
         }
         // (c) Deep equality — Item: Equatable required.
-        #if canImport(XCTest)
-        uiView._itemsDiffer_deepEqualCount += 1
-        #endif
+        uiView._testHooks.itemsDifferDeepEqualCount += 1
         return a != b
     }
 

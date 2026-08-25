@@ -76,7 +76,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     // MARK: - Dependencies
 
     private let pipeline: RenderPipeline
-    private let workingRange: WorkingRange
+    let workingRange: WorkingRange
     private let differ: RenderDiffer
     private let environment: RenderEnvironment
 
@@ -87,9 +87,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     // MARK: - State
 
     /// NodeTables in display order. Parallel to `items`.
-    private var tables: [NodeTable] = []
+    var tables: [NodeTable] = []
     /// Absolute frames in scroll-content coordinates. Parallel to `items`.
-    private var resolvedFrames: [CGRect] = []
+    var resolvedFrames: [CGRect] = []
     /// Previous snapshot passed to RenderDiffer.
     private var snapshot: LayoutSnapshot = LayoutSnapshot(tables: [])
 
@@ -97,7 +97,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// `refineKnownFrames()` iterates this set; it is empty in steady state.
     private var estimatedIndices: Set<Int> = []
 
-    private var visibleCells: [Int: RenderCell] = [:]
+    var visibleCells: [Int: RenderCell] = [:]
     private var cellPools: [CellKind: [RenderCell]] = [:]
 
     /// Leading index sent to pipeline on last boundary crossing.
@@ -112,13 +112,13 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// portion not yet written to `contentSize.height`. Committed in one write once the scroll
     /// leaves the bounce region. Writing `contentSize.height` mid-bounce moves the animation's
     /// target and jumps the viewport, so the write is deferred, not the paint.
-    private var _deferredContentSizeDelta: CGFloat = 0
+    var _deferredContentSizeDelta: CGFloat = 0
 
     /// Direction of travel along the scroll axis, from the sign of the `contentOffset.y` delta.
     /// Holds its last value at rest (avoids flicker at rubber-band edges). Threaded into
     /// `pipeline.onIndexBoundary(direction:)` so ahead/behind prefetch classification tracks
     /// actual travel direction.
-    private var scrollDirection: ScrollDirection = .down
+    var scrollDirection: ScrollDirection = .down
 
     private var lastLayoutWidth: CGFloat = 0
     /// False until the first `layoutSubviews` width transition has been handled. Distinguishes
@@ -148,9 +148,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
 
     /// Indices where the cell was mounted with applyLayout([]) during a WorkingRange miss.
     /// refineKnownFrames delivers real fragments and spawns media fetches when entries arrive.
-    private var _pendingFragmentIndices: Set<Int> = []
+    var _pendingFragmentIndices: Set<Int> = []
 
-    private var tableCache: [Item.ID: (sig: AnyHashable, table: NodeTable)] = [:]
+    var tableCache: [Item.ID: (sig: AnyHashable, table: NodeTable)] = [:]
 
     /// Placeholder height for items not yet measured by the pipeline.
     /// Affects the initial contentSize and the scroll distance to the first real layout.
@@ -165,144 +165,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// as before this was added. Set at init, like `warmWindow` — doesn't change later.
     public let layoutProvider: any LayoutProvider
 
-    // MARK: - Debug hooks
+    // MARK: - Test hooks
 
-    #if canImport(XCTest)
-    /// Counts Task spawns from leading-index boundary crossings inside `notifyPipelineIfNeeded`.
-    /// Does NOT count the one-shot `onReachEnd` spawn — that fires at most once per page.
-    private(set) var _taskSpawnCount: Int = 0
-
-    /// Mirrors `scrollDirection` as set in `layoutSubviews`. Test-only — lets tests assert the
-    /// signal flips from a real `contentOffset.y` delta.
-    private(set) var _lastScrollDirection: ScrollDirection = .down
-
-    /// Mirrors the `visRange` computed at the top of `updateVisibleCells()` — the range actually
-    /// used to mount cells this layout pass. Test-only.
-    private(set) var _lastVisibleRange: Range<Int> = 0..<0
-
-    /// Count of currently-mounted cells. Test-only observability for asserting the mounted set
-    /// stays bounded to the working-range window rather than growing with total item count.
-    var _visibleCellCount: Int { visibleCells.count }
-
-    /// `WorkingRange.currentRangeStart` passthrough — `workingRange` itself is a private
-    /// FeedScrollView property, unreachable from tests without this accessor.
-    var _debugWorkingRangeStart: Int { workingRange.currentRangeStart }
-
-    /// Branch counters for `AsyncFeed.itemsDiffer`'s buffer-identity fast path (O(1)) vs the
-    /// `Equatable` deep-comparison fallback (O(n)). Incremented by `itemsDiffer` itself, hence
-    /// not `private(set)`. Verifies the fast path is taken for CoW-preserved items arrays.
-    var _itemsDiffer_bufferHitCount: Int = 0
-    var _itemsDiffer_deepEqualCount: Int = 0
-
-    var _tableCacheCount: Int { tableCache.count }
-
-    /// Returns nil-entry count in WorkingRange for indices in [start, end). Used by the
-    /// integration suite to re-validate the ring-buffer warmup criterion end-to-end.
-    func _workingRangeMissCount(from start: Int, to end: Int) -> Int {
-        guard start < end else { return 0 }
-        let clampedEnd = min(end, tables.count)
-        guard start < clampedEnd else { return 0 }
-        return (start..<clampedEnd).filter { workingRange.entry(at: $0) == nil }.count
-    }
-
-    /// Resolved frame for an index, in scroll-content coordinates. nil if never laid out. Lets
-    /// tests compute a scroll offset from the real post-measure frame instead of a hardcoded
-    /// estimate that would drift once WorkingRange refines real heights.
-    func _debugResolvedFrame(at index: Int) -> CGRect? {
-        index < resolvedFrames.count ? resolvedFrames[index] : nil
-    }
-
-    /// Exercises the private `warmRange(viewportTop:viewportBottom:)` directly, against
-    /// `resolvedFrames` as they stand after the test's own `layoutSubviews()` call.
-    func _testWarmRange(viewportTop: CGFloat, viewportBottom: CGFloat) -> Range<Int> {
-        warmRange(viewportTop: viewportTop, viewportBottom: viewportBottom)
-    }
-
-    /// Returns the root CALayer of the cell mounted at item index, or nil if not visible.
-    /// Used by integration tests to compare layer identity across itemsDidChange calls.
-    func _cellLayer(at index: Int) -> CALayer? {
-        visibleCells[index]?.layer
-    }
-
-    /// True once the cell at `index` has revealed real image content for every image
-    /// fragment — path-independent (covers both the mount-time synchronous fast path and
-    /// the async `applyContent` path). `false` if the index has no mounted cell.
-    /// See `RenderCell._debugIsContentRevealed`'s docstring for why tests must poll this
-    /// instead of an applyContent-only delivery signal.
-    func _debugIsContentRevealed(at index: Int) -> Bool {
-        visibleCells[index]?._debugIsContentRevealed ?? false
-    }
-
-    /// See `RenderCell._debugPaintedBitmaps`'s doc. Empty dict if the index has no mounted cell.
-    func _debugPaintedBitmaps(at index: Int) -> [Int: CGImage] {
-        visibleCells[index]?._debugPaintedBitmaps ?? [:]
-    }
-
-    /// Re-derives fragments by walking `workingRange.entry(at: index)`'s `layout` through
-    /// `extractFragments`, using the item's current `NodeTable`. `nil` if there's no committed
-    /// WorkingRange entry or index is out of range. Test-only.
-    func _debugExtractFragmentsFromWorkingRange(at index: Int) -> [Fragment]? {
-        guard let entry = workingRange.entry(at: index), index < tables.count else { return nil }
-        return extractFragments(table: tables[index], layout: entry.layout)
-    }
-
-    /// Count of indices still awaiting fragment delivery via refineKnownFrames — cells mounted
-    /// with `applyLayout([])` during a WorkingRange miss LayoutCache couldn't resolve inline.
-    /// Should be 0 whenever LayoutCache is warm for all visible indices at mount time.
-    var _pendingFragmentIndicesCount: Int { _pendingFragmentIndices.count }
-
-    /// Counts `dequeue(kind:)` calls that fell through to `RenderCell(kind:)` (a pool miss, the
-    /// sole alloc site). Verifies the cell pool converges after warm-up instead of missing on
-    /// most dequeues every frame.
-    private(set) var _dequeueAllocCount: Int = 0
-
-    /// Counts `dequeue(kind:)` calls served from `cellPools` (a pool hit — no allocation).
-    var _dequeueHitCount: Int = 0
-
-    /// Counts `returnToPool(_:)` calls — a cell's shell handed back to `cellPools` rather than
-    /// kept bound in `visibleCells`. A same-id streaming update must NOT increment this (the
-    /// `.inPlace` branch keeps the shell); a different-id replacement or scroll eviction does.
-    private(set) var _returnToPoolCount: Int = 0
-
-    /// Counts calls into the in-place block-diff's text measure/rasterize primitives. The
-    /// anti-jank invariant under test: these counts per streaming update stay flat (bounded by
-    /// the hot tail plus at most one just-finalized block) as a message's block count grows —
-    /// never O(message length).
-    private(set) var _blockDiffMeasureCallCount: Int = 0
-    private(set) var _blockDiffRasterizeCallCount: Int = 0
-
-    /// Counts calls into the hot-append path (`environment.hotBlockRasterizerStore.append`).
-    /// The correct proxy for "the incremental rasterizer engaged" — the two counters above
-    /// legitimately stop growing for the hot tail once this path is wired in.
-    private(set) var _blockDiffHotAppendCallCount: Int = 0
-
-    /// Counts successful `growHotBlock(_:)` calls — the side-channel engaged and painted the
-    /// update without touching `items`/`differ`/`snapshot`.
-    private(set) var _growHotBlockSuccessCount: Int = 0
-
-    /// Overrides `isGestureActive` for tests, since UIKit's gesture-driven `isTracking`/
-    /// `isDragging`/`isDecelerating` can't be set without a live touch. `nil` (default) falls
-    /// back to the real UIKit signals.
-    var _debugGestureActiveOverride: Bool?
-
-    /// Overrides `isInBounceRegion` for tests, since driving a real edge rubber-band needs a live
-    /// pan gesture. `nil` (default) falls back to the real `contentOffset`/`contentSize` check.
-    var _debugBounceRegionOverride: Bool?
-
-    /// Overrides `isInTopBounceRegion` for tests — the edge distinction that decides whether a
-    /// streamed grow defers its `contentSize` write (top over-pull) or writes it immediately
-    /// (bottom over-pull). `nil` (default) falls back to the real `contentOffset.y < 0` check.
-    var _debugTopBounceRegionOverride: Bool?
-
-    /// Overrides `isScrollAtRest` for tests — the real `isTracking`/`isDragging`/`isDecelerating`
-    /// signals can't be set without a live touch. `nil` (default) falls back to them.
-    var _debugScrollAtRestOverride: Bool?
-
-    /// The pending, not-yet-committed content-height growth accumulated while in the bounce
-    /// region. Non-zero only during an edge over-pull; returns to 0 once the deferred delta is
-    /// flushed. Test-only observability for the defer/flush cycle.
-    var _debugDeferredContentSizeDelta: CGFloat { _deferredContentSizeDelta }
-    #endif
+    /// Container for test-only observability/override state that can't live in
+    /// `FeedScrollView+TestHooks.swift` as an extension (extensions forbid stored instance
+    /// properties). Always present — see the type's own docstring for why it isn't `#if`-gated.
+    let _testHooks = FeedScrollViewTestHooks()
 
     // MARK: - Init
 
@@ -433,9 +301,6 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
         if offsetY != lastScrollOffsetY {
             scrollDirection = offsetY > lastScrollOffsetY ? .down : .up
             lastScrollOffsetY = offsetY
-            #if canImport(XCTest)
-            _lastScrollDirection = scrollDirection
-            #endif
         }
 
         let w = bounds.width
@@ -747,9 +612,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
                     return s
                 },
                 rasterize: { [self] descriptor, size, s in
-                    #if canImport(XCTest)
-                    _blockDiffRasterizeCallCount += 1
-                    #endif
+                    _testHooks.blockDiffRasterizeCallCount += 1
                     return rasterizeText(descriptor, size: size, scale: s)
                 }
             )
@@ -771,9 +634,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
         // into FrozenBitmapStore since the block is still growing; artifact stays resident.
         func measureAndRasterizeHot(_ block: Block) -> (height: CGFloat, bitmap: CGImage?)? {
             guard case .text(let descriptor) = block.fragment.content else { return nil }
-            #if canImport(XCTest)
-            _blockDiffHotAppendCallCount += 1
-            #endif
+            _testHooks.blockDiffHotAppendCallCount += 1
             let result = environment.hotBlockRasterizerStore.append(
                 descriptor, width: block.width, scale: scale, contentHash: block.contentHash, for: block.key
             )
@@ -984,9 +845,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// Allocates fresh TextKit objects per call instead — bounded, since this path touches at
     /// most one or two text blocks per update.
     private func measureTextSync(_ descriptor: TextDescriptor, width: CGFloat) -> CGSize {
-        #if canImport(XCTest)
-        _blockDiffMeasureCallCount += 1
-        #endif
+        _testHooks.blockDiffMeasureCallCount += 1
         return TextMeasurementContext().measure(descriptor, width: width)
     }
 
@@ -996,9 +855,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// gates on. Wraps UIKit's read-only gesture signals behind one property so tests can
     /// override it via `_debugGestureActiveOverride` without a live touch.
     private var isGestureActive: Bool {
-        #if canImport(XCTest)
-        if let override = _debugGestureActiveOverride { return override }
-        #endif
+        if let override = _testHooks.gestureActiveOverride { return override }
         return isTracking || isDragging || isDecelerating
     }
 
@@ -1072,9 +929,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
         )
         workingRange.commit(syntheticLayout, result.fragments, at: lastIdx)
 
-        #if canImport(XCTest)
-        _growHotBlockSuccessCount += 1
-        #endif
+        _testHooks.growHotBlockSuccessCount += 1
         return true
     }
 
@@ -1210,9 +1065,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// writes are deferred until this is false again. False for all normal mid-content scrolling
     /// and inertia, so those paths are unchanged.
     private var isInBounceRegion: Bool {
-        #if canImport(XCTest)
-        if let override = _debugBounceRegionOverride { return override }
-        #endif
+        if let override = _testHooks.bounceRegionOverride { return override }
         let maxOffset = max(0, contentSize.height - bounds.height)
         return contentOffset.y < 0 || contentOffset.y > maxOffset
     }
@@ -1224,9 +1077,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// over-scrolled gap so the pulled-open "void" fills with the streaming tail instead of
     /// rubber-banding back up.
     private var isInTopBounceRegion: Bool {
-        #if canImport(XCTest)
-        if let override = _debugTopBounceRegionOverride { return override }
-        #endif
+        if let override = _testHooks.topBounceRegionOverride { return override }
         return contentOffset.y < 0
     }
 
@@ -1249,9 +1100,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// True when no gesture or bounce animation is in flight — nothing left to perturb, so a
     /// deferred height write is safe to commit even if `contentOffset` still sits at the edge.
     private var isScrollAtRest: Bool {
-        #if canImport(XCTest)
-        if let override = _debugScrollAtRestOverride { return override }
-        #endif
+        if let override = _testHooks.scrollAtRestOverride { return override }
         return !isTracking && !isDragging && !isDecelerating
     }
 
@@ -1333,9 +1182,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
             viewportTop: viewportTop,
             viewportBottom: viewportBottom
         )
-        #if canImport(XCTest)
-        _lastVisibleRange = visRange
-        #endif
+        _testHooks.lastVisibleRange = visRange
 
         // Keep-range for recycle decisions: same warm window that drives pipeline notification.
         let keepRange = warmRange(viewportTop: viewportTop, viewportBottom: viewportBottom)
@@ -1498,7 +1345,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     ///
     /// Runs on the scroll path: allocation-free, O(log n) — one extra binary search over the
     /// already-built `resolvedFrames`. No rebuild, no Task, no await.
-    private func warmRange(viewportTop: CGFloat, viewportBottom: CGFloat) -> Range<Int> {
+    func warmRange(viewportTop: CGFloat, viewportBottom: CGFloat) -> Range<Int> {
         switch warmWindow {
         case .items(let ahead, let behind):
             let vis = layoutProvider.visibleIndexRange(
@@ -1550,9 +1397,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
         let capturedScale  = max(1, traitCollection.displayScale)  // same guard as spawnMediaFetches
         let capturedDirection = scrollDirection
 
-        #if canImport(XCTest)
-        _taskSpawnCount += 1
-        #endif
+        _testHooks.taskSpawnCount += 1
         environment.pipelineTaskSpawnObserver?()
 
         Task { [weak self] in
@@ -1605,14 +1450,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// accessor — the key is never removed, so a hit never touches the hash table.
     private func dequeue(kind: CellKind) -> RenderCell {
         guard let cell = cellPools[kind]?.popLast() else {
-            #if canImport(XCTest)
-            _dequeueAllocCount += 1
-            #endif
+            _testHooks.dequeueAllocCount += 1
             return RenderCell(kind: kind, placeholderRenderer: environment.placeholderRenderer)
         }
-        #if canImport(XCTest)
-        _dequeueHitCount += 1
-        #endif
+        _testHooks.dequeueHitCount += 1
         return cell
     }
 
@@ -1621,9 +1462,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     private func returnToPool(_ cell: RenderCell) {
         cell.cancelPendingMedia()
         cellPools[cell.kind, default: []].append(cell)
-        #if canImport(XCTest)
-        _returnToPoolCount += 1
-        #endif
+        _testHooks.returnToPoolCount += 1
     }
 
     // MARK: - Media pipeline

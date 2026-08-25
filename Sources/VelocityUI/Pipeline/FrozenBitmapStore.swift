@@ -13,7 +13,7 @@ public final class FrozenBitmapStore: Sendable {
 
     /// LRU list node. `@unchecked Sendable`: it carries a non-`Sendable` `CGImage`,
     /// but every access happens under `state.withLock`.
-    private final class Node: @unchecked Sendable {
+    final class Node: @unchecked Sendable {
         let key: BlockKey
         var bitmap: CGImage
         var size: CGSize
@@ -29,7 +29,7 @@ public final class FrozenBitmapStore: Sendable {
         }
     }
 
-    private struct State {
+    struct State {
         /// Sole strong owner of every `Node`.
         var entries: [BlockKey: Node] = [:]
         /// Oldest = next eviction victim.
@@ -42,7 +42,7 @@ public final class FrozenBitmapStore: Sendable {
         var byteBudget: Int
     }
 
-    private let state: OSAllocatedUnfairLock<State>
+    let state: OSAllocatedUnfairLock<State>
 
     /// LRU eviction budget in bytes. Default 16 MB (~0.5 MB per text bitmap at 2x scale).
     public var byteBudget: Int {
@@ -232,30 +232,3 @@ public final class FrozenBitmapStore: Sendable {
         }
     }
 }
-
-#if canImport(XCTest)
-extension FrozenBitmapStore {
-    /// Test-only check that the linked list is internally consistent with `entries`
-    /// and `currentByteTotal`.
-    func debugValidateListInvariants() -> Bool {
-        state.withLock { st in
-            var walked: Set<BlockKey> = []
-            var summedCost = 0
-            var previous: FrozenBitmapStore.Node?
-            var current = st.head
-            while let node = current {
-                guard node.prev === previous else { return false }
-                walked.insert(node.key)
-                summedCost += node.cost
-                previous = node
-                current = node.next
-            }
-            guard previous === st.tail else { return false }
-            guard summedCost == st.currentByteTotal else { return false }
-            guard walked == Set(st.entries.keys) else { return false }
-            guard walked.count == st.entries.count else { return false }
-            return true
-        }
-    }
-}
-#endif
