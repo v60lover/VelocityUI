@@ -39,7 +39,7 @@ SOURCES_DIR="Sources"
 # (VelocityUI-zx7v.*, -bchq) decomposes them; when it is empty, delete it and
 # make --strict the CI default.
 ALLOWLIST=(
-  "Sources/VelocityUI/ScrollContainer/FeedScrollView.swift"
+  "Sources/VelocityUI/ScrollContainer/FeedScrollView+Items.swift"
   "Sources/VelocityUI/ScrollContainer/RenderCell.swift"
   "Sources/VelocityUI/Pipeline/IncrementalMarkdownParser.swift"
   "Sources/VelocityUI/Pipeline/FrozenBitmapStore.swift"
