@@ -35,19 +35,6 @@ final class FeedScrollViewTestHooks {
     /// update without touching `items`/`differ`/`snapshot`.
     var growHotBlockSuccessCount = 0
 
-    /// Counts `dequeue(kind:)` calls that fell through to `RenderCell(kind:)` (a pool miss, the
-    /// sole alloc site). Verifies the cell pool converges after warm-up instead of missing on
-    /// most dequeues every frame.
-    var dequeueAllocCount = 0
-
-    /// Counts `dequeue(kind:)` calls served from `cellPools` (a pool hit — no allocation).
-    var dequeueHitCount = 0
-
-    /// Counts `returnToPool(_:)` calls — a cell's shell handed back to `cellPools` rather than
-    /// kept bound in `visibleCells`. A same-id streaming update must NOT increment this (the
-    /// `.inPlace` branch keeps the shell); a different-id replacement or scroll eviction does.
-    var returnToPoolCount = 0
-
     /// Branch counters for `AsyncFeed.itemsDiffer`'s buffer-identity fast path (O(1)) vs the
     /// `Equatable` deep-comparison fallback (O(n)). Incremented by `itemsDiffer` itself (a
     /// different type, hence not `private(set)` at the box level). Verifies the fast path is
@@ -85,9 +72,9 @@ extension FeedScrollView {
     var _blockDiffRasterizeCallCount: Int { _testHooks.blockDiffRasterizeCallCount }
     var _blockDiffHotAppendCallCount: Int { _testHooks.blockDiffHotAppendCallCount }
     var _growHotBlockSuccessCount: Int { _testHooks.growHotBlockSuccessCount }
-    var _dequeueAllocCount: Int { _testHooks.dequeueAllocCount }
-    var _dequeueHitCount: Int { _testHooks.dequeueHitCount }
-    var _returnToPoolCount: Int { _testHooks.returnToPoolCount }
+    var _dequeueAllocCount: Int { cellPool.dequeueAllocCount }
+    var _dequeueHitCount: Int { cellPool.dequeueHitCount }
+    var _returnToPoolCount: Int { cellPool.returnToPoolCount }
 
     var _itemsDiffer_bufferHitCount: Int {
         get { _testHooks.itemsDifferBufferHitCount }

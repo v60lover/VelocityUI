@@ -98,7 +98,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     var estimatedIndices: Set<Int> = []
 
     var visibleCells: [Int: RenderCell] = [:]
-    var cellPools: [CellKind: [RenderCell]] = [:]
+
+    /// Owns cell recycling (dequeue/returnToPool) — see `CellPool`.
+    let cellPool: CellPool
+
+    /// Owns media fan-out (spawnMediaFetches/buildSyncMap) — see `MediaDispatcher`.
+    let mediaDispatcher: MediaDispatcher
 
     /// Leading index sent to pipeline on last boundary crossing.
     var lastNotifiedLeadingIndex: Int = -1
@@ -213,6 +218,13 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
         )
         self.workingRange = WorkingRange()
         self.differ = RenderDiffer(dimensionCache: environment.dimensionCache)
+        self.cellPool = CellPool(placeholderRenderer: environment.placeholderRenderer)
+        self.mediaDispatcher = MediaDispatcher(
+            imageActor: environment.imageActor,
+            visibleBlockStore: environment.visibleBlockStore,
+            frozenBitmapStore: environment.frozenBitmapStore,
+            contentDeliveryObserver: environment.contentDeliveryObserver
+        )
         super.init(frame: frame)
         showsVerticalScrollIndicator = true
         showsHorizontalScrollIndicator = false
