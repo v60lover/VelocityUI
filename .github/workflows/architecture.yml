@@ -1,0 +1,27 @@
+name: Architecture rules
+
+# Enforces ARCHITECTURE-RULES.md via scripts/check-architecture.sh.
+#
+# Today this runs in WARN-ONLY mode: it prints every violation in the build log
+# but does not fail the build, because a few files pre-date the rules and are
+# still being decomposed (see VelocityUI-zx7v.*, -bchq). Once the script's
+# ALLOWLIST is empty, change `./scripts/check-architecture.sh` below to
+# `./scripts/check-architecture.sh --strict` and this job will start failing PRs
+# that add a new oversized file or an inline test hook.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  architecture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Self-test the checker
+        run: ./scripts/check-architecture.sh --self-test
+
+      - name: Check architecture rules (warn-only)
+        run: ./scripts/check-architecture.sh
