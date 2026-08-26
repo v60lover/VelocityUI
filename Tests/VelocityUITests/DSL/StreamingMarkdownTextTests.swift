@@ -46,9 +46,20 @@ final class StreamingMarkdownTextTests: XCTestCase {
         XCTAssertEqual(nodes.count, blocks.count, "Precondition: same block count on both sides")
         XCTAssertGreaterThan(blocks.count, 5, "Precondition: fixture must exercise every block kind")
 
+        var sawCodeBlock = false
         for (node, block) in zip(nodes, blocks) {
+            // A fenced code block gets a dedicated CodeBlockNode in renderNodes
+            // (VelocityUI-oz5q.1), but blockList is a separate legacy construction path this
+            // bead intentionally leaves untouched — it still renders the fence as plain .text.
+            // The two representations diverging for THIS ONE block kind is expected, not a bug.
+            if let codeNode = node as? CodeBlockNode {
+                sawCodeBlock = true
+                XCTAssertEqual(codeNode.language, "swift")
+                XCTAssertEqual(codeNode.rawCode, "let x = 1")
+                continue
+            }
             guard let textNode = node as? TextNode else {
-                return XCTFail("every renderNodes entry must be a TextNode")
+                return XCTFail("every non-code renderNodes entry must be a TextNode")
             }
             guard case .text(let descriptor) = block.fragment.content else {
                 return XCTFail("every blockList entry in this fixture must be a text fragment")
@@ -57,6 +68,7 @@ final class StreamingMarkdownTextTests: XCTestCase {
             XCTAssertEqual(textNode.font.size, descriptor.font.size)
             XCTAssertEqual(textNode.font.weight, descriptor.font.weight)
         }
+        XCTAssertTrue(sawCodeBlock, "Precondition: fixture must include a code fence")
     }
 
     /// VelocityUI-qmx5: `renderNodes` (flattened through `flatten()` into `TextDescriptor.runs`) and

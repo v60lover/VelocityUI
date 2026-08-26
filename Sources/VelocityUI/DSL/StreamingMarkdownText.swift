@@ -35,14 +35,26 @@ extension IncrementalMarkdownParser {
         _renderNodes(theme: theme)
     }
 
-    private func _renderNodes(theme: MarkdownTheme) -> [any RenderNode] {
-        renderableBlocks.map { block in
-            let styled = Self.style(block.parsed, theme: theme)
-            return TextNode(
-                styled.content, font: styled.font, runs: styled.runs,
-                blockID: block.blockID, blockLifecycle: block.isSealed ? .sealed : .hot
+    /// One block's DSL node — a `CodeBlockNode` for a fenced code block, a `TextNode`
+    /// otherwise. Shared by `_renderNodes` and `StreamingMarkdownController.renderNodes` so
+    /// the live and cached paths can't drift on which blocks get code presentation.
+    static func renderNode(for block: RenderableBlock, theme: MarkdownTheme) -> any RenderNode {
+        let styled = Self.style(block.parsed, theme: theme)
+        let lifecycle: BlockLifecycle = block.isSealed ? .sealed : .hot
+        if case .codeFence(let language) = block.parsed.kind {
+            return CodeBlockNode(
+                language: language, rawCode: styled.content, font: theme.code,
+                blockID: block.blockID, blockLifecycle: lifecycle
             )
         }
+        return TextNode(
+            styled.content, font: styled.font, runs: styled.runs,
+            blockID: block.blockID, blockLifecycle: lifecycle
+        )
+    }
+
+    private func _renderNodes(theme: MarkdownTheme) -> [any RenderNode] {
+        renderableBlocks.map { Self.renderNode(for: $0, theme: theme) }
     }
 }
 
@@ -67,7 +79,7 @@ public final class StreamingMarkdownController {
     /// Fonts every block styles against. Fixed for this controller's lifetime — set it here at
     /// construction; sealed blocks are cached, so changing it later won't restyle them.
     public let theme: MarkdownTheme
-    private var sealedNodes: [BlockID: TextNode] = [:]
+    private var sealedNodes: [BlockID: any RenderNode] = [:]
 
     public init(
         parser: IncrementalMarkdownParser = IncrementalMarkdownParser(),
@@ -89,11 +101,7 @@ public final class StreamingMarkdownController {
                 return cached
             }
             _testHooks.styleCount += 1
-            let styled = IncrementalMarkdownParser.style(block.parsed, theme: theme)
-            let node = TextNode(
-                styled.content, font: styled.font, runs: styled.runs,
-                blockID: block.blockID, blockLifecycle: block.isSealed ? .sealed : .hot
-            )
+            let node = IncrementalMarkdownParser.renderNode(for: block, theme: theme)
             if block.isSealed {
                 sealedNodes[block.blockID] = node
             }

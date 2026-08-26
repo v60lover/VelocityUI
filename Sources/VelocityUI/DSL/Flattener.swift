@@ -55,6 +55,18 @@ public func flatten<ID: Hashable & Sendable>(
             }
         }
 
+        if let codeBlock = node as? CodeBlockNode {
+            // Transparent multi-leaf expansion: contributes no NodeKind/index of its own, so
+            // the flat "VStack of leaves" shape FeedScrollView.flatBlocks requires survives a
+            // code block mixed in with paragraphs/headings. See CodeBlockNode's doc comment.
+            assert(!spec.isSpecified && blockID == nil,
+                "CodeBlockNode does not support .frame()/.renderID() — use its own blockID: parameter")
+            let (header, body) = codeBlock.expandedChildren
+            visit(header, parent: parent)
+            visit(body, parent: parent)
+            return
+        }
+
         let myIndex = nodes.count
         parentIndices.append(parent)
         if spec.isSpecified { frameByIndex[myIndex] = spec }
