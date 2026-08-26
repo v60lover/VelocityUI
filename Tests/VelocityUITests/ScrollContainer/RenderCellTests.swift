@@ -890,5 +890,57 @@ final class RenderCellTests: XCTestCase {
         XCTAssertNotNil(cl.sublayers?.first?.contents,
             "Correct applyContent for the current item must succeed")
     }
+
+    // MARK: - CodeBlockBackground fragment content (VelocityUI-oz5q.5)
+
+    func testApplyLayout_CodeBlockBackground_SetsContentsAndContentsCenter_NeverCornerRadiusOrMasksToBounds() {
+        let cell = makeCell()
+        let descriptor = CodeBlockBackgroundDescriptor(
+            cornerRadius: 8, color: VColorDescriptor(red: 0.1, green: 0.2, blue: 0.3, alpha: 1)
+        )
+        let fragment = Fragment(id: -1, content: .codeBlockBackground(descriptor), frame: CGRect(x: 0, y: 0, width: 300, height: 90))
+
+        cell.applyLayout([fragment])
+
+        guard let cl = contentLayer(of: cell), let sub = cl.sublayers?.first else {
+            return XCTFail("expected one sublayer for the background fragment")
+        }
+        XCTAssertNotNil(sub.contents, "background must paint a pre-rounded CGImage")
+        XCTAssertEqual(sub.contentsCenter, codeBlockBackgroundContentsCenter(cornerRadius: 8),
+            "contentsCenter must come from the same helper the rasterizer's template size is derived from")
+        XCTAssertEqual(sub.cornerRadius, 0, "must never set CALayer.cornerRadius -- pre-rounded via CGContext clip")
+        XCTAssertFalse(sub.masksToBounds, "must never set masksToBounds")
+    }
+
+    // MARK: - BlockViewportRange regression guard: background must not break sorted-frame invariant
+
+    func testUpdateBlockViewport_CodeBlockBackground_ActivatesInLockstepWithHeader_NotBodyOrFollowingBlock() {
+        let cell = makeCell()
+        // background's own frame is the union of header+body -- overlaps both, which
+        // BlockViewportRange's "sorted, non-overlapping" contract forbids using directly.
+        let background = Fragment(
+            id: -1,
+            content: .codeBlockBackground(CodeBlockBackgroundDescriptor(cornerRadius: 8, color: .codeBlockBackground)),
+            frame: CGRect(x: 0, y: 0, width: 320, height: 90)
+        )
+        let header = textFragment(id: 0, frame: CGRect(x: 0, y: 0, width: 320, height: 30))
+        let body = textFragment(id: 1, frame: CGRect(x: 0, y: 30, width: 320, height: 60))
+        let unrelated = textFragment(id: 2, frame: CGRect(x: 0, y: 90, width: 320, height: 60))
+
+        let active = cell.updateBlockViewport(
+            fragments: [background, header, body, unrelated],
+            viewportInCell: CGRect(x: 0, y: 0, width: 320, height: 25), // reaches only the header row
+            synchronousContent: [:]
+        )
+
+        let activeIDs = Set(active.map(\.id))
+        XCTAssertTrue(activeIDs.contains(header.id), "header must be active when the viewport intersects it")
+        XCTAssertTrue(activeIDs.contains(background.id),
+            "background must activate in lockstep with its header partner (shared search key), " +
+            "not use its own overlapping frame, which would corrupt the sorted-frame binary search")
+        XCTAssertFalse(activeIDs.contains(body.id), "body must stay inactive -- the viewport doesn't reach it")
+        XCTAssertFalse(activeIDs.contains(unrelated.id),
+            "a block after the code block must not be pulled in by a corrupted sort order")
+    }
 }
 #endif

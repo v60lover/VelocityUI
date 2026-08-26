@@ -183,6 +183,11 @@ public struct TextDescriptor: Sendable {
     public let runs: [TextRun]
     public let layoutHash: Int
     public let appearanceHash: Int
+    /// Marks this descriptor as one of `CodeBlockNode`'s expanded header/body leaves. Internal —
+    /// only `Flattener` sets this (threaded from `TextNode.codeBlockRole`); the public init always
+    /// defaults it to `nil`. `extractFragments` pairs adjacent header+body descriptors carrying
+    /// this to synthesize the container background fragment.
+    let codeBlockRole: CodeBlockRole?
 
     /// Public and memberwise on purpose: `rasterizeText(_:size:scale:)` and
     /// `TextMeasurementContext.measure(_:width:)` are public entry points taking a TextDescriptor,
@@ -202,6 +207,30 @@ public struct TextDescriptor: Sendable {
         layoutHash: Int,
         appearanceHash: Int
     ) {
+        self.init(
+            content: content, font: font, color: color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
+            underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
+            kerning: kerning, lineSpacing: lineSpacing, contentSizeCategory: contentSizeCategory, runs: runs,
+            layoutHash: layoutHash, appearanceHash: appearanceHash, codeBlockRole: nil
+        )
+    }
+
+    init(
+        content: String,
+        font: VFontDescriptor,
+        color: VColorDescriptor,
+        lineLimit: Int?,
+        lineBreakMode: Int,
+        underlineStyle: Int = 0,
+        strikethroughStyle: Int = 0,
+        kerning: CGFloat = 0,
+        lineSpacing: CGFloat = 0,
+        contentSizeCategory: VContentSizeCategory = .unspecified,
+        runs: [TextRun] = [],
+        layoutHash: Int,
+        appearanceHash: Int,
+        codeBlockRole: CodeBlockRole?
+    ) {
         self.content = content
         self.font = font
         self.color = color
@@ -215,6 +244,21 @@ public struct TextDescriptor: Sendable {
         self.runs = runs
         self.layoutHash = layoutHash
         self.appearanceHash = appearanceHash
+        self.codeBlockRole = codeBlockRole
+    }
+}
+
+/// Background fill for a code block's container chrome. Sendable and content-only — geometry
+/// (the union of header + body frames) lives on the owning `Fragment`, not here. Cross-platform
+/// (no CGImage/UIKit dependency) — the CGContext rasterization itself lives in
+/// `CodeBlockRasterizer.swift`, which is UIKit-gated.
+public struct CodeBlockBackgroundDescriptor: Sendable, Equatable {
+    public let cornerRadius: CGFloat
+    public let color: VColorDescriptor
+
+    public init(cornerRadius: CGFloat, color: VColorDescriptor) {
+        self.cornerRadius = cornerRadius
+        self.color = color
     }
 }
 

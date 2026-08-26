@@ -99,7 +99,8 @@ public func flatten<ID: Hashable & Sendable>(
                 kerning: n.kerning, lineSpacing: n.lineSpacing,
                 contentSizeCategory: contentSizeCategory,
                 runs: n.runs,
-                layoutHash: combineHash(n.layoutHash, contentSizeCategory), appearanceHash: n.appearanceHash)))
+                layoutHash: combineHash(n.layoutHash, contentSizeCategory), appearanceHash: n.appearanceHash,
+                codeBlockRole: n.codeBlockRole)))
         case let n as AsyncImageNode:
             nodes.append(.image(ImageDescriptor(
                 url: n.url, aspectRatio: n.aspectRatio,

@@ -47,6 +47,30 @@ extension VContentSizeCategory {
     }
 }
 
+// MARK: - VFontDescriptor helpers
+
+extension VFontDescriptor {
+    /// Resolves to a concrete UIFont: named family if it loads, else system font at the same
+    /// size/weight, with italic traits applied. No Dynamic Type scaling -- callers needing that
+    /// go through `TextDescriptor.resolvedFont(for:)`, which layers `UIFontMetrics` on top.
+    var uiFont: UIFont {
+        let weightRaw = Double(bitPattern: UInt64(bitPattern: Int64(weight)))
+        var resolved: UIFont
+        if let family, let named = UIFont(name: family, size: size) {
+            resolved = named
+        } else {
+            resolved = UIFont.systemFont(ofSize: size, weight: UIFont.Weight(rawValue: weightRaw))
+        }
+        if traits.contains(.italic) {
+            let symbolic = resolved.fontDescriptor.symbolicTraits.union(.traitItalic)
+            if let descriptor = resolved.fontDescriptor.withSymbolicTraits(symbolic) {
+                resolved = UIFont(descriptor: descriptor, size: size)
+            }
+        }
+        return resolved
+    }
+}
+
 // MARK: - TextDescriptor helpers
 
 extension TextDescriptor {
@@ -56,8 +80,7 @@ extension TextDescriptor {
         return UIFont.Weight(rawValue: raw)
     }
 
-    /// Resolves `font` to a concrete UIFont: named family if it loads, else system font at the
-    /// same size/weight. Italic traits layer on afterward, then Dynamic Type scaling — all
+    /// Resolves `font` to a concrete UIFont, then layers Dynamic Type scaling on top —
     /// driven from `self.contentSizeCategory`, never a global read.
     private var resolvedFont: UIFont {
         resolvedFont(for: font)
@@ -65,19 +88,7 @@ extension TextDescriptor {
 
     /// Same as `resolvedFont`, generalized so a run's own font resolves through the same path.
     fileprivate func resolvedFont(for font: VFontDescriptor) -> UIFont {
-        let weightRaw = Double(bitPattern: UInt64(bitPattern: Int64(font.weight)))
-        var uiFont: UIFont
-        if let family = font.family, let named = UIFont(name: family, size: font.size) {
-            uiFont = named
-        } else {
-            uiFont = UIFont.systemFont(ofSize: font.size, weight: UIFont.Weight(rawValue: weightRaw))
-        }
-        if font.traits.contains(.italic) {
-            let symbolic = uiFont.fontDescriptor.symbolicTraits.union(.traitItalic)
-            if let descriptor = uiFont.fontDescriptor.withSymbolicTraits(symbolic) {
-                uiFont = UIFont(descriptor: descriptor, size: font.size)
-            }
-        }
+        var uiFont = font.uiFont
         if let uiCategory = contentSizeCategory.uiContentSizeCategory {
             let traits = UITraitCollection(preferredContentSizeCategory: uiCategory)
             uiFont = UIFontMetrics.default.scaledFont(for: uiFont, compatibleWith: traits)

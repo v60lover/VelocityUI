@@ -11,6 +11,7 @@
 CLAUDE.md
 FEATURE_MATRIX.md
 ARCHITECTURE-RULES.md
+HOSTING_NODE_DESIGN.md
 docs/
 GRID_LAYOUT_DESIGN.md
 SHELF_LAYOUT_DESIGN.md
@@ -32,3 +33,5 @@ BenchmarkHost/results/
 BenchmarkHost/BenchmarkHost.xcodeproj/
 BenchmarkHost/Vendor/Texture/
 notes.txt
+PIPELINE_MAP.md
+VelocityVault/

@@ -229,6 +229,14 @@ public final class RenderCell {
                     }
                 }
                 mediaFragmentIDs.insert(fragment.id)
+            } else if case .codeBlockBackground(let descriptor) = fragment.content {
+                // Unconditional overwrite, same policy as .text below: cheap to regenerate, and a
+                // cache miss must not retain a previous fragment's pixels after reclassification.
+                sub.contents = rasterizeCodeBlockBackground(cornerRadius: descriptor.cornerRadius, color: descriptor.color)
+                sub.contentsCenter = codeBlockBackgroundContentsCenter(cornerRadius: descriptor.cornerRadius)
+                sub.backgroundColor = nil
+                mediaFragmentIDs.remove(fragment.id)
+                placeholderPaintedFragmentIDs.remove(fragment.id)
             } else if case .text = fragment.content {
                 // Text has no async delivery path — set unconditionally so a cache miss can't
                 // retain a previous fragment's pixels after reclassification at the same id.
@@ -296,7 +304,19 @@ public final class RenderCell {
         synchronousContent: [Int: CGImage]
     ) -> [Fragment] {
         blockFragments = fragments
-        blockFrames = fragments.map(\.frame)
+        // BlockViewportRange requires frames sorted by minY and non-overlapping. A synthesized
+        // code-block background fragment's own frame is the union of its header+body siblings'
+        // frames, so it overlaps both -- using it as-is here would corrupt the binary search for
+        // every block after it, not just the code block. Its immediate successor (always the
+        // header, by construction -- see extractFragments) has the real, non-overlapping frame,
+        // so the background shares that as its search key: a duplicate key, not an overlap, so
+        // monotonicity holds and the background activates/deactivates in lockstep with its header.
+        blockFrames = fragments.enumerated().map { index, fragment in
+            if case .codeBlockBackground = fragment.content, index + 1 < fragments.count {
+                return fragments[index + 1].frame
+            }
+            return fragment.frame
+        }
         activeBlockFragmentIDs.removeAll(keepingCapacity: true)
         return updateBlockViewport(viewportInCell: viewportInCell, synchronousContent: synchronousContent)
     }

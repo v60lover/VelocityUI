@@ -157,12 +157,14 @@ nonisolated func resolveLeafGeometry(
 public enum BlockPresentationPolicy: Sendable {
     case text(TextDescriptor)
     case image(ImageDescriptor)
+    case codeBlockBackground(CodeBlockBackgroundDescriptor)
     case geometry
 
     public var fragmentContent: FragmentContent {
         switch self {
         case .text(let descriptor): .text(descriptor)
         case .image(let descriptor): .image(descriptor)
+        case .codeBlockBackground(let descriptor): .codeBlockBackground(descriptor)
         case .geometry: .geometry
         }
     }
@@ -260,7 +262,7 @@ public struct Block: Sendable {
             self.contentHash = Block.combineHash(descriptor.layoutHash, descriptor.appearanceHash)
         case .image(let descriptor):
             self.contentHash = Block.combineHash(descriptor.layoutHash, descriptor.appearanceHash)
-        case .geometry:
+        case .codeBlockBackground, .geometry:
             self.contentHash = 0
         }
         self.contract = BlockRenderContract(
@@ -297,6 +299,7 @@ public struct Block: Sendable {
         switch content {
         case .text(let descriptor): .text(descriptor)
         case .image(let descriptor): .image(descriptor)
+        case .codeBlockBackground(let descriptor): .codeBlockBackground(descriptor)
         case .geometry: .geometry
         }
     }

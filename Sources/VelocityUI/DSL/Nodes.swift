@@ -80,6 +80,8 @@ extension VColorDescriptor {
     public static let primary = VColorDescriptor(red: 0, green: 0, blue: 0, alpha: 1)
     /// Opaque white.
     public static let white = VColorDescriptor(red: 1, green: 1, blue: 1, alpha: 1)
+    /// Neutral light-gray tint — default fill for `CodeBlockNode`'s container background.
+    public static let codeBlockBackground = VColorDescriptor(red: 0.95, green: 0.95, blue: 0.96, alpha: 1)
 }
 
 // MARK: - VStackNode
@@ -223,6 +225,9 @@ public struct TextNode: RenderNode {
     /// `strikethroughStyle` apply to the whole string. Non-empty runs win — those scalar fields
     /// are ignored for run-covered text.
     public let runs: [TextRun]
+    /// Marks this node as one of `CodeBlockNode`'s expanded header/body leaves. Internal — only
+    /// `CodeBlockNode.expandedChildren` sets this; the public init always defaults it to `nil`.
+    let codeBlockRole: CodeBlockRole?
 
     public init(
         _ content: String,
@@ -238,6 +243,29 @@ public struct TextNode: RenderNode {
         blockID: BlockID? = nil,
         blockLifecycle: BlockLifecycle = .positional
     ) {
+        self.init(
+            content, font: font, color: color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
+            underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
+            kerning: kerning, lineSpacing: lineSpacing, runs: runs,
+            blockID: blockID, blockLifecycle: blockLifecycle, codeBlockRole: nil
+        )
+    }
+
+    init(
+        _ content: String,
+        font: VFontDescriptor = .body,
+        color: VColorDescriptor = .primary,
+        lineLimit: Int? = nil,
+        lineBreakMode: VLineBreakMode = .byWordWrapping,
+        underlineStyle: VUnderlineStyle = .none,
+        strikethroughStyle: VUnderlineStyle = .none,
+        kerning: CGFloat = 0,
+        lineSpacing: CGFloat = 0,
+        runs: [TextRun] = [],
+        blockID: BlockID? = nil,
+        blockLifecycle: BlockLifecycle = .positional,
+        codeBlockRole: CodeBlockRole?
+    ) {
         self.content = content
         self.blockID = blockID
         self.blockLifecycle = blockLifecycle
@@ -250,6 +278,7 @@ public struct TextNode: RenderNode {
         self.kerning = kerning
         self.lineSpacing = lineSpacing
         self.runs = runs
+        self.codeBlockRole = codeBlockRole
     }
 
     /// layoutHash covers all properties that affect geometry: content, font metrics

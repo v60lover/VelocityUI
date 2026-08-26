@@ -2,6 +2,24 @@
 
 import Foundation
 
+/// Cornering + tint for a code block's container background. Threaded from `CodeBlockNode`
+/// through its header/body leaves' `codeBlockRole` so `extractFragments` can synthesize the
+/// background fragment without CodeBlockNode wrapping them in a container (see this file's
+/// doc comment on `flatten()`'s FLAT-siblings requirement, and VelocityUI-qinu for why the
+/// general ZStack sibling-size primitive is deliberately not used here instead).
+struct CodeBlockChrome: Sendable, Equatable {
+    let cornerRadius: CGFloat
+    let backgroundColor: VColorDescriptor
+}
+
+/// Marks a `TextNode`/`TextDescriptor` as one of a code block's two expanded leaves. `nil` for
+/// ordinary text. `extractFragments` pairs an adjacent `.header` immediately followed by `.body`
+/// to synthesize the background fragment beneath both.
+enum CodeBlockRole: Sendable, Equatable {
+    case header(CodeBlockChrome)
+    case body(CodeBlockChrome)
+}
+
 /// A fenced code block: language label + raw, verbatim source.
 ///
 /// `flatten()` expands this into two FLAT sibling leaves (header, body), not a nested
@@ -20,17 +38,26 @@ public struct CodeBlockNode: RenderNode {
     public let font: VFontDescriptor
     public let blockID: BlockID?
     public let blockLifecycle: BlockLifecycle
+    /// Corner radius for the container background, pre-rounded via `CGContext` clip at
+    /// rasterization time — never `CALayer.cornerRadius`/`masksToBounds`.
+    public let cornerRadius: CGFloat
+    /// Fill color for the container background.
+    public let backgroundColor: VColorDescriptor
 
     public init(
         language: String? = nil,
         rawCode: String,
         font: VFontDescriptor = CodeBlockNode.defaultFont,
+        cornerRadius: CGFloat = 12,
+        backgroundColor: VColorDescriptor = .codeBlockBackground,
         blockID: BlockID? = nil,
         blockLifecycle: BlockLifecycle = .positional
     ) {
         self.language = language
         self.rawCode = rawCode
         self.font = font
+        self.cornerRadius = cornerRadius
+        self.backgroundColor = backgroundColor
         self.blockID = blockID
         self.blockLifecycle = blockLifecycle
     }
@@ -55,18 +82,22 @@ public struct CodeBlockNode: RenderNode {
     public var appearanceHash: Int {
         var h = Hasher()
         h.combine(language)
+        h.combine(cornerRadius)
+        h.combine(backgroundColor)
         return h.finalize()
     }
 
     /// The two flat leaves `flatten()` visits in this node's place. Internal — production
     /// code never inspects this past flatten(), same convention as `VStackNode.children`.
     var expandedChildren: (header: TextNode, body: TextNode) {
+        let chrome = CodeBlockChrome(cornerRadius: cornerRadius, backgroundColor: backgroundColor)
         let header = TextNode(
             language ?? "",
             font: Self.headerFont,
             color: .primary,
             blockID: blockID.map { Self.derivedBlockID($0, suffix: "header") },
-            blockLifecycle: blockLifecycle
+            blockLifecycle: blockLifecycle,
+            codeBlockRole: .header(chrome)
         )
         let body = TextNode(
             rawCode,
@@ -74,7 +105,8 @@ public struct CodeBlockNode: RenderNode {
             color: .primary,
             lineBreakMode: .byClipping,
             blockID: blockID.map { Self.derivedBlockID($0, suffix: "body") },
-            blockLifecycle: blockLifecycle
+            blockLifecycle: blockLifecycle,
+            codeBlockRole: .body(chrome)
         )
         return (header, body)
     }

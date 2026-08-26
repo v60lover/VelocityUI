@@ -8,6 +8,9 @@ import CoreGraphics
 public enum FragmentContent: Sendable {
     case image(ImageDescriptor)
     case text(TextDescriptor)
+    /// A code block's container background — synthesized by `extractFragments`, not present in
+    /// `NodeTable`. See `CodeBlockBackgroundDescriptor`.
+    case codeBlockBackground(CodeBlockBackgroundDescriptor)
     /// Spacer, hosting, gif, video, customLayer — frame only, no renderable content in Phase 1.
     case geometry
 }
@@ -44,6 +47,40 @@ public nonisolated func extractFragments(table: NodeTable, layout: ResolvedLayou
     // clip starts nil — an unframed tree never sets one, so output for unframed rows
     // is unchanged from before clipping was added.
     collectFragments(table: table, layout: layout, parentOrigin: .zero, clip: nil, into: &result)
+    return insertingCodeBlockBackgrounds(into: result)
+}
+
+/// Synthesizes one background `Fragment` for each adjacent header/body pair produced by
+/// `CodeBlockNode`'s expansion (matched via `TextDescriptor.codeBlockRole`), inserted directly
+/// before the header so it paints behind both. `CodeBlockNode` can't wrap header/body in a
+/// container (see its doc comment) and VelocityUI-qinu's ZStack sibling-size primitive is
+/// deliberately parked, so this post-pass is the only place that can add the "behind" layer
+/// without touching LayoutEngine — see VelocityUI-oz5q.5's design notes.
+///
+/// The synthesized fragment's `id` is negative (`-(header.id) - 1`), guaranteed disjoint from
+/// every real `NodeTable` index (always >= 0), so it can't collide with any other fragment's
+/// identity across recycles.
+private nonisolated func insertingCodeBlockBackgrounds(into fragments: [Fragment]) -> [Fragment] {
+    var result: [Fragment] = []
+    result.reserveCapacity(fragments.count + 1)
+    var index = 0
+    while index < fragments.count {
+        let fragment = fragments[index]
+        if case .text(let headerText) = fragment.content,
+           case .header(let chrome) = headerText.codeBlockRole,
+           index + 1 < fragments.count,
+           case .text(let bodyText) = fragments[index + 1].content,
+           case .body = bodyText.codeBlockRole {
+            result.append(Fragment(
+                id: -(fragment.id) - 1,
+                content: .codeBlockBackground(CodeBlockBackgroundDescriptor(
+                    cornerRadius: chrome.cornerRadius, color: chrome.backgroundColor)),
+                frame: fragment.frame.union(fragments[index + 1].frame)
+            ))
+        }
+        result.append(fragment)
+        index += 1
+    }
     return result
 }
 

@@ -656,5 +656,95 @@ final class FragmentTests: XCTestCase {
         XCTAssertEqual(hostF.frame, CGRect(x: 0, y: 130, width: 60, height: 40),
             "a child well within the framed slot must be unaffected by the clip — no spurious clamping")
     }
+
+    // MARK: - CodeBlockNode container background synthesis (VelocityUI-oz5q.5)
+
+    @MainActor
+    func testExtractFragments_CodeBlock_SynthesizesBackgroundBeforeHeaderAndBody() async throws {
+        // CodeBlockNode's own expansion is a pair of FLAT siblings with no root of its own — a bare
+        // CodeBlockNode passed directly to flatten() would produce two parent:-1 root nodes, and
+        // measureNode(nodeIndex: 0, ...) only measures the first. Wrap in a VStack, matching how a
+        // real message tree always hosts a code block, so both header and body get measured.
+        let root = VStackNode { CodeBlockNode(language: "swift", rawCode: "let x = 1") }
+        let table = flatten(root, itemID: "code-msg")
+        let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: TextMeasurementPool(capacity: 2))
+        let fragments = extractFragments(table: table, layout: layout)
+
+        XCTAssertEqual(fragments.count, 3, "header + body must gain exactly one synthesized background fragment")
+
+        guard case .codeBlockBackground = fragments[0].content else {
+            return XCTFail("background must be inserted first (z-order: behind both header and body)")
+        }
+        guard case .text = fragments[1].content else {
+            return XCTFail("header must immediately follow the synthesized background")
+        }
+        guard case .text = fragments[2].content else {
+            return XCTFail("body must follow the header")
+        }
+    }
+
+    @MainActor
+    func testExtractFragments_CodeBlock_BackgroundFrameIsUnionOfHeaderAndBody() async throws {
+        let root = VStackNode { CodeBlockNode(language: "swift", rawCode: "let x = 1\nlet y = 2") }
+        let table = flatten(root, itemID: "code-msg")
+        let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: TextMeasurementPool(capacity: 2))
+        let fragments = extractFragments(table: table, layout: layout)
+
+        let background = fragments[0]
+        let header = fragments[1]
+        let body = fragments[2]
+
+        XCTAssertEqual(background.frame, header.frame.union(body.frame),
+            "background must exactly span from the header's top to the body's bottom")
+    }
+
+    @MainActor
+    func testExtractFragments_CodeBlock_BackgroundCarriesChromeFromCodeBlockNode() async throws {
+        let root = VStackNode {
+            CodeBlockNode(
+                language: "swift", rawCode: "let x = 1",
+                cornerRadius: 8, backgroundColor: VColorDescriptor(red: 0.1, green: 0.2, blue: 0.3, alpha: 1)
+            )
+        }
+        let table = flatten(root, itemID: "code-msg")
+        let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: TextMeasurementPool(capacity: 2))
+        let fragments = extractFragments(table: table, layout: layout)
+
+        guard case .codeBlockBackground(let descriptor) = fragments[0].content else {
+            return XCTFail("fragments[0] must be the synthesized background")
+        }
+        XCTAssertEqual(descriptor.cornerRadius, 8)
+        XCTAssertEqual(descriptor.color, VColorDescriptor(red: 0.1, green: 0.2, blue: 0.3, alpha: 1))
+    }
+
+    @MainActor
+    func testExtractFragments_CodeBlock_SyntheticBackgroundIDNeverCollidesWithARealNodeIndex() async throws {
+        let root = VStackNode { CodeBlockNode(language: "swift", rawCode: "let x = 1") }
+        let table = flatten(root, itemID: "code-msg")
+        let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: TextMeasurementPool(capacity: 2))
+        let fragments = extractFragments(table: table, layout: layout)
+
+        XCTAssertLessThan(fragments[0].id, 0, "synthesized background id must be negative")
+        XCTAssertFalse(table.nodes.indices.contains(fragments[0].id),
+            "negative synthetic id must never collide with any real NodeTable index")
+    }
+
+    @MainActor
+    func testExtractFragments_PlainText_NeverSynthesizesBackground() async throws {
+        // A plain TextNode carries no codeBlockRole — must never trigger the post-pass.
+        let table = NodeTable(
+            itemID: "plain-text",
+            nodes: [.text(textDesc("just a paragraph"))],
+            parentIndices: [-1],
+            layoutHash: 1, appearanceHash: 1
+        )
+        let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: TextMeasurementPool(capacity: 1))
+        let fragments = extractFragments(table: table, layout: layout)
+
+        XCTAssertEqual(fragments.count, 1)
+        guard case .text = fragments[0].content else {
+            return XCTFail("expected the single plain text fragment, unmodified")
+        }
+    }
 }
 #endif

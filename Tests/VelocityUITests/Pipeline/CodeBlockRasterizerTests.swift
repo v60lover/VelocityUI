@@ -126,6 +126,30 @@ final class CodeBlockRasterizerTests: XCTestCase {
         XCTAssertGreaterThan(rightInk.b, rightInk.r, "right word must sample closer to blue")
     }
 
+    // MARK: - codeBlockBodyHeight: exact, synchronous background-height sizing (VelocityUI-oz5q.5)
+
+    func testCodeBlockBodyHeight_matchesTextKitMeasuredHeightWithin1pt() async {
+        let pool = TextMeasurementPool()
+        for lineCount in [1, 2, 3, 5, 12] {
+            let lines = (0..<lineCount).map { "let x\($0) = \($0)" }
+            let colorRuns = lines.map { _ in LineColorRuns(runs: []) }
+
+            let (_, measuredSize) = await rasterizeCodeBlock(
+                lines: lines[...], colorRuns: colorRuns, font: font, theme: theme, textPool: pool
+            )
+            let computedHeight = codeBlockBodyHeight(lineCount: lineCount, font: font)
+
+            XCTAssertEqual(
+                computedHeight, measuredSize.height, accuracy: 1,
+                "line-count height for \(lineCount) lines must match TextKit's own measurement within 1pt"
+            )
+        }
+    }
+
+    func testCodeBlockBodyHeight_zeroLinesReturnsZero() {
+        XCTAssertEqual(codeBlockBodyHeight(lineCount: 0, font: font), 0)
+    }
+
     func testRasterizeCodeBlock_degenerateEmptyContentReturnsNilImageNotCrash() async {
         let pool = TextMeasurementPool()
         let (image, size) = await rasterizeCodeBlock(
@@ -135,7 +159,68 @@ final class CodeBlockRasterizerTests: XCTestCase {
         XCTAssertEqual(size.width, 0)
     }
 
+    // MARK: - rasterizeCodeBlockBackground / codeBlockBackgroundContentsCenter (VelocityUI-oz5q.5)
+
+    func testRasterizeCodeBlockBackground_cornerPixelIsTransparent_centerPixelIsOpaqueFill() {
+        let color = VColorDescriptor(red: 0.2, green: 0.4, blue: 0.6, alpha: 1)
+        guard let image = rasterizeCodeBlockBackground(cornerRadius: 12, color: color, scale: 1) else {
+            return XCTFail("expected a non-nil raster for a positive corner radius")
+        }
+        XCTAssertEqual(image.width, 25, "template side must be 2*cornerRadius+1")
+        XCTAssertEqual(image.height, 25)
+
+        let corner = pixelColor(in: image, x: 0, y: 0)
+        XCTAssertEqual(corner.a, 0, "the clipped-out corner must be fully transparent -- pre-rounded, not a square")
+
+        let center = pixelColor(in: image, x: 12, y: 12)
+        XCTAssertGreaterThan(center.a, 200, "the center must be opaque fill")
+        XCTAssertGreaterThan(center.b, center.r, "center pixel must sample as the fill color (blue channel dominant)")
+    }
+
+    func testRasterizeCodeBlockBackground_zeroCornerRadius_isFullyOpaqueNoClip() {
+        let color = VColorDescriptor(red: 1, green: 1, blue: 1, alpha: 1)
+        guard let image = rasterizeCodeBlockBackground(cornerRadius: 0, color: color, scale: 1) else {
+            return XCTFail("expected a non-nil raster for zero corner radius")
+        }
+        let corner = pixelColor(in: image, x: 0, y: 0)
+        XCTAssertGreaterThan(corner.a, 200, "zero corner radius must not clip any pixel, including the corner")
+    }
+
+    func testCodeBlockBackgroundContentsCenter_matchesRasterizeCodeBlockBackgroundTemplateSize() {
+        let cornerRadius: CGFloat = 12
+        let scale: CGFloat = 2
+        guard let image = rasterizeCodeBlockBackground(
+            cornerRadius: cornerRadius, color: VColorDescriptor(red: 0, green: 0, blue: 0, alpha: 1), scale: scale
+        ) else { return XCTFail("expected a non-nil raster") }
+
+        let side = CGFloat(image.width)
+        let contentsCenter = codeBlockBackgroundContentsCenter(cornerRadius: cornerRadius, scale: scale)
+
+        let radiusPixels = (cornerRadius * scale).rounded()
+        XCTAssertEqual(contentsCenter.origin.x, radiusPixels / side, accuracy: 0.001)
+        XCTAssertEqual(contentsCenter.origin.y, radiusPixels / side, accuracy: 0.001)
+        XCTAssertEqual(contentsCenter.width, 1 / side, accuracy: 0.001)
+        XCTAssertEqual(contentsCenter.height, 1 / side, accuracy: 0.001)
+    }
+
     // MARK: - Helpers
+
+    private func pixelColor(in image: CGImage, x: Int, y: Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8) {
+        let w = image.width, h = image.height
+        guard w > 0, h > 0,
+              let ctx = CGContext(
+                data: nil, width: w, height: h,
+                bitsPerComponent: 8, bytesPerRow: w * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else { return (0, 0, 0, 0) }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let data = ctx.data else { return (0, 0, 0, 0) }
+        let bytes = data.bindMemory(to: UInt8.self, capacity: w * h * 4)
+        let flippedY = h - 1 - y // CGContext draws bottom-up
+        let offset = (flippedY * w + x) * 4
+        return (bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3])
+    }
 
     /// Mirrors MultiRunTextDescriptorTests' helper of the same shape.
     private func actualContentHeight(in image: CGImage) -> CGFloat {

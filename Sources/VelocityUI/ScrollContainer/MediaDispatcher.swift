@@ -110,7 +110,7 @@ final class MediaDispatcher {
                     frozenBitmapStore.evict([key])
                     map[fragment.id] = image
                 }
-            case .geometry:
+            case .codeBlockBackground, .geometry:
                 continue
             }
         }

@@ -76,6 +76,72 @@ private func partitionedRuns(
     return result
 }
 
+/// Pixel side length of the stretchable background template: a `(2*cornerRadius+1)`-point square
+/// is the smallest tile that still has a full straight run between opposite corners for
+/// `contentsCenter` to stretch. Single source of truth shared by `rasterizeCodeBlockBackground`
+/// and `codeBlockBackgroundContentsCenter` so they can never disagree (CLAUDE.md/bead-implement
+/// Section 3 -- cross-site consistency).
+private func codeBlockBackgroundTemplateSide(cornerRadius: CGFloat, scale: CGFloat) -> Int {
+    pixelLength(cornerRadius * 2 + 1, scale: scale)
+}
+
+/// Pre-rounded, stretchable background fill for the code block's container chrome. Draws a small
+/// template with corners clipped via `CGContext` (never `CALayer.cornerRadius`/`masksToBounds`,
+/// per the hard rule) -- `RenderCell` stretches the flat middle over the final frame via
+/// `CALayer.contentsCenter` (paired with `codeBlockBackgroundContentsCenter`), so one small raster
+/// covers any code block width/height.
+func rasterizeCodeBlockBackground(cornerRadius: CGFloat, color: VColorDescriptor, scale: CGFloat = 1) -> CGImage? {
+    let side = codeBlockBackgroundTemplateSide(cornerRadius: cornerRadius, scale: scale)
+    guard side > 0 else { return nil }
+
+    let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue |
+                      CGBitmapInfo.byteOrder32Little.rawValue   // BGRA8888
+    let rect = CGRect(x: 0, y: 0, width: side, height: side)
+
+    guard let ctx = CGContext(
+        data: nil,
+        width: side,
+        height: side,
+        bitsPerComponent: 8,
+        bytesPerRow: 0,
+        space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: bitmapInfo
+    ) else { return nil }
+
+    if cornerRadius > 0 {
+        let scaledRadius = cornerRadius * scale
+        let path = CGPath(roundedRect: rect, cornerWidth: scaledRadius, cornerHeight: scaledRadius, transform: nil)
+        ctx.addPath(path)
+        ctx.clip()
+    }
+    ctx.setFillColor(red: color.red, green: color.green, blue: color.blue, alpha: color.alpha)
+    ctx.fill(rect)
+    return ctx.makeImage()
+}
+
+/// `CALayer.contentsCenter` for the template `rasterizeCodeBlockBackground` produces at the same
+/// `cornerRadius`/`scale` -- the one-point-wide flat strip at the template's center stretches to
+/// fill the final frame while the rounded corners stay fixed size.
+func codeBlockBackgroundContentsCenter(cornerRadius: CGFloat, scale: CGFloat = 1) -> CGRect {
+    let side = codeBlockBackgroundTemplateSide(cornerRadius: cornerRadius, scale: scale)
+    guard side > 1 else { return CGRect(x: 0, y: 0, width: 1, height: 1) }
+    let radiusPixels = pixelLength(cornerRadius, scale: scale)
+    let unit = 1 / CGFloat(side)
+    let origin = CGFloat(radiusPixels) / CGFloat(side)
+    return CGRect(x: origin, y: origin, width: unit, height: unit)
+}
+
+/// Exact height for the code body's fixed-size background layer, without waiting on
+/// `rasterizeCodeBlock`'s async TextKit measurement. The body always renders `.byClipping`
+/// (no wrap), so a line's height depends only on the font's fixed metrics, never on its
+/// glyphs -- `lineCount * font.uiFont.lineHeight` reproduces what TextKit itself would report
+/// for the same non-wrapping content, so the background can size itself synchronously while
+/// the body's own raster is still in flight.
+func codeBlockBodyHeight(lineCount: Int, font: VFontDescriptor) -> CGFloat {
+    guard lineCount > 0 else { return 0 }
+    return CGFloat(lineCount) * font.uiFont.lineHeight
+}
+
 /// Rasterizes a fully-known code block (all lines already sealed) into one non-wrapping CGImage,
 /// as wide as its longest line -- the wide raster the future horizontal-scroll consumer
 /// (VelocityUI-oz5q.6) shifts via contents-offset. Off-main: measurement runs inside `textPool`'s
