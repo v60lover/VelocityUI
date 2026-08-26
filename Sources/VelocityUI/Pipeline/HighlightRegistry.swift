@@ -73,19 +73,16 @@ public final class HighlightRegistry: Sendable {
     }
 
     /// Synchronous lookup. A hit bumps `languageID` to most-recently-used and returns the SAME
-    /// `CompiledGrammar` instance. A miss compiles a fresh grammar, caches it, and evicts the
-    /// least-recently-used entry if now over `capacity`.
-    ///
-    /// "Compile" is a placeholder today — `CompiledGrammar(languageID:)` carries no rule table yet.
-    /// The real grammar data (TextMate vs tree-sitter) is filled in by VelocityUI-oz5q.3; this
-    /// registry only needs something to cache and hand back by identity.
+    /// `CompiledGrammar` instance. A miss compiles a fresh grammar via `compileGrammar(for:)`
+    /// (tree-sitter `Language` + our curated highlights `Query` — see `GrammarCompiler.swift`),
+    /// caches it, and evicts the least-recently-used entry if now over `capacity`.
     public func grammar(for languageID: LanguageID) -> CompiledGrammar {
         state.withLock { st in
             if let node = st.entries[languageID] {
                 Self.touch(&st, node)
                 return node.grammar
             }
-            let node = Node(languageID: languageID, grammar: CompiledGrammar(languageID: languageID))
+            let node = Node(languageID: languageID, grammar: compileGrammar(for: languageID))
             st.entries[languageID] = node
             Self.appendAtTail(&st, node)
             Self.evictLRUUntilWithinCapacity(&st)

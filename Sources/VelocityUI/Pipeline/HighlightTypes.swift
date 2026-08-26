@@ -2,6 +2,7 @@
 
 import Foundation
 import CoreGraphics
+import SwiftTreeSitter
 
 /// v1 language set for the syntax highlighter (VelocityUI-oz5q.3 picks the engine).
 /// `.plaintext` is the fallback for `nil`/unrecognized fence info strings — no colors, never an error.
@@ -29,14 +30,54 @@ public enum TokenType: Hashable, Sendable {
 
 /// A compiled grammar for one language. A `final class`, not a struct, so `HighlightRegistry`'s
 /// LRU cache can hand back the SAME instance by reference identity on a hit instead of
-/// recompiling — that's the whole point of caching it. Opaque today: the real rule table
-/// (TextMate vs tree-sitter) is chosen in VelocityUI-oz5q.3, which will extend this type.
+/// recompiling — that's the whole point of caching it.
+///
+/// `language`/`highlightsQuery` are `nil` for `.plaintext` and for any language whose grammar
+/// isn't wired up yet (`.typescript`, `.sql` — see `GrammarCompiler.swift`). `TreeSitterHighlighter`
+/// treats both cases identically: empty color runs, never an error. Kept `internal`, not `public`
+/// — the tree-sitter types are an engine-implementation detail behind `SyntaxHighlighter`, not
+/// part of the library's public surface.
 public final class CompiledGrammar: Sendable {
     public let languageID: LanguageID
+    let language: Language?
+    let highlightsQuery: Query?
 
-    public init(languageID: LanguageID) {
+    init(languageID: LanguageID, language: Language?, highlightsQuery: Query?) {
         self.languageID = languageID
+        self.language = language
+        self.highlightsQuery = highlightsQuery
     }
+}
+
+/// One colored span within a single sealed line, in UTF-16 code-unit offsets local to that line.
+/// `color` is already resolved against the `Theme` passed to `colorRuns(for:grammar:theme:)` —
+/// callers (the rasteriser in VelocityUI-oz5q.4) apply it directly, no second theme lookup.
+public struct ColorRun: Sendable, Hashable {
+    public let range: Range<Int>
+    public let tokenType: TokenType
+    public let color: VColorDescriptor
+
+    public init(range: Range<Int>, tokenType: TokenType, color: VColorDescriptor) {
+        self.range = range
+        self.tokenType = tokenType
+        self.color = color
+    }
+}
+
+/// The color runs for one sealed line, in left-to-right document order.
+public struct LineColorRuns: Sendable, Hashable {
+    public let runs: [ColorRun]
+
+    public init(runs: [ColorRun]) {
+        self.runs = runs
+    }
+}
+
+/// Turns sealed code lines into per-line color runs. `nonisolated` and pure: same
+/// `(lines, grammar, theme)` in -> same runs out, no global state read. A partial (unsealed)
+/// trailing line must never be passed in — callers seal lines before calling this.
+public protocol SyntaxHighlighter: Sendable {
+    func colorRuns(for lines: ArraySlice<String>, grammar: CompiledGrammar, theme: Theme) -> [LineColorRuns]
 }
 
 /// token-type -> color mapping for one appearance (light or dark). `color(for:)` falls back to
