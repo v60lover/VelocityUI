@@ -56,6 +56,10 @@ public final class RenderEnvironment: Sendable {
     /// production.
     public let pipelineTaskSpawnObserver: (@Sendable () -> Void)?
 
+    /// Compiled-grammar LRU + active theme for syntax-highlighted code blocks (VelocityUI-oz5q).
+    /// No shared-identity contract with another collaborator, so it defaults freely in both inits.
+    public let highlightRegistry: HighlightRegistry
+
     /// Designated init — all collaborators supplied by the caller. `nonisolated`, callable from any
     /// context — tests substituting a fake `ImageActor`/`VideoController` must use this instead of
     /// the `@MainActor` convenience init.
@@ -77,7 +81,8 @@ public final class RenderEnvironment: Sendable {
         hotBlockRasterizeEnabled: Bool = true,
         placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer(),
         contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil,
-        pipelineTaskSpawnObserver: (@Sendable () -> Void)? = nil
+        pipelineTaskSpawnObserver: (@Sendable () -> Void)? = nil,
+        highlightRegistry: HighlightRegistry = .init()
     ) {
         precondition(
             imageActor.dimensionCache === dimensionCache,
@@ -101,6 +106,7 @@ public final class RenderEnvironment: Sendable {
         self.placeholderRenderer = placeholderRenderer
         self.contentDeliveryObserver = contentDeliveryObserver
         self.pipelineTaskSpawnObserver = pipelineTaskSpawnObserver
+        self.highlightRegistry = highlightRegistry
     }
 
     /// Convenience init for app use. `@MainActor` because `VideoController.init` is `@MainActor`
@@ -125,7 +131,8 @@ public final class RenderEnvironment: Sendable {
         hotBlockRasterizeEnabled: Bool = true,
         placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer(),
         contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil,
-        pipelineTaskSpawnObserver: (@Sendable () -> Void)? = nil
+        pipelineTaskSpawnObserver: (@Sendable () -> Void)? = nil,
+        highlightRegistry: HighlightRegistry = .init()
     ) {
         let dc = DimensionCache(session: session)
         let videoPrep = VideoPreparationActor()
@@ -143,7 +150,8 @@ public final class RenderEnvironment: Sendable {
             hotBlockRasterizeEnabled: hotBlockRasterizeEnabled,
             placeholderRenderer: placeholderRenderer,
             contentDeliveryObserver: contentDeliveryObserver,
-            pipelineTaskSpawnObserver: pipelineTaskSpawnObserver
+            pipelineTaskSpawnObserver: pipelineTaskSpawnObserver,
+            highlightRegistry: highlightRegistry
         )
     }
 }
