@@ -20,6 +20,13 @@ let package = Package(
             targets: ["VelocityUI"]
         )
     ],
+    // SPIKE VelocityUI-wmss.4.1: tree-sitter deps live on the TEST target only —
+    // the VelocityUI product stays clean while we prove the iOS-device C build.
+    // Remove (or promote into VelocityUI) once the highlighter decision lands.
+    dependencies: [
+        .package(url: "https://github.com/tree-sitter/swift-tree-sitter", from: "0.25.0"),
+        .package(url: "https://github.com/tree-sitter/tree-sitter-json", from: "0.24.0")
+    ],
     targets: [
         .target(
             name: "VelocityUI",
@@ -30,7 +37,11 @@ let package = Package(
         ),
         .testTarget(
             name: "VelocityUITests",
-            dependencies: ["VelocityUI"],
+            dependencies: [
+                "VelocityUI",
+                .product(name: "SwiftTreeSitter", package: "swift-tree-sitter"),
+                .product(name: "TreeSitterJSON", package: "tree-sitter-json")
+            ],
             path: "Tests/VelocityUITests",
             swiftSettings: [
                 .swiftLanguageMode(.v6)

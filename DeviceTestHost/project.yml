@@ -22,6 +22,15 @@ settings:
 packages:
   VelocityUI:
     path: ..
+  # SPIKE VelocityUI-wmss.4.1: tree-sitter on device. The VelocityUITests target only
+  # globs sources; it does NOT inherit the SPM test target's dependencies, so the two
+  # tree-sitter packages must be declared here too. Remove with the spike.
+  SwiftTreeSitter:
+    url: https://github.com/tree-sitter/swift-tree-sitter
+    from: "0.25.0"
+  TreeSitterJSON:
+    url: https://github.com/tree-sitter/tree-sitter-json
+    from: "0.24.0"
 
 targets:
   DeviceTestHost:
@@ -61,6 +70,10 @@ targets:
     dependencies:
       - target: DeviceTestHost
       - package: VelocityUI
+      - package: SwiftTreeSitter
+        product: SwiftTreeSitter
+      - package: TreeSitterJSON
+        product: TreeSitterJSON
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.velocityui.VelocityUITests
