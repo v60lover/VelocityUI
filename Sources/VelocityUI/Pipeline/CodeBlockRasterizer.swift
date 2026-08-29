@@ -166,4 +166,23 @@ func rasterizeCodeBlock(
     guard size.width > 0, size.height > 0 else { return (nil, size) }
     return (rasterizeText(descriptor, size: size, scale: scale), size)
 }
+
+/// Sync sibling of `rasterizeCodeBlock`, for call sites that can't `await` -- the scroll-adjacent
+/// in-place block diff's `measureTextSync` and `RenderPipeline`'s nonisolated free-function
+/// rasterize path both measure/rasterize synchronously by contract. Shares
+/// `makeCodeTextDescriptor` with the async version (Section 3 cross-site consistency): only the
+/// measurement hop differs (caller-supplied sync `measure` vs `textPool.withContext`).
+func rasterizeCodeBlockSync(
+    lines: ArraySlice<String>,
+    colorRuns: [LineColorRuns],
+    font: VFontDescriptor,
+    theme: Theme,
+    scale: CGFloat = 1,
+    measure: (TextDescriptor, CGFloat) -> CGSize
+) -> (image: CGImage?, size: CGSize) {
+    let descriptor = makeCodeTextDescriptor(lines: lines, colorRuns: colorRuns, font: font, theme: theme)
+    let size = measure(descriptor, .greatestFiniteMagnitude)
+    guard size.width > 0, size.height > 0 else { return (nil, size) }
+    return (rasterizeText(descriptor, size: size, scale: scale), size)
+}
 #endif

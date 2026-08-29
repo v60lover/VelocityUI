@@ -300,7 +300,8 @@ final class PhaseOneIntegrationTests: XCTestCase {
         let pipeline = RenderPipeline(
             textPool: env.textPool,
             layoutCache: env.layoutCache,
-            imageActor: env.imageActor
+            imageActor: env.imageActor,
+            highlightRegistry: HighlightRegistry()
         )
         let workingRange = await WorkingRange(capacity: tableCount)
 

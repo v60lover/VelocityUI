@@ -675,6 +675,93 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
         await drainFeedWork(feed)
     }
 
+    // MARK: - VelocityUI-yvjr: sealed code block body, edited in place
+
+    struct CodeChatItem: Identifiable, Sendable {
+        let id: Int
+        let code: String
+    }
+
+    private func makeCodeChatFeed(environment: RenderEnvironment? = nil) -> FeedScrollView<CodeChatItem> {
+        let env = environment ?? makeEnvironment()
+        let feed = FeedScrollView<CodeChatItem>(environment: env, frame: CGRect(x: 0, y: 0, width: 375, height: 812))
+        feed.cellBuilder = { item in
+            VStackNode(spacing: 4) {
+                // Explicit `.sealed` (not the `.positional` default) so this single-block item is
+                // never swept into the "last block is hot" fallback -- it must always take the
+                // `applyInPlaceBlockDiff` -> `measureAndMaybeFreeze` non-hot path, never the
+                // streaming `HotBlockRasterizerStore` path (oz5q.7's job, not this bead's).
+                CodeBlockNode(language: "swift", rawCode: item.code, blockID: BlockID("code"), blockLifecycle: .sealed)
+            }
+        }
+        return feed
+    }
+
+    /// End-to-end paint check: after an in-place edit (same item id) to an already-sealed code
+    /// block, the cell's on-screen layer must show the real non-wrapping raster -- wider than the
+    /// 375pt container -- not a stale or container-clipped one. This is the ONLY test that asserts
+    /// actual `layer.contents` after an edit; the RenderPipeline-level sibling only checks the
+    /// `frozenBitmapStore` entry, which stays correct even when the wrong pixels are on screen.
+    ///
+    /// Regression test for VelocityUI-93um: the resident tier (`visibleBlockStore`) held the
+    /// pre-edit raster under a content-independent `BlockKey`, and `buildSyncMap` served it instead
+    /// of the fresh wide one the full-refresh path committed to `frozenBitmapStore`. The fix
+    /// (`evictChangedResidentRasters`) drops the stale resident entry so the fresh raster paints.
+    ///
+    /// NOTE on which internal path runs: today a code-block edit does NOT reach the fast in-place
+    /// per-block diff its name suggests -- VelocityUI-541u (the synthesized `codeBlockBackground`
+    /// fragment makes `applyInPlaceBlockDiff`'s `previousBlocks.count == previousFragments.count`
+    /// guard always fail) forces every code-block edit onto the async full-refresh path
+    /// (`RenderPipeline`). So this currently exercises the full-refresh repaint. The assertion
+    /// (wide raster on screen) holds regardless of path, so once 541u is fixed and the fast path
+    /// engages, this test stays valid and starts covering it too. `waitForCommit` polls for the
+    /// async commit, then keeps pumping layout so the committed entry actually repaints the layer.
+    func testSealedCodeBlockBody_InPlaceEdit_PaintsWideRasterOnScreen() async {
+        let feed = makeCodeChatFeed()
+        // Long enough to exceed the 375pt container regardless of the exact per-character advance
+        // width Menlo reports at 15pt (the CodeBlockRasterizerTests/RenderPipelineTests siblings
+        // use a narrower 100pt container, where a shorter line is already enough to prove the point).
+        let longLine = "let \(String(repeating: "x", count: 150)) = 1"
+
+        // Inlined counterpart of `waitForWorkingRangeCommit` (that helper is typed to
+        // `FeedScrollView<ChatItem>` specifically) -- polls until the async pipeline has
+        // committed a real entry at index 0, or 10s elapses.
+        func waitForCommit() async {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+            // Phase 1: pump until the async pipeline commits a real WorkingRange entry at index 0.
+            while ContinuousClock.now < deadline {
+                if feed._workingRangeMissCount(from: 0, to: 1) == 0 { break }
+                await Task.yield()
+                feed.layoutSubviews()
+            }
+            // Phase 2: a committed WorkingRange entry is not yet on-screen -- the layer repaints
+            // from it on the NEXT layout pass (refineKnownFrames -> buildSyncMap). Keep pumping so
+            // the fresh raster actually reaches `layer.contents` before the assertion reads it.
+            for _ in 0..<30 {
+                await Task.yield()
+                feed.layoutSubviews()
+            }
+        }
+
+        feed.items = [CodeChatItem(id: 0, code: "let x = 1")]
+        feed.layoutSubviews()
+        await waitForCommit()
+
+        // In-place edit, same id -- falls back to the async full-refresh path (see the note
+        // above), so this must poll again rather than read `_debugPaintedBitmaps` immediately.
+        feed.items = [CodeChatItem(id: 0, code: "let x = 1\n\(longLine)")]
+        feed.layoutSubviews()
+        await waitForCommit()
+
+        let painted = feed._debugPaintedBitmaps(at: 0)
+        guard let widest = painted.values.map({ CGFloat($0.width) }).max() else {
+            return XCTFail("edited sealed code block body must paint a bitmap")
+        }
+        XCTAssertGreaterThan(widest, 375, "raster must be wider than the 375pt container, not clipped to it")
+
+        await drainFeedWork(feed)
+    }
+
     // MARK: - FrozenBitmapStore budget: driver-sized, GROW-ONLY above the constructed floor
     //
     // `updateVisibleCells` sizes the budget from `keepRange.count` (ITEMS), but the flagship

@@ -128,6 +128,7 @@ extension FeedScrollView {
             for e in changeSet.layoutChanged {
                 guard let wrEntry = workingRange.entry(at: e.prevIdx) else { continue }
                 blockDiffInputs[e.prevIdx] = (e.prev, e.next, wrEntry.fragments)
+                evictChangedResidentRasters(previousTable: e.prev, newTable: e.next, nextIdx: e.nextIdx)
             }
 
             if !canDeferInvalidation {
@@ -143,6 +144,33 @@ extension FeedScrollView {
             canDeferInvalidation: canDeferInvalidation,
             blockDiffInputs: blockDiffInputs
         )
+    }
+
+    /// A same-id in-place edit changes a block's content but not its `BlockKey` — the key is
+    /// `itemID + blockID`, content-independent (see `BlockKey`). The resident tier
+    /// (`visibleBlockStore`) still holds the pre-edit raster under that key. If this edit later
+    /// falls to the full-refresh path (`RenderPipeline`), the pipeline writes the fresh raster to
+    /// `frozenBitmapStore`, but `buildSyncMap` reads the resident tier first and would serve the
+    /// stale one — the cell keeps the old pixels. So drop the stale resident rasters here.
+    ///
+    /// Evict ONLY blocks whose `contentHash` changed. An unchanged block must stay resident:
+    /// on first paint `buildSyncMap` promotes it out of `frozenBitmapStore` and evicts it there,
+    /// so the resident tier is its only copy — evicting it would blank the block. VelocityUI-93um.
+    private func evictChangedResidentRasters(previousTable: NodeTable, newTable: NodeTable, nextIdx: Int) {
+        guard nextIdx < items.count else { return }
+        let itemID = items[nextIdx].id
+        let width = measureWidth(for: containerWidth)
+        guard let (prevBlocks, _) = flatBlocks(for: previousTable, itemID: itemID, width: width),
+              let (newBlocks, _) = flatBlocks(for: newTable, itemID: itemID, width: width)
+        else { return }
+        var newHashByID: [BlockID: Int] = [:]
+        for b in newBlocks { if let id = b.blockID { newHashByID[id] = b.contentHash } }
+        var stale: Set<BlockKey> = []
+        for b in prevBlocks {
+            guard let id = b.blockID else { continue }
+            if newHashByID[id] != b.contentHash { stale.insert(b.key) }
+        }
+        if !stale.isEmpty { environment.visibleBlockStore.evict(stale) }
     }
 
     private func commitSnapshot(
@@ -405,6 +433,23 @@ extension FeedScrollView {
             ) {
                 residentStore.store(sealed.image, size: sealed.size, for: block.key)
                 return (sealed.size.height, sealed.image)
+            }
+            // A code block body that was never hot in this session (e.g. loaded already-sealed
+            // from history) never touched HotBlockRasterizerStore above -- it needs the real
+            // syntax-highlighted, non-wrapping raster, not the generic freeze() path below (which
+            // would rasterize the plain, container-clipped TextDescriptor Flattener produced).
+            if case .body(let chrome) = descriptor.codeBlockRole {
+                let lines = descriptor.content.components(separatedBy: "\n")[...]
+                let theme = environment.highlightRegistry.activeTheme
+                let grammar = environment.highlightRegistry.grammar(for: LanguageID(fenceInfo: chrome.language))
+                let colorRuns = TreeSitterHighlighter().colorRuns(for: lines, grammar: grammar, theme: theme)
+                let result = rasterizeCodeBlockSync(
+                    lines: lines, colorRuns: colorRuns, font: descriptor.font, theme: theme, scale: scale,
+                    measure: { [self] d, w in measureTextSync(d, width: w) }
+                )
+                guard let bitmap = result.image else { return (result.size.height, nil) }
+                residentStore.store(bitmap, size: result.size, for: block.key)
+                return (result.size.height, bitmap)
             }
             var localCache: [BlockKey: FreezeState] = [:]
             // `freeze(_:)` always measures before rasterizing, but on a rasterize failure

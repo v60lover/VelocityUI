@@ -38,18 +38,42 @@ private struct TextBitmapArtifact: @unchecked Sendable {
     let size: CGSize
 }
 
+/// Rasterizes one text fragment. A code block body gets the real syntax-highlighted, non-wrapping
+/// raster (`makeCodeTextDescriptor` + real `[LineColorRuns]` from `highlightRegistry`); every
+/// other text fragment goes through the plain generic path unchanged.
+private nonisolated func rasterizeTextFragment(
+    _ descriptor: TextDescriptor,
+    frameSize: CGSize,
+    scale: CGFloat,
+    highlightRegistry: HighlightRegistry
+) -> (image: CGImage?, size: CGSize) {
+    guard case .body(let chrome) = descriptor.codeBlockRole else {
+        return (rasterizeText(descriptor, size: frameSize, scale: scale), frameSize)
+    }
+    let lines = descriptor.content.components(separatedBy: "\n")[...]
+    let theme = highlightRegistry.activeTheme
+    let grammar = highlightRegistry.grammar(for: LanguageID(fenceInfo: chrome.language))
+    let colorRuns = TreeSitterHighlighter().colorRuns(for: lines, grammar: grammar, theme: theme)
+    return rasterizeCodeBlockSync(
+        lines: lines, colorRuns: colorRuns, font: descriptor.font, theme: theme, scale: scale
+    ) { d, w in TextMeasurementContext().measure(d, width: w) }
+}
+
 private nonisolated func rasterizeTextArtifacts(
     table: NodeTable,
     fragments: [Fragment],
-    scale: CGFloat
+    scale: CGFloat,
+    highlightRegistry: HighlightRegistry
 ) -> [TextBitmapArtifact] {
     let itemID = table.itemID
     return fragments.enumerated().compactMap { position, fragment in
-        guard case .text(let descriptor) = fragment.content,
-              let image = rasterizeText(descriptor, size: fragment.frame.size, scale: scale)
-        else { return nil }
+        guard case .text(let descriptor) = fragment.content else { return nil }
+        let (image, size) = rasterizeTextFragment(
+            descriptor, frameSize: fragment.frame.size, scale: scale, highlightRegistry: highlightRegistry
+        )
+        guard let image else { return nil }
         let key = BlockKey(boxedItemID: itemID, index: position, blockID: fragment.blockID)
-        return TextBitmapArtifact(key: key, image: image, size: fragment.frame.size)
+        return TextBitmapArtifact(key: key, image: image, size: size)
     }
 }
 
@@ -77,6 +101,7 @@ public actor RenderPipeline {
     private let layoutCache: LayoutCache
     private let imageActor: ImageActor
     private let frozenBitmapStore: FrozenBitmapStore
+    private let highlightRegistry: HighlightRegistry
 
     // MARK: - Supersession guard state
 
@@ -98,12 +123,14 @@ public actor RenderPipeline {
         textPool: TextMeasurementPool,
         layoutCache: LayoutCache,
         imageActor: ImageActor,
-        frozenBitmapStore: FrozenBitmapStore = FrozenBitmapStore()
+        frozenBitmapStore: FrozenBitmapStore = FrozenBitmapStore(),
+        highlightRegistry: HighlightRegistry
     ) {
         self.textPool = textPool
         self.layoutCache = layoutCache
         self.imageActor = imageActor
         self.frozenBitmapStore = frozenBitmapStore
+        self.highlightRegistry = highlightRegistry
     }
 
     /// Test-only convenience — creates a private pool/cache/imageActor not shared with
@@ -113,6 +140,7 @@ public actor RenderPipeline {
         self.layoutCache = LayoutCache()
         self.imageActor = ImageActor()
         self.frozenBitmapStore = FrozenBitmapStore()
+        self.highlightRegistry = HighlightRegistry()
     }
 
     /// Notifies the pipeline that the warm window changed. No-op if `warmRange` is unchanged
@@ -169,6 +197,7 @@ public actor RenderPipeline {
         let pool = textPool
         let actor = imageActor
         let bitmapStore = frozenBitmapStore
+        let registry = highlightRegistry
         let capturedScale = scale
         let capturedWarmRange = warmRange
 
@@ -205,7 +234,8 @@ public actor RenderPipeline {
                             let artifacts = rasterizeTextArtifacts(
                                 table: table,
                                 fragments: entry.fragments,
-                                scale: capturedScale
+                                scale: capturedScale,
+                                highlightRegistry: registry
                             )
                             return (index, entry.layout, entry.fragments, artifacts, true)
                         }
@@ -220,7 +250,8 @@ public actor RenderPipeline {
                         let artifacts = rasterizeTextArtifacts(
                             table: table,
                             fragments: fragments,
-                            scale: capturedScale
+                            scale: capturedScale,
+                            highlightRegistry: registry
                         )
                         await cache.set(CellEntry(layout: layout, fragments: fragments), for: key)
                         return (index, layout, fragments, artifacts, false)

@@ -17,6 +17,25 @@ public enum LanguageID: Hashable, Sendable {
     case plaintext
 }
 
+public extension LanguageID {
+    /// Maps a fenced-code-block's raw fence-info string (e.g. "python", "js", `nil`) to a
+    /// grammar lookup key. Unrecognized or missing language falls back to `.plaintext` --
+    /// same "never an error" contract `TreeSitterHighlighter` already applies to any
+    /// unwired language (`.typescript`, `.sql`).
+    init(fenceInfo: String?) {
+        switch fenceInfo?.lowercased() {
+        case "swift": self = .swift
+        case "js", "javascript", "jsx": self = .javascript
+        case "ts", "typescript", "tsx": self = .typescript
+        case "py", "python": self = .python
+        case "json": self = .json
+        case "bash", "sh", "shell", "zsh": self = .bash
+        case "sql": self = .sql
+        default: self = .plaintext
+        }
+    }
+}
+
 /// Token categories a `SyntaxHighlighter` colors independently of language.
 public enum TokenType: Hashable, Sendable {
     case keyword

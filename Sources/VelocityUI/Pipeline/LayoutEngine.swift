@@ -70,6 +70,23 @@ private func measureContent(
         return ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: maxW, height: maxH), children: children, nodeIndex: nodeIndex)
 
     case .text(let d):
+        if case .body = d.codeBlockRole {
+            // A code block body never wraps -- measure it as wide as its longest line
+            // (`.greatestFiniteMagnitude`, mirroring CodeBlockRasterizer.rasterizeCodeBlock's
+            // width sentinel) instead of clamping to the proposed container width. Color runs
+            // don't affect TextKit's glyph layout, so measuring with `colorRuns: []` here still
+            // reports the same size the real highlighted raster will end up with -- the actual
+            // colors are applied at rasterize time (RenderPipeline / FeedScrollView+Items), not
+            // here. This function has no `HighlightRegistry` to look one up anyway.
+            let codeDescriptor = makeCodeTextDescriptor(
+                lines: d.content.components(separatedBy: "\n")[...],
+                colorRuns: [], font: d.font, theme: .defaultLight
+            )
+            return await textPool.withContext { ctx in
+                let size = ctx.measure(codeDescriptor, width: .greatestFiniteMagnitude)
+                return ResolvedLayout(totalFrame: CGRect(origin: .zero, size: size), nodeIndex: nodeIndex)
+            }
+        }
         return await textPool.withContext { ctx in
             let size = ctx.measure(d, width: width)
             return ResolvedLayout(totalFrame: CGRect(origin: .zero, size: size), nodeIndex: nodeIndex)

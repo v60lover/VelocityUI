@@ -10,6 +10,9 @@ import Foundation
 struct CodeBlockChrome: Sendable, Equatable {
     let cornerRadius: CGFloat
     let backgroundColor: VColorDescriptor
+    /// Raw fence-info language string (e.g. "python", "js"), `nil` if the fence had none.
+    /// The body leaf uses this to look up a highlighting grammar via `LanguageID(fenceInfo:)`.
+    let language: String?
 }
 
 /// Marks a `TextNode`/`TextDescriptor` as one of a code block's two expanded leaves. `nil` for
@@ -90,7 +93,7 @@ public struct CodeBlockNode: RenderNode {
     /// The two flat leaves `flatten()` visits in this node's place. Internal — production
     /// code never inspects this past flatten(), same convention as `VStackNode.children`.
     var expandedChildren: (header: TextNode, body: TextNode) {
-        let chrome = CodeBlockChrome(cornerRadius: cornerRadius, backgroundColor: backgroundColor)
+        let chrome = CodeBlockChrome(cornerRadius: cornerRadius, backgroundColor: backgroundColor, language: language)
         let header = TextNode(
             language ?? "",
             font: Self.headerFont,

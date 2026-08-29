@@ -104,7 +104,8 @@ final class RenderPipelineTests: XCTestCase {
         RenderPipeline(
             textPool: TextMeasurementPool(),
             layoutCache: LayoutCache(),
-            imageActor: ImageActor()
+            imageActor: ImageActor(),
+            highlightRegistry: HighlightRegistry()
         )
     }
 
@@ -115,6 +116,54 @@ final class RenderPipelineTests: XCTestCase {
         let start = max(0, leadingIndex - behind)
         let end = min(leadingIndex + ahead, count)
         return start..<max(start, end)
+    }
+
+    // MARK: - VelocityUI-yvjr: sealed code block body -- real highlighted, wide raster
+
+    /// A sealed code block that scrolls into the warm range for the first time (never went
+    /// through the hot/streaming path) must come out of `onIndexBoundary` with a real
+    /// syntax-highlighted, non-wrapping raster committed to `frozenBitmapStore` -- not the
+    /// generic, container-clipped, uncolored text path.
+    @MainActor
+    func testSealedCodeBlockBody_commitsWideHighlightedRasterToFrozenBitmapStore() async throws {
+        let longLine = "let \(String(repeating: "x", count: 60)) = 1"
+        let node = CodeBlockNode(language: "swift", rawCode: "let x = 1\n\(longLine)", blockID: BlockID("code1"))
+        // CodeBlockNode's own doc comment: its two expanded leaves are meant to sit as direct
+        // children of a message's root VStack, not stand as the bare root itself -- as the bare
+        // root, `measureNode(nodeIndex: 0)` would only ever visit the header, never the body.
+        let table = flatten(VStackNode { node }, itemID: "item1")
+
+        let bitmapStore = FrozenBitmapStore()
+        let pipeline = RenderPipeline(
+            textPool: TextMeasurementPool(),
+            layoutCache: LayoutCache(),
+            imageActor: ImageActor(),
+            frozenBitmapStore: bitmapStore,
+            highlightRegistry: HighlightRegistry()
+        )
+        let range = await WorkingRange(capacity: 4)
+
+        await pipeline.onIndexBoundary(
+            warmRange: 0..<1, leadingIndex: 0, workingRange: range,
+            tables: [table], availableWidth: 100, scale: 1
+        )
+        await pipeline.waitForCurrentPrefetch()
+
+        let entry = await range.entry(at: 0)
+        let fragments = try XCTUnwrap(entry?.fragments)
+        let bodyFragment = try XCTUnwrap(fragments.first { fragment in
+            guard case .text(let d) = fragment.content, case .body = d.codeBlockRole else { return false }
+            return true
+        })
+        XCTAssertGreaterThan(
+            bodyFragment.frame.width, 100,
+            "body fragment must be measured wider than the 100pt container -- the generic clipped path never exceeds it"
+        )
+
+        let bodyBlockID = try XCTUnwrap(bodyFragment.blockID)
+        let key = BlockKey(itemID: "item1", blockID: bodyBlockID)
+        let bitmap = try XCTUnwrap(bitmapStore.bitmap(for: key), "sealed code block body must commit a bitmap")
+        XCTAssertGreaterThan(CGFloat(bitmap.width), 100, "committed raster must be wider than the container, not clipped")
     }
 
     // MARK: - Test 1: Cache hits skip measureNode
@@ -305,7 +354,8 @@ final class RenderPipelineTests: XCTestCase {
         let pipeline = RenderPipeline(
             textPool: TextMeasurementPool(),
             layoutCache: LayoutCache(),
-            imageActor: imageActor
+            imageActor: imageActor,
+            highlightRegistry: HighlightRegistry()
         )
         let warmRange = boundaryRange(leadingIndex: 0, ahead: 10, behind: 3, count: tables.count)
 
@@ -437,7 +487,8 @@ final class RenderPipelineTests: XCTestCase {
         let pipeline = RenderPipeline(
             textPool: TextMeasurementPool(),
             layoutCache: LayoutCache(),
-            imageActor: imageActor
+            imageActor: imageActor,
+            highlightRegistry: HighlightRegistry()
         )
         // ahead: n + 5 covers all n+1 table indices from leading=0
         let warmRange = boundaryRange(leadingIndex: 0, ahead: n + 5, behind: 0, count: tables.count)
@@ -530,7 +581,8 @@ final class RenderPipelineTests: XCTestCase {
         let pipeline = RenderPipeline(
             textPool: textPool,
             layoutCache: layoutCache,
-            imageActor: imageActor
+            imageActor: imageActor,
+            highlightRegistry: HighlightRegistry()
         )
 
         await pipeline.onIndexBoundary(
@@ -626,7 +678,8 @@ final class RenderPipelineTests: XCTestCase {
         let pipeline = RenderPipeline(
             textPool: textPool,
             layoutCache: layoutCache,
-            imageActor: imageActor
+            imageActor: imageActor,
+            highlightRegistry: HighlightRegistry()
         )
 
         // Large filler table for boundary 500 — non-overlapping with [0, n).
@@ -747,7 +800,8 @@ final class RenderPipelineTests: XCTestCase {
         let pipeline = RenderPipeline(
             textPool: textPool,
             layoutCache: layoutCache,
-            imageActor: imageActor
+            imageActor: imageActor,
+            highlightRegistry: HighlightRegistry()
         )
 
         // Fire boundary 0 immediately followed by boundary 500 — no coordination between them.
@@ -819,7 +873,8 @@ final class RenderPipelineTests: XCTestCase {
         let pipeline = RenderPipeline(
             textPool: textPool,
             layoutCache: layoutCache,
-            imageActor: imageActor
+            imageActor: imageActor,
+            highlightRegistry: HighlightRegistry()
         )
 
         // Boundary at index 0: range [0, n+2) — covers all n+1 tables.
@@ -964,7 +1019,8 @@ final class RenderPipelineTests: XCTestCase {
         let pipeline = RenderPipeline(
             textPool: TextMeasurementPool(),
             layoutCache: LayoutCache(),
-            imageActor: imageActor
+            imageActor: imageActor,
+            highlightRegistry: HighlightRegistry()
         )
 
         await pipeline.onIndexBoundary(
@@ -1030,7 +1086,8 @@ final class RenderPipelineTests: XCTestCase {
         let pipeline = RenderPipeline(
             textPool: TextMeasurementPool(),
             layoutCache: LayoutCache(),
-            imageActor: imageActor
+            imageActor: imageActor,
+            highlightRegistry: HighlightRegistry()
         )
 
         await pipeline.onIndexBoundary(

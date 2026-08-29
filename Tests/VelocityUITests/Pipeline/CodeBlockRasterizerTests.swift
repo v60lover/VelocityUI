@@ -159,6 +159,56 @@ final class CodeBlockRasterizerTests: XCTestCase {
         XCTAssertEqual(size.width, 0)
     }
 
+    // MARK: - rasterizeCodeBlockSync: same output as the async version (VelocityUI-yvjr)
+
+    func testRasterizeCodeBlockSync_matchesAsyncVersion_sameSizeAndPixels() async {
+        let lines = ["let aaaaa = 1", "let bbbbb = 2"]
+        let colorRuns = [
+            LineColorRuns(runs: [ColorRun(range: 0..<3, tokenType: .keyword, color: theme.color(for: .keyword))]),
+            LineColorRuns(runs: [])
+        ]
+        let pool = TextMeasurementPool()
+
+        let (asyncImage, asyncSize) = await rasterizeCodeBlock(
+            lines: lines[...], colorRuns: colorRuns, font: font, theme: theme, textPool: pool, scale: 2
+        )
+        let (syncImage, syncSize) = rasterizeCodeBlockSync(
+            lines: lines[...], colorRuns: colorRuns, font: font, theme: theme, scale: 2,
+            measure: { d, w in TextMeasurementContext().measure(d, width: w) }
+        )
+
+        guard let asyncImage, let syncImage else { return XCTFail("expected non-nil rasters") }
+        XCTAssertEqual(asyncSize, syncSize)
+        XCTAssertEqual(asyncImage.width, syncImage.width)
+        XCTAssertEqual(asyncImage.height, syncImage.height)
+    }
+
+    func testRasterizeCodeBlockSync_widthEqualsLongestLineNotWrapped() {
+        let shortLine = "x"
+        let longLine = String(repeating: "m", count: 80)
+        let lines = [shortLine, longLine]
+        let colorRuns = lines.map { _ in LineColorRuns(runs: []) }
+
+        let (image, size) = rasterizeCodeBlockSync(
+            lines: lines[...], colorRuns: colorRuns, font: font, theme: theme, scale: 1,
+            measure: { d, w in TextMeasurementContext().measure(d, width: w) }
+        )
+        XCTAssertNotNil(image)
+
+        let soloDescriptor = makeCodeTextDescriptor(lines: [longLine][...], colorRuns: [LineColorRuns(runs: [])], font: font, theme: theme)
+        let soloSize = TextMeasurementContext().measure(soloDescriptor, width: .greatestFiniteMagnitude)
+        XCTAssertEqual(size.width, soloSize.width, accuracy: 1)
+    }
+
+    func testRasterizeCodeBlockSync_degenerateEmptyContentReturnsNilImageNotCrash() {
+        let (image, size) = rasterizeCodeBlockSync(
+            lines: [""][...], colorRuns: [LineColorRuns(runs: [])], font: font, theme: theme,
+            measure: { d, w in TextMeasurementContext().measure(d, width: w) }
+        )
+        XCTAssertNil(image)
+        XCTAssertEqual(size.width, 0)
+    }
+
     // MARK: - rasterizeCodeBlockBackground / codeBlockBackgroundContentsCenter (VelocityUI-oz5q.5)
 
     func testRasterizeCodeBlockBackground_cornerPixelIsTransparent_centerPixelIsOpaqueFill() {
