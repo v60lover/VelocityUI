@@ -4,6 +4,20 @@ import Foundation
 import CoreGraphics
 import os
 
+struct CodeBodyRasterIdentity: Sendable, Equatable {
+    let themeGeneration: Int
+    let scale: CGFloat
+}
+
+/// Immutable snapshot of one cached bitmap. `CGImage` is safe to share because callers never
+/// mutate its backing storage; cache membership and LRU links remain lock-protected.
+struct StoredBitmapArtifact: @unchecked Sendable {
+    let image: CGImage
+    let size: CGSize
+    let cost: Int
+    let codeBodyIdentity: CodeBodyRasterIdentity?
+}
+
 /// LRU-bounded cache of frozen block bitmaps, keyed by `BlockKey`, so peak memory
 /// stays proportional to the visible window rather than chat length.
 ///
@@ -18,14 +32,23 @@ public final class FrozenBitmapStore: Sendable {
         var bitmap: CGImage
         var size: CGSize
         var cost: Int
+        /// Present only for code-body rasters, whose pixels depend on theme and display scale.
+        var codeBodyIdentity: CodeBodyRasterIdentity?
         weak var prev: Node?
         weak var next: Node?
 
-        init(key: BlockKey, bitmap: CGImage, size: CGSize, cost: Int) {
+        init(
+            key: BlockKey,
+            bitmap: CGImage,
+            size: CGSize,
+            cost: Int,
+            codeBodyIdentity: CodeBodyRasterIdentity?
+        ) {
             self.key = key
             self.bitmap = bitmap
             self.size = size
             self.cost = cost
+            self.codeBodyIdentity = codeBodyIdentity
         }
     }
 
@@ -97,6 +120,32 @@ public final class FrozenBitmapStore: Sendable {
         state.withLock { $0.entries[key]?.size }
     }
 
+    /// Returns a code-body raster only when every raster-only input still matches.
+    func codeBodyRaster(
+        for key: BlockKey,
+        identity: CodeBodyRasterIdentity
+    ) -> (image: CGImage, size: CGSize)? {
+        state.withLock { st in
+            guard let node = st.entries[key], node.codeBodyIdentity == identity else { return nil }
+            Self.touch(&st, node)
+            return (node.bitmap, node.size)
+        }
+    }
+
+    /// Reads bitmap pixels and transfer metadata atomically, while bumping LRU recency.
+    func artifact(for key: BlockKey) -> StoredBitmapArtifact? {
+        state.withLock { st in
+            guard let node = st.entries[key] else { return nil }
+            Self.touch(&st, node)
+            return StoredBitmapArtifact(
+                image: node.bitmap,
+                size: node.size,
+                cost: node.cost,
+                codeBodyIdentity: node.codeBodyIdentity
+            )
+        }
+    }
+
     /// Current total bytes held across all cached entries. Never exceeds `byteBudget`
     /// immediately after any `store(...)` call.
     public var currentByteTotal: Int {
@@ -109,16 +158,34 @@ public final class FrozenBitmapStore: Sendable {
     /// `byteBudget`. Never rejects the insert itself, even if `cost` alone exceeds
     /// the whole budget — it just evicts everything else to make room.
     public func store(_ bitmap: CGImage, size: CGSize, cost: Int, for key: BlockKey) {
+        store(bitmap, size: size, cost: cost, for: key, codeBodyIdentity: nil)
+    }
+
+    /// Internal overload used when a code-body raster must retain its complete cache identity.
+    func store(
+        _ bitmap: CGImage,
+        size: CGSize,
+        cost: Int,
+        for key: BlockKey,
+        codeBodyIdentity: CodeBodyRasterIdentity?
+    ) {
         state.withLock { st in
             if let existing = st.entries[key] {
                 st.currentByteTotal -= existing.cost
                 existing.bitmap = bitmap
                 existing.size = size
                 existing.cost = cost
+                existing.codeBodyIdentity = codeBodyIdentity
                 st.currentByteTotal += cost
                 Self.touch(&st, existing)
             } else {
-                let node = Node(key: key, bitmap: bitmap, size: size, cost: cost)
+                let node = Node(
+                    key: key,
+                    bitmap: bitmap,
+                    size: size,
+                    cost: cost,
+                    codeBodyIdentity: codeBodyIdentity
+                )
                 st.entries[key] = node
                 st.currentByteTotal += cost
                 Self.appendAtTail(&st, node)

@@ -32,6 +32,30 @@ final class VisibleBlockStoreTests: XCTestCase {
         XCTAssertNil(cache.bitmap(for: block), "Promotion transfers ownership out of the evictable tier")
     }
 
+    func testDemoteThenPromote_PreservesCodeBodyRasterIdentity() {
+        let resident = VisibleBlockStore()
+        let cache = FrozenBitmapStore(byteBudget: 10_000)
+        let block = key(0)
+        let bitmap = image()
+        let identity = CodeBodyRasterIdentity(themeGeneration: 7, scale: 3)
+
+        resident.store(bitmap, size: CGSize(width: 10, height: 10), for: block, codeBodyIdentity: identity)
+        resident.demote([block], to: cache)
+        XCTAssertTrue(cache.codeBodyRaster(for: block, identity: identity)?.image === bitmap)
+
+        resident.promote([block], from: cache)
+        XCTAssertTrue(resident.codeBodyRaster(for: block, identity: identity)?.image === bitmap)
+
+        resident.demote([block], to: cache)
+        XCTAssertTrue(cache.codeBodyRaster(for: block, identity: identity)?.image === bitmap)
+        XCTAssertNil(
+            cache.codeBodyRaster(
+                for: block,
+                identity: CodeBodyRasterIdentity(themeGeneration: 8, scale: 3)
+            )
+        )
+    }
+
     func testActualBitmapCost_UsesBytesPerRowAndPixelHeight() {
         let resident = VisibleBlockStore()
         let bitmap = image(width: 13, height: 7)

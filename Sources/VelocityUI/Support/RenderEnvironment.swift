@@ -56,7 +56,17 @@ public final class RenderEnvironment: Sendable {
     /// production.
     public let pipelineTaskSpawnObserver: (@Sendable () -> Void)?
 
-    /// Compiled-grammar LRU + active theme for syntax-highlighted code blocks (VelocityUI-oz5q).
+    /// Fires once per code-block body that `RenderPipeline` tokenizes (tree-sitter) and
+    /// rasterizes from scratch — both on a genuine cache miss (first paint, cold path) and on a
+    /// `LayoutCache`-hit boundary that couldn't reuse an already-committed `frozenBitmapStore`
+    /// raster (evicted, or drawn under a stale raster identity). Does NOT fire when a cache-hit
+    /// boundary successfully reuses a committed raster. Production-safe
+    /// counterpart to an XCTest-only counter, mirroring `pipelineTaskSpawnObserver` — lets
+    /// BenchmarkHost attribute the event without a test-only compilation guard. `nil` in
+    /// production.
+    public let codeBodyRetokenizeObserver: (@Sendable () -> Void)?
+
+    /// Compiled-grammar LRU + active theme for syntax-highlighted code blocks.
     /// No shared-identity contract with another collaborator, so it defaults freely in both inits.
     public let highlightRegistry: HighlightRegistry
 
@@ -82,6 +92,7 @@ public final class RenderEnvironment: Sendable {
         placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer(),
         contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil,
         pipelineTaskSpawnObserver: (@Sendable () -> Void)? = nil,
+        codeBodyRetokenizeObserver: (@Sendable () -> Void)? = nil,
         highlightRegistry: HighlightRegistry = .init()
     ) {
         precondition(
@@ -106,6 +117,7 @@ public final class RenderEnvironment: Sendable {
         self.placeholderRenderer = placeholderRenderer
         self.contentDeliveryObserver = contentDeliveryObserver
         self.pipelineTaskSpawnObserver = pipelineTaskSpawnObserver
+        self.codeBodyRetokenizeObserver = codeBodyRetokenizeObserver
         self.highlightRegistry = highlightRegistry
     }
 
@@ -132,6 +144,7 @@ public final class RenderEnvironment: Sendable {
         placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer(),
         contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil,
         pipelineTaskSpawnObserver: (@Sendable () -> Void)? = nil,
+        codeBodyRetokenizeObserver: (@Sendable () -> Void)? = nil,
         highlightRegistry: HighlightRegistry = .init()
     ) {
         let dc = DimensionCache(session: session)
@@ -151,6 +164,7 @@ public final class RenderEnvironment: Sendable {
             placeholderRenderer: placeholderRenderer,
             contentDeliveryObserver: contentDeliveryObserver,
             pipelineTaskSpawnObserver: pipelineTaskSpawnObserver,
+            codeBodyRetokenizeObserver: codeBodyRetokenizeObserver,
             highlightRegistry: highlightRegistry
         )
     }

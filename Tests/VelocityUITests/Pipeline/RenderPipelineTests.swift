@@ -166,6 +166,344 @@ final class RenderPipelineTests: XCTestCase {
         XCTAssertGreaterThan(CGFloat(bitmap.width), 100, "committed raster must be wider than the container, not clipped")
     }
 
+    // MARK: - VelocityUI-eh5x: cache-hit boundary reuses the committed code-body raster
+
+    /// A code block that already produced a highlighted body raster on its first (cold) boundary
+    /// must NOT be re-tokenized/re-rasterized on a later boundary that resolves it from
+    /// `LayoutCache` as a hit — only the genuine cold path should pay for tree-sitter + the wide
+    /// raster. Scrolling the item out of `WorkingRange` and back in (without touching
+    /// `LayoutCache`) reproduces exactly the warm-range-boundary-crossing scenario from the bug.
+    @MainActor
+    func testCacheHitBoundary_reusesCommittedCodeBodyRaster_doesNotRetokenize() async throws {
+        let node = CodeBlockNode(language: "swift", rawCode: "let x = 1\nlet y = 2", blockID: BlockID("code1"))
+        let table = flatten(VStackNode { node }, itemID: "item1")
+        let filler = makeImageTable(id: 1)
+        let tables = [table, filler]
+
+        let bitmapStore = FrozenBitmapStore()
+        // `codeBodyRetokenizeObserver` is the production-safe counterpart to an XCTest-only
+        // counter (mirrors `pipelineTaskSpawnObserver` -- see RenderEnvironment) -- fires once
+        // per retokenize, counted locally here instead of RenderPipeline holding its own
+        // test-only bookkeeping state.
+        let retokenizeCount = OSAllocatedUnfairLock<Int>(initialState: 0)
+        let pipeline = RenderPipeline(
+            textPool: TextMeasurementPool(),
+            layoutCache: LayoutCache(),
+            imageActor: ImageActor(),
+            frozenBitmapStore: bitmapStore,
+            highlightRegistry: HighlightRegistry(),
+            codeBodyRetokenizeObserver: { retokenizeCount.withLock { $0 += 1 } }
+        )
+        let range = await WorkingRange(capacity: 4)
+
+        // Cold pass: item 0's code body has never been rasterized -- must retokenize once.
+        await pipeline.onIndexBoundary(
+            warmRange: 0..<1, leadingIndex: 0, workingRange: range, tables: tables, availableWidth: 100, scale: 1
+        )
+        await pipeline.waitForCurrentPrefetch()
+        let retokenizeAfterCold = retokenizeCount.withLock { $0 }
+        XCTAssertEqual(retokenizeAfterCold, 1, "First render of a code block body must tokenize once")
+
+        // Scroll the item out of WorkingRange (LayoutCache is untouched) and back in with a
+        // different warmRange -- the item's CacheKey is still warm, so this resolves as a
+        // LayoutCache hit, exactly the "cache-HIT boundary" the bug describes.
+        range.invalidateAll()
+        await pipeline.onIndexBoundary(
+            warmRange: 0..<2, leadingIndex: 0, workingRange: range, tables: tables, availableWidth: 100, scale: 1
+        )
+        await pipeline.waitForCurrentPrefetch()
+
+        let hits = await pipeline.cacheHitCount
+        XCTAssertGreaterThan(hits, 0, "Second boundary must resolve item 0 from LayoutCache")
+
+        let retokenizeAfterHit = retokenizeCount.withLock { $0 }
+        XCTAssertEqual(
+            retokenizeAfterHit, 1,
+            "A LayoutCache-hit boundary must reuse the already-committed body raster, not retokenize again"
+        )
+
+        // Correctness: the reused raster is still the real syntax-highlighted, non-wrapping one.
+        let entry = await range.entry(at: 0)
+        let fragments = try XCTUnwrap(entry?.fragments)
+        let bodyFragment = try XCTUnwrap(fragments.first { fragment in
+            guard case .text(let d) = fragment.content, case .body = d.codeBlockRole else { return false }
+            return true
+        })
+        let bodyBlockID = try XCTUnwrap(bodyFragment.blockID)
+        let key = BlockKey(itemID: "item1", blockID: bodyBlockID)
+        XCTAssertNotNil(bitmapStore.bitmap(for: key), "Reused raster must still be present in frozenBitmapStore")
+    }
+
+    @MainActor
+    func testCacheHitBoundary_AfterResidentRoundTrip_ReusesCodeBodyRaster() async throws {
+        let table = flatten(
+            VStackNode {
+                CodeBlockNode(
+                    language: "swift",
+                    rawCode: "let x = 1\nlet y = 2",
+                    blockID: BlockID("code1")
+                )
+            },
+            itemID: "item1"
+        )
+        let tables = [table, makeImageTable(id: 1)]
+        let frozenStore = FrozenBitmapStore()
+        let visibleStore = VisibleBlockStore()
+        let retokenizeCount = OSAllocatedUnfairLock<Int>(initialState: 0)
+        let pipeline = RenderPipeline(
+            textPool: TextMeasurementPool(),
+            layoutCache: LayoutCache(),
+            imageActor: ImageActor(),
+            frozenBitmapStore: frozenStore,
+            highlightRegistry: HighlightRegistry(),
+            codeBodyRetokenizeObserver: { retokenizeCount.withLock { $0 += 1 } }
+        )
+        let range = await WorkingRange(capacity: 4)
+
+        await pipeline.onIndexBoundary(
+            warmRange: 0..<1, leadingIndex: 0, workingRange: range,
+            tables: tables, availableWidth: 100, scale: 2
+        )
+        await pipeline.waitForCurrentPrefetch()
+        let committedEntry = await range.entry(at: 0)
+        let entry = try XCTUnwrap(committedEntry)
+        let body = try XCTUnwrap(entry.fragments.first { fragment in
+            guard case .text(let descriptor) = fragment.content,
+                  case .body = descriptor.codeBlockRole else { return false }
+            return true
+        })
+        let key = BlockKey(itemID: "item1", blockID: try XCTUnwrap(body.blockID))
+        let original = try XCTUnwrap(frozenStore.bitmap(for: key))
+
+        visibleStore.promote([key], from: frozenStore)
+        visibleStore.demote([key], to: frozenStore)
+
+        range.invalidateAll()
+        await pipeline.onIndexBoundary(
+            warmRange: 0..<2, leadingIndex: 0, workingRange: range,
+            tables: tables, availableWidth: 100, scale: 2
+        )
+        await pipeline.waitForCurrentPrefetch()
+
+        XCTAssertEqual(retokenizeCount.withLock { $0 }, 1)
+        XCTAssertTrue(frozenStore.bitmap(for: key) === original)
+    }
+
+    @MainActor
+    func testCacheHitBoundary_AfterScaleChange_RerasterizesAtNewPixelDensity() async throws {
+        let table = flatten(
+            VStackNode {
+                CodeBlockNode(
+                    language: "swift",
+                    rawCode: "let x = 1\nlet y = 2",
+                    blockID: BlockID("code1")
+                )
+            },
+            itemID: "item1"
+        )
+        let tables = [table, makeImageTable(id: 1)]
+        let frozenStore = FrozenBitmapStore()
+        let retokenizeCount = OSAllocatedUnfairLock<Int>(initialState: 0)
+        let pipeline = RenderPipeline(
+            textPool: TextMeasurementPool(),
+            layoutCache: LayoutCache(),
+            imageActor: ImageActor(),
+            frozenBitmapStore: frozenStore,
+            highlightRegistry: HighlightRegistry(),
+            codeBodyRetokenizeObserver: { retokenizeCount.withLock { $0 += 1 } }
+        )
+        let range = await WorkingRange(capacity: 4)
+
+        await pipeline.onIndexBoundary(
+            warmRange: 0..<1, leadingIndex: 0, workingRange: range,
+            tables: tables, availableWidth: 100, scale: 1
+        )
+        await pipeline.waitForCurrentPrefetch()
+        let committedEntry = await range.entry(at: 0)
+        let entry = try XCTUnwrap(committedEntry)
+        let body = try XCTUnwrap(entry.fragments.first { fragment in
+            guard case .text(let descriptor) = fragment.content,
+                  case .body = descriptor.codeBlockRole else { return false }
+            return true
+        })
+        let key = BlockKey(itemID: "item1", blockID: try XCTUnwrap(body.blockID))
+        let scaleOneRaster = try XCTUnwrap(frozenStore.bitmap(for: key))
+
+        range.invalidateAll()
+        await pipeline.onIndexBoundary(
+            warmRange: 0..<2, leadingIndex: 0, workingRange: range,
+            tables: tables, availableWidth: 100, scale: 2
+        )
+        await pipeline.waitForCurrentPrefetch()
+        let scaleTwoRaster = try XCTUnwrap(frozenStore.bitmap(for: key))
+
+        XCTAssertEqual(retokenizeCount.withLock { $0 }, 2)
+        XCTAssertFalse(scaleTwoRaster === scaleOneRaster)
+        XCTAssertGreaterThan(scaleTwoRaster.width, scaleOneRaster.width)
+
+        range.invalidateAll()
+        await pipeline.onIndexBoundary(
+            warmRange: 0..<1, leadingIndex: 0, workingRange: range,
+            tables: tables, availableWidth: 100, scale: 2
+        )
+        await pipeline.waitForCurrentPrefetch()
+        XCTAssertEqual(retokenizeCount.withLock { $0 }, 2)
+    }
+
+    /// Regression test for the a83c/eh5x follow-up review finding: `BlockKey` alone doesn't
+    /// encode which theme a cached raster was drawn under (`HighlightRegistry.themeGeneration`'s
+    /// own doc comment flags this as unwired), so the cache-hit reuse path in
+    /// `rasterizeTextArtifacts` must not serve a raster rasterized under the OLD theme after
+    /// `setActiveTheme` switches to a new one. Scenario: rasterize under light, switch to dark,
+    /// then hit the exact same `LayoutCache`-hit boundary the previous test exercises -- the
+    /// reused raster must reflect dark, not light (proven by the retokenize observer firing
+    /// again on the theme-changed boundary, and by the bitmap actually changing identity).
+    @MainActor
+    func testCacheHitBoundary_AfterThemeChange_RerastersInsteadOfReusingStaleTheme() async throws {
+        let node = CodeBlockNode(language: "swift", rawCode: "let x = 1\nlet y = 2", blockID: BlockID("code1"))
+        let table = flatten(VStackNode { node }, itemID: "item1")
+        let filler = makeImageTable(id: 1)
+        let tables = [table, filler]
+
+        let bitmapStore = FrozenBitmapStore()
+        let highlightRegistry = HighlightRegistry(activeTheme: .defaultLight)
+        let retokenizeCount = OSAllocatedUnfairLock<Int>(initialState: 0)
+        let pipeline = RenderPipeline(
+            textPool: TextMeasurementPool(),
+            layoutCache: LayoutCache(),
+            imageActor: ImageActor(),
+            frozenBitmapStore: bitmapStore,
+            highlightRegistry: highlightRegistry,
+            codeBodyRetokenizeObserver: { retokenizeCount.withLock { $0 += 1 } }
+        )
+        let range = await WorkingRange(capacity: 4)
+
+        func bodyKey() async throws -> BlockKey {
+            let rangeEntry = await range.entry(at: 0)
+            let entry = try XCTUnwrap(rangeEntry)
+            let bodyFragment = try XCTUnwrap(entry.fragments.first { fragment in
+                guard case .text(let d) = fragment.content, case .body = d.codeBlockRole else { return false }
+                return true
+            })
+            return BlockKey(itemID: "item1", blockID: try XCTUnwrap(bodyFragment.blockID))
+        }
+
+        // Cold pass under the light theme.
+        await pipeline.onIndexBoundary(
+            warmRange: 0..<1, leadingIndex: 0, workingRange: range, tables: tables, availableWidth: 100, scale: 1
+        )
+        await pipeline.waitForCurrentPrefetch()
+        XCTAssertEqual(retokenizeCount.withLock { $0 }, 1, "Precondition: cold pass must tokenize once")
+        let lightRaster = bitmapStore.bitmap(for: try await bodyKey())
+
+        // Switch theme, then hit the exact same LayoutCache-hit boundary shape as the sibling
+        // test (scroll out of WorkingRange, back in with a different warmRange).
+        highlightRegistry.setActiveTheme(.defaultDark)
+        range.invalidateAll()
+        await pipeline.onIndexBoundary(
+            warmRange: 0..<2, leadingIndex: 0, workingRange: range, tables: tables, availableWidth: 100, scale: 1
+        )
+        await pipeline.waitForCurrentPrefetch()
+
+        XCTAssertEqual(retokenizeCount.withLock { $0 }, 2,
+            "A LayoutCache-hit boundary after a theme change must re-tokenize, not reuse the stale-themed raster")
+
+        let darkRaster = bitmapStore.bitmap(for: try await bodyKey())
+        XCTAssertNotNil(darkRaster)
+        XCTAssertFalse(darkRaster === lightRaster,
+            "The raster committed after the theme change must be a NEW CGImage, not the stale light-theme one")
+
+        // A THIRD boundary at the new (dark) theme, unchanged, must go back to reusing --
+        // proves the fix doesn't just always force cold rasterization forever.
+        range.invalidateAll()
+        await pipeline.onIndexBoundary(
+            warmRange: 0..<1, leadingIndex: 0, workingRange: range, tables: tables, availableWidth: 100, scale: 1
+        )
+        await pipeline.waitForCurrentPrefetch()
+        XCTAssertEqual(retokenizeCount.withLock { $0 }, 2,
+            "A same-theme LayoutCache-hit boundary must still reuse the committed raster, not re-tokenize every time")
+    }
+
+    /// Round-3 review follow-up on eh5x/a83c: a single boundary-wide `lastRasterizedThemeGeneration`
+    /// watermark is wrong because it gets updated as soon as ANY key in that boundary re-rasterizes
+    /// under the new theme — even if a sibling key elsewhere in `frozenBitmapStore` was never
+    /// touched by that boundary. Scenario: code blocks A and B are both cold-rastered under light.
+    /// Theme flips to dark. A boundary that resolves ONLY A re-tokenizes A and (with the old,
+    /// buggy global watermark) marks the theme as "handled" pipeline-wide. A LATER boundary that
+    /// resolves ONLY B must still re-tokenize B under dark — the fix gates reuse per-key via
+    /// `FrozenBitmapStore.codeBodyRaster(for:identity:)`, comparing each raster's own identity
+    /// instead of a single shared watermark.
+    @MainActor
+    func testCacheHitBoundary_AfterThemeChange_PerKeyGating_DoesNotLeakAcrossSiblingBoundaries() async throws {
+        let nodeA = CodeBlockNode(language: "swift", rawCode: "let a = 1\nlet b = 2", blockID: BlockID("codeA"))
+        let nodeB = CodeBlockNode(language: "swift", rawCode: "let c = 3\nlet d = 4", blockID: BlockID("codeB"))
+        let tableA = flatten(VStackNode { nodeA }, itemID: "itemA")
+        let tableB = flatten(VStackNode { nodeB }, itemID: "itemB")
+        let tables = [tableA, tableB]
+
+        let bitmapStore = FrozenBitmapStore()
+        let highlightRegistry = HighlightRegistry(activeTheme: .defaultLight)
+        let retokenizeCount = OSAllocatedUnfairLock<Int>(initialState: 0)
+        let pipeline = RenderPipeline(
+            textPool: TextMeasurementPool(),
+            layoutCache: LayoutCache(),
+            imageActor: ImageActor(),
+            frozenBitmapStore: bitmapStore,
+            highlightRegistry: highlightRegistry,
+            codeBodyRetokenizeObserver: { retokenizeCount.withLock { $0 += 1 } }
+        )
+        let range = await WorkingRange(capacity: 4)
+
+        func bodyKey(itemID: String, at index: Int) async throws -> BlockKey {
+            let rangeEntry = await range.entry(at: index)
+            let entry = try XCTUnwrap(rangeEntry)
+            let bodyFragment = try XCTUnwrap(entry.fragments.first { fragment in
+                guard case .text(let d) = fragment.content, case .body = d.codeBlockRole else { return false }
+                return true
+            })
+            return BlockKey(itemID: itemID, blockID: try XCTUnwrap(bodyFragment.blockID))
+        }
+
+        // Cold pass: both A and B rasterized under the light theme in the same boundary.
+        await pipeline.onIndexBoundary(
+            warmRange: 0..<2, leadingIndex: 0, workingRange: range, tables: tables, availableWidth: 100, scale: 1
+        )
+        await pipeline.waitForCurrentPrefetch()
+        XCTAssertEqual(retokenizeCount.withLock { $0 }, 2, "Precondition: cold pass tokenizes both A and B once each")
+        let lightRasterB = bitmapStore.bitmap(for: try await bodyKey(itemID: "itemB", at: 1))
+
+        // Switch theme, then hit a boundary that resolves ONLY A from LayoutCache — B is outside
+        // this boundary's warmRange entirely.
+        highlightRegistry.setActiveTheme(.defaultDark)
+        range.invalidateAll()
+        await pipeline.onIndexBoundary(
+            warmRange: 0..<1, leadingIndex: 0, workingRange: range, tables: tables, availableWidth: 100, scale: 1
+        )
+        await pipeline.waitForCurrentPrefetch()
+        XCTAssertEqual(retokenizeCount.withLock { $0 }, 3, "A-only boundary after the theme change must re-tokenize A")
+
+        // A LATER boundary that resolves ONLY B (A untouched this time) must ALSO re-tokenize B
+        // under the new theme — a boundary-wide watermark already bumped by A's boundary would
+        // wrongly read this as "theme already handled" and serve B's stale LIGHT raster.
+        range.invalidateAll()
+        await pipeline.onIndexBoundary(
+            warmRange: 1..<2, leadingIndex: 1, workingRange: range, tables: tables, availableWidth: 100, scale: 1
+        )
+        await pipeline.waitForCurrentPrefetch()
+        XCTAssertEqual(
+            retokenizeCount.withLock { $0 }, 4,
+            "B-only boundary after the theme change must re-tokenize B, even though a DIFFERENT " +
+            "key (A) already 'consumed' the theme change in an earlier boundary"
+        )
+
+        let darkRasterB = bitmapStore.bitmap(for: try await bodyKey(itemID: "itemB", at: 1))
+        XCTAssertNotNil(darkRasterB)
+        XCTAssertFalse(
+            darkRasterB === lightRasterB,
+            "B's raster after its own theme-changed boundary must be a NEW CGImage, not the stale light-theme one"
+        )
+    }
+
     // MARK: - Test 1: Cache hits skip measureNode
 
     func testCacheHitsSkipMeasure() async {

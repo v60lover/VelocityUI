@@ -104,10 +104,9 @@ final class MediaDispatcher {
                 )
                 if let image = visibleBlockStore.bitmap(for: key) {
                     map[fragment.id] = image
-                } else if let size = frozenBitmapStore.size(for: key),
-                          let image = frozenBitmapStore.bitmap(for: key) {
-                    visibleBlockStore.store(image, size: size, for: key)
-                    frozenBitmapStore.evict([key])
+                } else {
+                    visibleBlockStore.promote([key], from: frozenBitmapStore)
+                    guard let image = visibleBlockStore.bitmap(for: key) else { continue }
                     map[fragment.id] = image
                 }
             case .codeBlockBackground, .geometry:

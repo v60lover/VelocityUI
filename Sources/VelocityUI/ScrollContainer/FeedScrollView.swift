@@ -215,7 +215,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
             layoutCache: environment.layoutCache,
             imageActor: environment.imageActor,
             frozenBitmapStore: environment.frozenBitmapStore,
-            highlightRegistry: environment.highlightRegistry
+            highlightRegistry: environment.highlightRegistry,
+            codeBodyRetokenizeObserver: environment.codeBodyRetokenizeObserver
         )
         self.workingRange = WorkingRange()
         self.differ = RenderDiffer(dimensionCache: environment.dimensionCache)

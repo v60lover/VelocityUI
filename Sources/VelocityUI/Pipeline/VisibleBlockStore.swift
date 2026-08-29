@@ -12,6 +12,7 @@ public final class VisibleBlockStore: Sendable {
         let bitmap: CGImage
         let size: CGSize
         let cost: Int
+        let codeBodyIdentity: CodeBodyRasterIdentity?
     }
 
     private struct State {
@@ -34,9 +35,33 @@ public final class VisibleBlockStore: Sendable {
 
     public func size(for key: BlockKey) -> CGSize? { state.withLock { $0.entries[key]?.size } }
 
+    func codeBodyRaster(
+        for key: BlockKey,
+        identity: CodeBodyRasterIdentity
+    ) -> (image: CGImage, size: CGSize)? {
+        state.withLock { st in
+            guard let entry = st.entries[key], entry.codeBodyIdentity == identity else { return nil }
+            return (entry.bitmap, entry.size)
+        }
+    }
+
     /// Retains an active artifact. Cost comes from the real bitmap layout, including row padding.
     public func store(_ bitmap: CGImage, size: CGSize, for key: BlockKey) {
-        let entry = Entry(bitmap: bitmap, size: size, cost: Self.cost(of: bitmap))
+        store(bitmap, size: size, for: key, codeBodyIdentity: nil)
+    }
+
+    func store(
+        _ bitmap: CGImage,
+        size: CGSize,
+        for key: BlockKey,
+        codeBodyIdentity: CodeBodyRasterIdentity?
+    ) {
+        let entry = Entry(
+            bitmap: bitmap,
+            size: size,
+            cost: Self.cost(of: bitmap),
+            codeBodyIdentity: codeBodyIdentity
+        )
         state.withLock { st in
             if let old = st.entries.updateValue(entry, forKey: key) {
                 st.currentByteTotal -= old.cost
@@ -51,8 +76,13 @@ public final class VisibleBlockStore: Sendable {
         guard !keys.isEmpty else { return }
         var promoted: Set<BlockKey> = []
         for key in keys {
-            guard let size = cache.size(for: key), let bitmap = cache.bitmap(for: key) else { continue }
-            store(bitmap, size: size, for: key)
+            guard let artifact = cache.artifact(for: key) else { continue }
+            store(
+                artifact.image,
+                size: artifact.size,
+                for: key,
+                codeBodyIdentity: artifact.codeBodyIdentity
+            )
             promoted.insert(key)
         }
         cache.evict(promoted)
@@ -69,7 +99,13 @@ public final class VisibleBlockStore: Sendable {
             }
         }
         for (key, entry) in entries {
-            cache.store(entry.bitmap, size: entry.size, cost: entry.cost, for: key)
+            cache.store(
+                entry.bitmap,
+                size: entry.size,
+                cost: entry.cost,
+                for: key,
+                codeBodyIdentity: entry.codeBodyIdentity
+            )
         }
     }
 

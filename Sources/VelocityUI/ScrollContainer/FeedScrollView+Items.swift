@@ -414,6 +414,11 @@ extension FeedScrollView {
         let d = diff(previous: previousBlocks, new: newBlocks)
         let store = environment.frozenBitmapStore
         let residentStore = environment.visibleBlockStore
+        let themeSnapshot = environment.highlightRegistry.themeSnapshot
+        let codeBodyIdentity = CodeBodyRasterIdentity(
+            themeGeneration: themeSnapshot.generation,
+            scale: scale
+        )
         let previousFragmentByID = Dictionary(uniqueKeysWithValues: previousFragments.map { ($0.id, $0) })
         // `first(where:)` per code block would make an N-code-block message do O(N²)
         // reconciliation; a single upfront dictionary keeps this O(N) overall.
@@ -424,6 +429,14 @@ extension FeedScrollView {
                   case .codeBlock(let descriptor) = previousTable.nodes[previous.fragment.id]
             else { return nil }
             return descriptor
+        }
+
+        // A code block's body raster is cached under its `.codeBody` part identity, not the
+        // block's own key — `RenderPipeline.rasterizeTextArtifacts` uses this same
+        // `codePartID(..., part: .codeBody)` key so a raster produced on one path is a hit on
+        // the other.
+        func codeBodyKey(for block: Block) -> BlockKey {
+            BlockKey(itemID: itemID, blockID: codePartID(owner: block.blockID, nodeIndex: block.fragment.id, part: .codeBody))
         }
 
         // Measures (+ rasterizes) one active text block via the `freeze(_:)` primitive and keeps
@@ -448,7 +461,7 @@ extension FeedScrollView {
             // would rasterize the plain, container-clipped TextDescriptor Flattener produced).
             if case .body(let chrome) = descriptor.codeBlockRole {
                 let lines = descriptor.content.components(separatedBy: "\n")[...]
-                let theme = environment.highlightRegistry.activeTheme
+                let theme = themeSnapshot.theme
                 let grammar = environment.highlightRegistry.grammar(for: LanguageID(fenceInfo: chrome.language))
                 let colorRuns = TreeSitterHighlighter().colorRuns(for: lines, grammar: grammar, theme: theme)
                 let result = rasterizeCodeBlockSync(
@@ -456,7 +469,12 @@ extension FeedScrollView {
                     measure: { [self] d, w in measureTextSync(d, width: w) }
                 )
                 guard let bitmap = result.image else { return (result.size.height, nil) }
-                residentStore.store(bitmap, size: result.size, for: block.key)
+                residentStore.store(
+                    bitmap,
+                    size: result.size,
+                    for: codeBodyKey(for: block),
+                    codeBodyIdentity: codeBodyIdentity
+                )
                 return (result.size.height, bitmap)
             }
             var localCache: [BlockKey: FreezeState] = [:]
@@ -548,9 +566,16 @@ extension FeedScrollView {
                 recordTextResult(result, for: block, at: match.newIndex)
                 continue
             }
-            if case .text = block.fragment.content {
-                if case .text(let descriptor) = block.fragment.content,
-                   let sealed = environment.hotBlockRasterizerStore.catchUpAndFinalize(
+            if case .text(let descriptor) = block.fragment.content {
+                // Reads against the same key the tree-sitter `.body` branch above writes to
+                // (`codeBodyKey`) — the generic `block.key` is only ever right for non-code text.
+                let readKey: BlockKey
+                if case .body = descriptor.codeBlockRole {
+                    readKey = codeBodyKey(for: block)
+                } else {
+                    readKey = block.key
+                }
+                if let sealed = environment.hotBlockRasterizerStore.catchUpAndFinalize(
                        block.key,
                        descriptor: descriptor,
                        width: block.width,
@@ -561,21 +586,29 @@ extension FeedScrollView {
                     recordTextResult(
                         (sealed.size.height, sealed.image), for: block, at: match.newIndex
                     )
-                } else if let size = residentStore.size(for: block.key),
-                          let bitmap = residentStore.bitmap(for: block.key) {
-                    recordTextResult((size.height, bitmap), for: block, at: match.newIndex)
-                } else if let size = store.size(for: block.key) {
-                    // A cached inactive block becomes resident before a later token can make it
-                    // an LRU victim. The same bitmap instance is painted without re-rasterizing.
-                    let bitmap = store.bitmap(for: block.key)
-                    if let bitmap { residentStore.store(bitmap, size: size, for: block.key) }
-                    recordTextResult((size.height, bitmap), for: block, at: match.newIndex)
                 } else {
-                    // Self-heal: logically unchanged per diff(), but the store has no entry
-                    // yet (first pass through C3 for this block, or it was LRU/pressure-
-                    // evicted) — recompute once and (re-)freeze it, same as a finalized tail.
-                    guard let result = measureAndMaybeFreeze(block) else { return nil }
-                    recordTextResult(result, for: block, at: match.newIndex)
+                    if residentStore.bitmap(for: readKey) == nil {
+                        residentStore.promote([readKey], from: store)
+                    }
+                    let cached: (image: CGImage, size: CGSize)?
+                    if case .body = descriptor.codeBlockRole {
+                        cached = residentStore.codeBodyRaster(
+                            for: readKey,
+                            identity: codeBodyIdentity
+                        )
+                    } else if let size = residentStore.size(for: readKey),
+                              let bitmap = residentStore.bitmap(for: readKey) {
+                        cached = (bitmap, size)
+                    } else {
+                        cached = nil
+                    }
+                    if let cached {
+                        recordTextResult((cached.size.height, cached.image), for: block, at: match.newIndex)
+                    } else {
+                        // Recompute after eviction or a raster-identity mismatch.
+                        guard let result = measureAndMaybeFreeze(block) else { return nil }
+                        recordTextResult(result, for: block, at: match.newIndex)
+                    }
                 }
             } else {
                 if let geometry = resolveDeterministicGeometry(block) {
@@ -626,7 +659,19 @@ extension FeedScrollView {
         }
 
         if !d.removed.isEmpty {
-            let removed = Set(d.removed)
+            var removed = Set(d.removed)
+            // A removed code block's header/body rasters live under their own `codePartID`
+            // keys, not `block.key` — evicting only `block.key` leaves those part-keyed rasters
+            // orphaned: `VisibleBlockStore` has no LRU, so they'd stay resident indefinitely,
+            // and `FrozenBitmapStore` would only reclaim them once its own LRU happens to evict
+            // that key under memory pressure, not because the block was actually removed.
+            for key in d.removed {
+                guard let block = previousBlockByKey[key],
+                      case .codeBlock = previousTable.nodes[block.fragment.id]
+                else { continue }
+                removed.insert(BlockKey(itemID: itemID, blockID: codePartID(owner: block.blockID, nodeIndex: block.fragment.id, part: .codeHeader)))
+                removed.insert(BlockKey(itemID: itemID, blockID: codePartID(owner: block.blockID, nodeIndex: block.fragment.id, part: .codeBody)))
+            }
             store.evict(removed)
             residentStore.evict(removed)
             environment.hotBlockRasterizerStore.evict(removed)
@@ -763,6 +808,11 @@ extension FeedScrollView {
     /// only the keys, and a full `Block` alloc on every keep-range crossing during a fling would
     /// violate the zero-allocation scroll-path invariant. Mirrors `flatBlocks`' guards exactly.
     /// Returns `true` when it inserted the full flat key set, `false` on a non-flat shape.
+    ///
+    /// A code block's header/body rasters live under their own `codePartID(..., part:)` keys
+    /// (see `codeBodyKey` in `applyInPlaceBlockDiff`), separate from the block's own key — those
+    /// part keys must also be emitted here or `updateVisibleCells` never demotes/evicts them when
+    /// the block leaves the visible range.
     @discardableResult
     func flatBlockKeys<ID: Hashable & Sendable>(
         for table: NodeTable, itemID: ID, into keys: inout Set<BlockKey>
@@ -774,9 +824,14 @@ extension FeedScrollView {
         // found partway through must bail without partially mutating the caller's accumulator.
         for nodeIndex in childIndices where !table.isBlockLeaf(at: nodeIndex) { return false }
         for (position, nodeIndex) in childIndices.enumerated() {
-            let key = table.blockID(at: nodeIndex).map { BlockKey(itemID: itemID, blockID: $0) }
+            let ownerBlockID = table.blockID(at: nodeIndex)
+            let key = ownerBlockID.map { BlockKey(itemID: itemID, blockID: $0) }
                 ?? BlockKey(itemID: itemID, index: position)
             keys.insert(key)
+            if case .codeBlock = table.nodes[nodeIndex] {
+                keys.insert(BlockKey(itemID: itemID, blockID: codePartID(owner: ownerBlockID, nodeIndex: nodeIndex, part: .codeHeader)))
+                keys.insert(BlockKey(itemID: itemID, blockID: codePartID(owner: ownerBlockID, nodeIndex: nodeIndex, part: .codeBody)))
+            }
         }
         return true
     }

@@ -1027,5 +1027,167 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
 
         await drainFeedWork(feed)
     }
+
+    // MARK: - VelocityUI-a83c: code-block part-key eviction (header/body) on scroll and removal
+
+    struct CodeOrPlainItem: Identifiable, Sendable {
+        let id: Int
+        let code: String?
+    }
+
+    private func makeCodeOrPlainFeed() -> FeedScrollView<CodeOrPlainItem> {
+        let feed = FeedScrollView<CodeOrPlainItem>(environment: makeEnvironment(), frame: CGRect(x: 0, y: 0, width: 375, height: 812))
+        feed.cellBuilder = { item in
+            VStackNode(spacing: 4) {
+                if let code = item.code {
+                    CodeBlockNode(language: "swift", rawCode: code, blockID: BlockID("code"), blockLifecycle: .sealed)
+                } else {
+                    // A stable renderID keeps `diff(previous:new:)` on its identity-based path
+                    // (`uniqueBlocksByID`) instead of falling back to `positionalDiff`, which
+                    // never populates `removed` at all -- the fallback would hide the exact bug
+                    // this test targets, `d.removed` in `applyInPlaceBlockDiff`.
+                    TextNode("plain \(item.id)").renderID("plain")
+                }
+            }
+        }
+        return feed
+    }
+
+    /// Regression test for VelocityUI-a83c: `flatBlockKeys` (the source `updateVisibleCells` uses
+    /// to compute `leavingKeys`) only emitted a code block's own `block.key`, never the
+    /// `codePartID(..., part: .codeHeader/.codeBody)` keys its header/body rasters are actually
+    /// stored under. So `visibleBlockStore.demote(leavingKeys, to: frozenBitmapStore)` never
+    /// touched those part-keyed bitmaps, and they stayed resident forever (VisibleBlockStore has
+    /// no LRU) once the block scrolled off-screen.
+    func testScrollingPastCodeBlock_DemotesHeaderAndBodyPartKeys() async {
+        let feed = makeCodeOrPlainFeed()
+        let itemCount = 30
+        let longCode = "let \(String(repeating: "x", count: 150)) = 1"
+        feed.items = [CodeOrPlainItem(id: 0, code: longCode)]
+            + (1..<itemCount).map { CodeOrPlainItem(id: $0, code: nil) }
+        feed.layoutSubviews()
+
+        // Only item 0 is under test here -- and `onIndexBoundary` commits its whole batch to
+        // WorkingRange atomically in one `MainActor.run` (see RenderPipeline.swift), so item 0
+        // landing proves the rest of that same batch landed too. Waiting on the full
+        // `0..<itemCount` range instead makes this loop spin to the 10s deadline for no reason:
+        // indices past the initial visible+prefetch window never commit without scrolling.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < deadline, feed._workingRangeMissCount(from: 0, to: 1) > 0 {
+            await Task.yield()
+            feed.layoutSubviews()
+        }
+        feed.layoutSubviews()
+
+        let resident = feed.renderEnvironment.visibleBlockStore
+        let frozen = feed.renderEnvironment.frozenBitmapStore
+        let headerKey = BlockKey(itemID: 0, blockID: codePartID(owner: BlockID("code"), nodeIndex: 1, part: .codeHeader))
+        let bodyKey = BlockKey(itemID: 0, blockID: codePartID(owner: BlockID("code"), nodeIndex: 1, part: .codeBody))
+
+        guard let headerBitmap = resident.bitmap(for: headerKey), let bodyBitmap = resident.bitmap(for: bodyKey) else {
+            return XCTFail("Precondition: code block's header/body rasters must be resident while item 0 is visible")
+        }
+        // Same cost formula VisibleBlockStore/FrozenBitmapStore use internally (bytesPerRow *
+        // height) -- lets the byte-total assertions below check an actual expected NUMBER, not
+        // just "the same value as last time" (which a degenerate [0, 0, 0] would also satisfy).
+        let codeBlockBytes = (headerBitmap.bytesPerRow * headerBitmap.height) + (bodyBitmap.bytesPerRow * bodyBitmap.height)
+        XCTAssertGreaterThan(codeBlockBytes, 0)
+        let residentTotalWithCodeVisible = resident.currentByteTotal
+        XCTAssertGreaterThanOrEqual(residentTotalWithCodeVisible, codeBlockBytes)
+
+        // Scroll far enough that item 0 falls outside keepRange.
+        feed.contentOffset = CGPoint(x: 0, y: 100_000)
+        feed.layoutSubviews()
+
+        XCTAssertNil(resident.bitmap(for: headerKey),
+            "Leaving the keep range must demote the header raster, not leak it in VisibleBlockStore")
+        XCTAssertNil(resident.bitmap(for: bodyKey),
+            "Leaving the keep range must demote the body raster, not leak it in VisibleBlockStore")
+        XCTAssertNotNil(frozen.bitmap(for: headerKey),
+            "The header raster must survive in FrozenBitmapStore after demotion")
+        XCTAssertNotNil(frozen.bitmap(for: bodyKey),
+            "The body raster must survive in FrozenBitmapStore after demotion")
+        // Scrolling to y=100_000 pushes ALL 30 items out of keepRange, not just item 0 -- so the
+        // expected total here is whatever's left over from unrelated items (verified strictly
+        // less than the with-code total, and confirmed not to include the code block's own bytes
+        // via the header/bodyKey nil checks above), captured once and re-checked every cycle
+        // below so a degenerate always-different value can't slip through as "no growth".
+        let residentTotalWithNothingVisible = resident.currentByteTotal
+        XCTAssertLessThan(residentTotalWithNothingVisible, residentTotalWithCodeVisible,
+            "Demoting the code block's rasters must actually drop bytes from VisibleBlockStore's total")
+
+        // Scroll back near item 0 (promote), then repeat the cycle -- currentByteTotal must
+        // return to the EXACT expected value (not just an arbitrary stable one) every time, so a
+        // degenerate always-zero total can't slip past as "no growth".
+        for _ in 0..<3 {
+            feed.contentOffset = CGPoint(x: 0, y: 0)
+            feed.layoutSubviews()
+            XCTAssertEqual(resident.currentByteTotal, residentTotalWithCodeVisible,
+                "Promoting the code block back must restore exactly the expected resident byte total")
+            feed.contentOffset = CGPoint(x: 0, y: 100_000)
+            feed.layoutSubviews()
+            XCTAssertEqual(resident.currentByteTotal, residentTotalWithNothingVisible,
+                "Demoting again must drop back to exactly the expected total, not accumulate")
+        }
+
+        await drainFeedWork(feed)
+    }
+
+    /// Regression test for VelocityUI-a83c: the `d.removed` branch in `applyInPlaceBlockDiff`
+    /// only evicted a removed code block's own `block.key`, leaving its header/body part-keyed
+    /// rasters resident in both `VisibleBlockStore` and `FrozenBitmapStore` after the code block
+    /// itself was removed from the item.
+    func testRemovingCodeBlockInPlace_EvictsHeaderAndBodyPartKeys() async {
+        let feed = makeCodeOrPlainFeed()
+        let longCode = "let \(String(repeating: "x", count: 150)) = 1"
+        feed.items = [CodeOrPlainItem(id: 0, code: longCode)]
+        feed.layoutSubviews()
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < deadline, feed._workingRangeMissCount(from: 0, to: 1) > 0 {
+            await Task.yield()
+            feed.layoutSubviews()
+        }
+        feed.layoutSubviews()
+
+        let resident = feed.renderEnvironment.visibleBlockStore
+        let frozen = feed.renderEnvironment.frozenBitmapStore
+        let headerKey = BlockKey(itemID: 0, blockID: codePartID(owner: BlockID("code"), nodeIndex: 1, part: .codeHeader))
+        let bodyKey = BlockKey(itemID: 0, blockID: codePartID(owner: BlockID("code"), nodeIndex: 1, part: .codeBody))
+
+        guard let headerBitmap = resident.bitmap(for: headerKey), let bodyBitmap = resident.bitmap(for: bodyKey) else {
+            return XCTFail("Precondition: code block's header/body rasters must be resident before removal")
+        }
+        // Same cost formula VisibleBlockStore uses internally (bytesPerRow * height) -- lets the
+        // post-removal byte-total assertion below check an exact expected NUMBER (accounting for
+        // the replacement leaf's own bytes too), not just "went down" or "isn't growing", which a
+        // degenerate always-shrinking-to-zero total would also satisfy.
+        let codeBlockBytes = (headerBitmap.bytesPerRow * headerBitmap.height) + (bodyBitmap.bytesPerRow * bodyBitmap.height)
+        let residentTotalBeforeRemoval = resident.currentByteTotal
+
+        // Same id, code block replaced by a plain text leaf -- an in-place, block-level removal
+        // (exercises applyInPlaceBlockDiff's d.removed branch, not a whole-item removal).
+        feed.items = [CodeOrPlainItem(id: 0, code: nil)]
+        feed.layoutSubviews()
+
+        XCTAssertNil(resident.bitmap(for: headerKey),
+            "Removing the code block in-place must evict its resident header raster")
+        XCTAssertNil(resident.bitmap(for: bodyKey),
+            "Removing the code block in-place must evict its resident body raster")
+        XCTAssertNil(frozen.bitmap(for: headerKey),
+            "A fully removed code block's header raster must not survive in FrozenBitmapStore either")
+        XCTAssertNil(frozen.bitmap(for: bodyKey),
+            "A fully removed code block's body raster must not survive in FrozenBitmapStore either")
+
+        // Baseline check: resident bytes must be exactly (before total) - (code block's bytes) +
+        // (whatever the replacement "plain" leaf now costs, 0 if it never became resident) --
+        // proves the code block's bytes are truly gone, not just masked by unrelated churn.
+        let plainKey = BlockKey(itemID: 0, blockID: BlockID("plain"))
+        let plainLeafBytes = resident.bitmap(for: plainKey).map { $0.bytesPerRow * $0.height } ?? 0
+        XCTAssertEqual(resident.currentByteTotal, residentTotalBeforeRemoval - codeBlockBytes + plainLeafBytes,
+            "After removal, resident bytes must return to exactly the pre-code-block baseline")
+
+        await drainFeedWork(feed)
+    }
 }
 #endif

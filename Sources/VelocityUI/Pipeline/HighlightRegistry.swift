@@ -3,6 +3,11 @@
 import Foundation
 import os
 
+struct HighlightThemeSnapshot: Sendable {
+    let theme: Theme
+    let generation: Int
+}
+
 /// Composition-root collaborator: an entry-count-bounded LRU cache of compiled syntax-highlighting
 /// grammars, plus the active color theme. One instance per `AsyncFeed`, owned by
 /// `RenderEnvironment`, injected downstream — no singleton, no static shared, no global grammar
@@ -10,12 +15,11 @@ import os
 /// registry.
 ///
 /// A plain `Sendable` class, not an actor, so `grammar(for:)` stays synchronous — the off-main
-/// syntax highlighter (VelocityUI-oz5q.3) calls it from a `Task`, never with an `await`. State is
+/// syntax highlighter calls it from a `Task`, never with an `await`. State is
 /// guarded by `OSAllocatedUnfairLock`, mirroring `FrozenBitmapStore`.
 ///
-/// `themeGeneration` bumps on every real theme change. A later bead folds this counter into a
-/// rendered code block's cache key so switching theme invalidates cached rasters instead of
-/// leaving stale colors on screen — that wiring is not done here, only the counter itself.
+/// `themeGeneration` bumps on every real theme change and participates in code-body raster
+/// identity, so cached pixels are reused only under the theme that produced them.
 public final class HighlightRegistry: Sendable {
 
     /// LRU list node. `@unchecked Sendable`: `grammar` is itself `Sendable` (an immutable
@@ -60,6 +64,14 @@ public final class HighlightRegistry: Sendable {
     /// Bumps once per real theme change. Starts at 0.
     public var themeGeneration: Int {
         state.withLock { $0.themeGeneration }
+    }
+
+    /// Reads the colors and their generation under one lock so cached raster metadata cannot
+    /// describe a different theme than the pixels actually drawn.
+    var themeSnapshot: HighlightThemeSnapshot {
+        state.withLock {
+            HighlightThemeSnapshot(theme: $0.activeTheme, generation: $0.themeGeneration)
+        }
     }
 
     /// Replaces the active theme. A no-op (no generation bump) if `theme` equals the current

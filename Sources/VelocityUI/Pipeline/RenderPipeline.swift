@@ -32,51 +32,6 @@ private func clampedRange(_ range: Range<Int>, count: Int) -> Range<Int> {
     return start..<max(start, end)
 }
 
-private struct TextBitmapArtifact: @unchecked Sendable {
-    let key: BlockKey
-    let image: CGImage
-    let size: CGSize
-}
-
-/// Rasterizes one text fragment. A code block body gets the real syntax-highlighted, non-wrapping
-/// raster (`makeCodeTextDescriptor` + real `[LineColorRuns]` from `highlightRegistry`); every
-/// other text fragment goes through the plain generic path unchanged.
-private nonisolated func rasterizeTextFragment(
-    _ descriptor: TextDescriptor,
-    frameSize: CGSize,
-    scale: CGFloat,
-    highlightRegistry: HighlightRegistry
-) -> (image: CGImage?, size: CGSize) {
-    guard case .body(let chrome) = descriptor.codeBlockRole else {
-        return (rasterizeText(descriptor, size: frameSize, scale: scale), frameSize)
-    }
-    let lines = descriptor.content.components(separatedBy: "\n")[...]
-    let theme = highlightRegistry.activeTheme
-    let grammar = highlightRegistry.grammar(for: LanguageID(fenceInfo: chrome.language))
-    let colorRuns = TreeSitterHighlighter().colorRuns(for: lines, grammar: grammar, theme: theme)
-    return rasterizeCodeBlockSync(
-        lines: lines, colorRuns: colorRuns, font: descriptor.font, theme: theme, scale: scale
-    ) { d, w in TextMeasurementContext().measure(d, width: w) }
-}
-
-private nonisolated func rasterizeTextArtifacts(
-    table: NodeTable,
-    fragments: [Fragment],
-    scale: CGFloat,
-    highlightRegistry: HighlightRegistry
-) -> [TextBitmapArtifact] {
-    let itemID = table.itemID
-    return fragments.enumerated().compactMap { position, fragment in
-        guard case .text(let descriptor) = fragment.content else { return nil }
-        let (image, size) = rasterizeTextFragment(
-            descriptor, frameSize: fragment.frame.size, scale: scale, highlightRegistry: highlightRegistry
-        )
-        guard let image else { return nil }
-        let key = BlockKey(boxedItemID: itemID, index: position, blockID: fragment.blockID)
-        return TextBitmapArtifact(key: key, image: image, size: size)
-    }
-}
-
 /// Prefetch actor — runs off MainActor, writes back to WorkingRange via MainActor.run.
 /// Called by the scroll container on leading-index boundary crossings (not every frame).
 public actor RenderPipeline {
@@ -103,6 +58,11 @@ public actor RenderPipeline {
     private let frozenBitmapStore: FrozenBitmapStore
     private let highlightRegistry: HighlightRegistry
 
+    /// Fires once per code-block body tokenized+rasterized from scratch, on cold miss or
+    /// cache-hit-without-reuse alike — see `RenderEnvironment.codeBodyRetokenizeObserver`.
+    /// `nil` in production and in most tests.
+    private let codeBodyRetokenizeObserver: (@Sendable () -> Void)?
+
     // MARK: - Supersession guard state
 
     /// Generation counter shared with every spawned prefetch Task.
@@ -124,13 +84,15 @@ public actor RenderPipeline {
         layoutCache: LayoutCache,
         imageActor: ImageActor,
         frozenBitmapStore: FrozenBitmapStore = FrozenBitmapStore(),
-        highlightRegistry: HighlightRegistry
+        highlightRegistry: HighlightRegistry,
+        codeBodyRetokenizeObserver: (@Sendable () -> Void)? = nil
     ) {
         self.textPool = textPool
         self.layoutCache = layoutCache
         self.imageActor = imageActor
         self.frozenBitmapStore = frozenBitmapStore
         self.highlightRegistry = highlightRegistry
+        self.codeBodyRetokenizeObserver = codeBodyRetokenizeObserver
     }
 
     /// Test-only convenience — creates a private pool/cache/imageActor not shared with
@@ -141,6 +103,7 @@ public actor RenderPipeline {
         self.imageActor = ImageActor()
         self.frozenBitmapStore = FrozenBitmapStore()
         self.highlightRegistry = HighlightRegistry()
+        self.codeBodyRetokenizeObserver = nil
     }
 
     /// Notifies the pipeline that the warm window changed. No-op if `warmRange` is unchanged
@@ -202,6 +165,8 @@ public actor RenderPipeline {
         let capturedWarmRange = warmRange
 
         prefetchTask = Task {
+            // Keep the pixels and their cache identity on the same locked theme snapshot.
+            let themeSnapshot = registry.themeSnapshot
             let range = clampedRange(capturedWarmRange, count: tables.count)
             guard !range.isEmpty else { return }
 
@@ -224,42 +189,47 @@ public actor RenderPipeline {
             // prefetch work doesn't gate commit.
             var results: [(Int, ResolvedLayout, [Fragment], [TextBitmapArtifact])] = []
             var localHits = 0
+            var localCodeBodyRetokenizes = 0
             var spawnedPrefetches: [Task<Void, Never>] = []
-            await withTaskGroup(of: (Int, ResolvedLayout, [Fragment], [TextBitmapArtifact], Bool).self) { group in
+            await withTaskGroup(of: (Int, ResolvedLayout, [Fragment], [TextBitmapArtifact], Bool, Int).self) { group in
                 for index in needed {
                     let table = tables[index]
                     let key = CacheKey(layoutHash: table.layoutHash, width: availableWidth)
                     group.addTask {
                         if let entry = await cache.get(key) {
-                            let artifacts = rasterizeTextArtifacts(
+                            let (artifacts, retokenizeCount) = rasterizeTextArtifacts(
                                 table: table,
                                 fragments: entry.fragments,
                                 scale: capturedScale,
-                                highlightRegistry: registry
+                                highlightRegistry: registry,
+                                themeSnapshot: themeSnapshot,
+                                reusableFrom: bitmapStore
                             )
-                            return (index, entry.layout, entry.fragments, artifacts, true)
+                            return (index, entry.layout, entry.fragments, artifacts, true, retokenizeCount)
                         }
                         // Guard before the expensive path — exits quickly on cancellation.
-                        guard !Task.isCancelled else { return (index, .placeholder, [], [], false) }
+                        guard !Task.isCancelled else { return (index, .placeholder, [], [], false, 0) }
                         let layout = await measureNode(
                             table, nodeIndex: 0,
                             width: availableWidth,
                             textPool: pool
                         )
                         let fragments = extractFragments(table: table, layout: layout)
-                        let artifacts = rasterizeTextArtifacts(
+                        let (artifacts, retokenizeCount) = rasterizeTextArtifacts(
                             table: table,
                             fragments: fragments,
                             scale: capturedScale,
-                            highlightRegistry: registry
+                            highlightRegistry: registry,
+                            themeSnapshot: themeSnapshot,
+                            reusableFrom: nil
                         )
                         await cache.set(CellEntry(layout: layout, fragments: fragments), for: key)
-                        return (index, layout, fragments, artifacts, false)
+                        return (index, layout, fragments, artifacts, false, retokenizeCount)
                     }
                 }
                 // Consume results in completion order; spawn prefetch immediately per item.
                 // Cancelled results (isHit=false, fragments=[]) are skipped without spawning.
-                for await (i, layout, fragments, artifacts, isHit) in group {
+                for await (i, layout, fragments, artifacts, isHit, retokenizeCount) in group {
                     guard !Task.isCancelled else { continue }
                     for fragment in fragments {
                         guard case .image(let d) = fragment.content, let url = d.url else { continue }
@@ -294,6 +264,7 @@ public actor RenderPipeline {
                         ))
                     }
                     if isHit { localHits += 1 }
+                    localCodeBodyRetokenizes += retokenizeCount
                     results.append((i, layout, fragments, artifacts))
                 }
             }
@@ -305,6 +276,9 @@ public actor RenderPipeline {
             }
 
             cacheHitCount += localHits
+            if let codeBodyRetokenizeObserver {
+                for _ in 0..<localCodeBodyRetokenizes { codeBodyRetokenizeObserver() }
+            }
 
             for (_, _, _, artifacts) in results {
                 for artifact in artifacts {
@@ -312,7 +286,8 @@ public actor RenderPipeline {
                         artifact.image,
                         size: artifact.size,
                         cost: artifact.image.bytesPerRow * artifact.image.height,
-                        for: artifact.key
+                        for: artifact.key,
+                        codeBodyIdentity: artifact.codeBodyIdentity
                     )
                 }
             }
