@@ -114,12 +114,12 @@ enum StreamDataset {
         result.reserveCapacity(textNodes.count + (frontier / 2) + 1)
         for (index, node) in textNodes.enumerated() {
             result.append(node)
-            if index >= imageAfterBlockIndex, index > 10, index % 2 == 0 {
-                result.append(
-                    AsyncImageNode(url: imageURL, aspectRatio: 16.0 / 9.0, contentMode: .fill)
-                        .renderID("stream-image-after-\(index)")
-                )
-            }
+//            if index >= imageAfterBlockIndex, index > 10, index % 2 == 0 {
+//                result.append(
+//                    AsyncImageNode(url: imageURL, aspectRatio: 16.0 / 9.0, contentMode: .fill)
+//                        .renderID("stream-image-after-\(index)")
+//                )
+//            }
 //            if index == ruleAfterBlockIndex, frontier > ruleAfterBlockIndex {
 //                result.append(SpacerNode(minLength: 12).renderID("stream-rule-after-\(index)"))
 //            }
@@ -198,18 +198,97 @@ enum StreamDataset {
         return chunks
     }
 
-    /// Opens a fence, appends `lineCount` synthetic Swift-like lines one at a time (the fence
-    /// stays hot/open for the entire span), then closes it.
+    /// Opens a fence, appends `lineCount` lines of real Swift source (`realCodeLines`, cycling
+    /// from a seed-chosen offset if `lineCount` exceeds the corpus) one at a time — the fence
+    /// stays hot/open for the entire span — then closes it.
+    ///
+    /// Real code exercises the tree-sitter highlighter's actual token distribution (keywords,
+    /// types, string/comment runs, nesting) instead of one repeated synthetic statement shape,
+    /// which is what the wj8x worst-case fence is meant to stress.
     private static func codeFence(lineCount: Int, rng: inout LCG) -> [String] {
-        var chunks: [String] = ["`swift\n"]
+        var chunks: [String] = ["```swift\n"]
+        let start = Int(rng.next() % UInt64(realCodeLines.count))
         for i in 0..<lineCount {
-            let a = Int(rng.next() % 97)
-            let b = Int(rng.next() % 53)
-            chunks.append("let value\(i) = \(a) &* \(b) &+ \(i)  // streamed line \(i)\n")
+            chunks.append(realCodeLines[(start + i) % realCodeLines.count] + "\n")
         }
-        chunks.append("`\n")
+        chunks.append("```\n")
         return chunks
     }
+
+    /// A real, working Swift source excerpt (`AsyncSemaphore`, trimmed of its `#if canImport`
+    /// wrapper) used as the fenced-code-block content in `tokens()`. Streamed and cycled line by
+    /// line by `codeFence` so the "hot fence" benchmark scenario highlights real keyword/type/
+    /// comment token shapes instead of one repeated synthetic arithmetic statement.
+    private static let realCodeLines: [String] = """
+    /// Priority-lane bounded semaphore for Swift concurrency. `wait()` acquires a slot,
+    /// `signal()` releases one.
+    ///
+    /// Contended waiters queue into a per-`DecodePriority` FIFO tier; `signal()` wakes the
+    /// highest-priority (lowest `rawValue`) non-empty tier, FIFO within that tier — tiers only
+    /// affect admission order, a held slot is never preempted. Cancellation-safe: `wait()` throws
+    /// `CancellationError` if cancelled while blocked, without consuming a slot.
+    public actor AsyncSemaphore {
+        private var count: Int
+        var waiterTiers: [[(id: UUID, cont: CheckedContinuation<Void, any Error>)]] =
+            Array(repeating: [], count: DecodePriority.allCases.count)
+        private var totalWaiterCount = 0
+
+        public init(value: Int) {
+            precondition(value >= 0, "AsyncSemaphore value must be non-negative")
+            self.count = value
+        }
+
+        public func wait(id: UUID? = nil, priority: DecodePriority = .visible) async throws {
+            try Task.checkCancellation()
+            if count > 0 { count -= 1; return }
+
+            let waiterID = id ?? UUID()
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in
+                    if Task.isCancelled {
+                        cont.resume(throwing: CancellationError())
+                    } else {
+                        waiterTiers[priority.rawValue].append((id: waiterID, cont: cont))
+                        totalWaiterCount += 1
+                    }
+                }
+            } onCancel: {
+                Task { [waiterID] in await self.cancelWaiter(id: waiterID) }
+            }
+        }
+
+        public func signal() {
+            guard totalWaiterCount > 0 else { count += 1; return }
+            for tier in waiterTiers.indices {
+                guard let waiter = waiterTiers[tier].first else { continue }
+                waiterTiers[tier].removeFirst()
+                totalWaiterCount -= 1
+                waiter.cont.resume()
+                return
+            }
+        }
+
+        public func elevate(id: UUID, to newPriority: DecodePriority) {
+            for tier in waiterTiers.indices where tier > newPriority.rawValue {
+                guard let idx = waiterTiers[tier].firstIndex(where: { $0.id == id }) else { continue }
+                let waiter = waiterTiers[tier].remove(at: idx)
+                waiterTiers[newPriority.rawValue].append(waiter)
+                return
+            }
+        }
+
+        // MARK: - Private
+
+        private func cancelWaiter(id: UUID) {
+            for tier in waiterTiers.indices {
+                guard let idx = waiterTiers[tier].firstIndex(where: { $0.id == id }) else { continue }
+                waiterTiers[tier].remove(at: idx).cont.resume(throwing: CancellationError())
+                totalWaiterCount -= 1
+                return
+            }
+        }
+    }
+    """.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
 }
 
 private struct LCG {
