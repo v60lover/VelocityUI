@@ -657,7 +657,7 @@ final class FragmentTests: XCTestCase {
             "a child well within the framed slot must be unaffected by the clip — no spurious clamping")
     }
 
-    // MARK: - CodeBlockNode container background synthesis (VelocityUI-oz5q.5)
+    // MARK: - CodeBlockNode container background synthesis
 
     @MainActor
     func testExtractFragments_CodeBlock_SynthesizesBackgroundBeforeHeaderAndBody() async throws {
@@ -694,8 +694,10 @@ final class FragmentTests: XCTestCase {
         let header = fragments[1]
         let body = fragments[2]
 
-        XCTAssertEqual(background.frame, header.frame.union(body.frame),
-            "background must exactly span from the header's top to the body's bottom")
+        XCTAssertEqual(background.frame.minY, header.frame.minY, accuracy: 0.5)
+        XCTAssertEqual(background.frame.maxY, body.frame.maxY, accuracy: 0.5)
+        XCTAssertEqual(background.frame.width, layout.children[0].totalFrame.width, accuracy: 0.5,
+            "background must span the code block's full layout width, even when text is narrower")
     }
 
     @MainActor
@@ -727,6 +729,52 @@ final class FragmentTests: XCTestCase {
         XCTAssertLessThan(fragments[0].id, 0, "synthesized background id must be negative")
         XCTAssertFalse(table.nodes.indices.contains(fragments[0].id),
             "negative synthetic id must never collide with any real NodeTable index")
+    }
+
+    // MARK: - codePartID identity
+
+    func testCodePartID_WithStableOwner_IsIndependentOfNodeIndex() {
+        // Stable owners keep their part identity when a sibling shifts node indices.
+        let a = codePartID(owner: BlockID("code"), nodeIndex: 1, part: .codeHeader)
+        let b = codePartID(owner: BlockID("code"), nodeIndex: 7, part: .codeHeader)
+        XCTAssertEqual(a, b, "identity must depend only on owner + part when a stable owner exists")
+    }
+
+    func testCodePartID_WithStableOwner_DiffersByPart() {
+        let owner = BlockID("code")
+        let header = codePartID(owner: owner, nodeIndex: 1, part: .codeHeader)
+        let body = codePartID(owner: owner, nodeIndex: 1, part: .codeBody)
+        let background = codePartID(owner: owner, nodeIndex: 1, part: .codeBackground)
+        XCTAssertNotEqual(header, body)
+        XCTAssertNotEqual(header, background)
+        XCTAssertNotEqual(body, background)
+    }
+
+    func testCodePartID_WithoutOwner_FallsBackToNodeIndex() {
+        // Positional blocks must not collide.
+        let a = codePartID(owner: nil, nodeIndex: 1, part: .codeHeader)
+        let b = codePartID(owner: nil, nodeIndex: 2, part: .codeHeader)
+        XCTAssertNotEqual(a, b, "a positionally-identified code block must distinguish by nodeIndex")
+    }
+
+    @MainActor
+    func testExtractFragments_CodeBlock_NilLanguage_StillEmitsAllThreeParts() async throws {
+        // An empty language label remains the code card's header fragment.
+        let root = VStackNode { CodeBlockNode(language: nil, rawCode: "let x = 1") }
+        let table = flatten(root, itemID: "code-msg")
+        let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: TextMeasurementPool(capacity: 2))
+        let fragments = extractFragments(table: table, layout: layout)
+
+        XCTAssertEqual(fragments.count, 3, "nil language must not drop the header part")
+        guard case .codeBlockBackground = fragments[0].content else {
+            return XCTFail("fragments[0] must be the background")
+        }
+        guard case .text = fragments[1].content else {
+            return XCTFail("fragments[1] must still be the (empty) header")
+        }
+        guard case .text = fragments[2].content else {
+            return XCTFail("fragments[2] must be the body")
+        }
     }
 
     @MainActor

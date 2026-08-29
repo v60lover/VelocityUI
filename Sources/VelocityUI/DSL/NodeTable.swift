@@ -262,6 +262,36 @@ public struct CodeBlockBackgroundDescriptor: Sendable, Equatable {
     }
 }
 
+/// One logical code block at the Layer 1 → Layer 2 boundary. Its three render parts stay
+/// ordered and owned by the same block identity until fragment extraction.
+public struct CodeBlockDescriptor: Sendable {
+    public let language: String?
+    public let rawCode: String
+    public let font: VFontDescriptor
+    let headerFont: VFontDescriptor
+    let chrome: CodeBlockChrome
+    let blockID: BlockID?
+    let lifecycle: BlockLifecycle
+    public let layoutHash: Int
+    public let appearanceHash: Int
+
+    var headerText: TextDescriptor {
+        TextDescriptor(
+            content: language ?? "", font: headerFont, color: .primary, lineLimit: nil,
+            lineBreakMode: VLineBreakMode.byWordWrapping.rawValue, layoutHash: layoutHash,
+            appearanceHash: appearanceHash, codeBlockRole: .header(chrome)
+        )
+    }
+
+    var bodyText: TextDescriptor {
+        TextDescriptor(
+            content: rawCode, font: font, color: .primary, lineLimit: nil,
+            lineBreakMode: VLineBreakMode.byClipping.rawValue, layoutHash: layoutHash,
+            appearanceHash: appearanceHash, codeBlockRole: .body(chrome)
+        )
+    }
+}
+
 public struct ImageDescriptor: Sendable {
     public let url: URL?
     public let aspectRatio: CGFloat?
@@ -338,6 +368,7 @@ public enum NodeKind: Sendable {
     case zstack(ZStackDescriptor)
     case spacer(CGFloat)
     case text(TextDescriptor)
+    case codeBlock(CodeBlockDescriptor)
     case image(ImageDescriptor)
     case gif(GIFDescriptor)
     case video(VideoDescriptor)

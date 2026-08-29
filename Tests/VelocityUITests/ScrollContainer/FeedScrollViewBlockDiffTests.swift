@@ -680,6 +680,8 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
     struct CodeChatItem: Identifiable, Sendable {
         let id: Int
         let code: String
+        /// Inserts an ordinary sibling before the code block.
+        var showPreface: Bool = false
     }
 
     private func makeCodeChatFeed(environment: RenderEnvironment? = nil) -> FeedScrollView<CodeChatItem> {
@@ -687,11 +689,27 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
         let feed = FeedScrollView<CodeChatItem>(environment: env, frame: CGRect(x: 0, y: 0, width: 375, height: 812))
         feed.cellBuilder = { item in
             VStackNode(spacing: 4) {
-                // Explicit `.sealed` (not the `.positional` default) so this single-block item is
-                // never swept into the "last block is hot" fallback -- it must always take the
-                // `applyInPlaceBlockDiff` -> `measureAndMaybeFreeze` non-hot path, never the
-                // streaming `HotBlockRasterizerStore` path (oz5q.7's job, not this bead's).
+                if item.showPreface {
+                    TextNode("preface")
+                }
+                // `.sealed` keeps this block on the synchronous per-block path.
                 CodeBlockNode(language: "swift", rawCode: item.code, blockID: BlockID("code"), blockLifecycle: .sealed)
+            }
+        }
+        return feed
+    }
+
+    struct CodeAndImageItem: Identifiable, Sendable {
+        let id: Int
+        let code: String
+    }
+
+    private func makeCodeAndImageFeed() -> FeedScrollView<CodeAndImageItem> {
+        let feed = FeedScrollView<CodeAndImageItem>(environment: makeEnvironment(), frame: CGRect(x: 0, y: 0, width: 375, height: 812))
+        feed.cellBuilder = { item in
+            VStackNode(spacing: 4) {
+                CodeBlockNode(language: "swift", rawCode: item.code, blockID: BlockID("code"), blockLifecycle: .sealed)
+                AsyncImageNode(url: nil).renderID("image")
             }
         }
         return feed
@@ -708,14 +726,8 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
     /// of the fresh wide one the full-refresh path committed to `frozenBitmapStore`. The fix
     /// (`evictChangedResidentRasters`) drops the stale resident entry so the fresh raster paints.
     ///
-    /// NOTE on which internal path runs: today a code-block edit does NOT reach the fast in-place
-    /// per-block diff its name suggests -- VelocityUI-541u (the synthesized `codeBlockBackground`
-    /// fragment makes `applyInPlaceBlockDiff`'s `previousBlocks.count == previousFragments.count`
-    /// guard always fail) forces every code-block edit onto the async full-refresh path
-    /// (`RenderPipeline`). So this currently exercises the full-refresh repaint. The assertion
-    /// (wide raster on screen) holds regardless of path, so once 541u is fixed and the fast path
-    /// engages, this test stays valid and starts covering it too. `waitForCommit` polls for the
-    /// async commit, then keeps pumping layout so the committed entry actually repaints the layer.
+    /// The edit must take the synchronous per-block path. It then paints the same wide raster the
+    /// full pipeline would have produced, without invalidating the item's WorkingRange entry.
     func testSealedCodeBlockBody_InPlaceEdit_PaintsWideRasterOnScreen() async {
         let feed = makeCodeChatFeed()
         // Long enough to exceed the 375pt container regardless of the exact per-character advance
@@ -747,17 +759,207 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
         feed.layoutSubviews()
         await waitForCommit()
 
-        // In-place edit, same id -- falls back to the async full-refresh path (see the note
-        // above), so this must poll again rather than read `_debugPaintedBitmaps` immediately.
+        let measureCountBeforeEdit = feed._blockDiffMeasureCallCount
         feed.items = [CodeChatItem(id: 0, code: "let x = 1\n\(longLine)")]
         feed.layoutSubviews()
-        await waitForCommit()
+
+        XCTAssertGreaterThan(feed._blockDiffMeasureCallCount, measureCountBeforeEdit,
+            "a code-block body edit must use applyInPlaceBlockDiff rather than the async full-refresh path")
+        XCTAssertEqual(feed._workingRangeMissCount(from: 0, to: 1), 0,
+            "the in-place path must patch the code block's WorkingRange entry")
 
         let painted = feed._debugPaintedBitmaps(at: 0)
         guard let widest = painted.values.map({ CGFloat($0.width) }).max() else {
             return XCTFail("edited sealed code block body must paint a bitmap")
         }
         XCTAssertGreaterThan(widest, 375, "raster must be wider than the 375pt container, not clipped to it")
+
+        await drainFeedWork(feed)
+    }
+
+    func testSealedCodeBlockBody_InPlaceEdit_ReusesHeaderAndChromeAndRoundTripsLayout() async {
+        let feed = makeCodeChatFeed()
+        feed.items = [CodeChatItem(id: 0, code: "let x = 1")]
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < deadline {
+            feed.layoutSubviews()
+            if feed._workingRangeMissCount(from: 0, to: 1) == 0 { break }
+            await Task.yield()
+        }
+
+        let backgroundID = -4
+        let headerID = -5
+        let bodyID = 1
+        let headerKey = BlockKey(
+            itemID: 0,
+            blockID: codePartID(owner: BlockID("code"), nodeIndex: bodyID, part: .codeHeader)
+        )
+        let beforeFragments = feed._debugFragments(at: 0)
+        guard beforeFragments.map(\.id) == [backgroundID, headerID, bodyID],
+              let header = feed.renderEnvironment.visibleBlockStore.bitmap(for: headerKey)
+                    ?? feed.renderEnvironment.frozenBitmapStore.bitmap(for: headerKey)
+        else {
+            return XCTFail("precondition: committed code block must retain its header artifact")
+        }
+        let cell = RenderCell()
+        cell.layer.frame = CGRect(x: 0, y: 0, width: 375, height: 200)
+        cell.applyLayout(beforeFragments, synchronousContent: [headerID: header])
+        guard let background = cell._debugPaintedBitmaps[backgroundID] else {
+            return XCTFail("precondition: chrome layer must have a bitmap")
+        }
+        let measureBefore = feed._blockDiffMeasureCallCount
+
+        feed.items = [CodeChatItem(id: 0, code: "let x = 1\nlet y = 2")]
+        feed.layoutSubviews()
+
+        XCTAssertEqual(feed._workingRangeMissCount(from: 0, to: 1), 0,
+            "body-only edit must patch the existing WorkingRange entry")
+        XCTAssertEqual(feed._blockDiffMeasureCallCount - measureBefore, 1,
+            "only the changed code body may be measured")
+
+        let afterFragments = feed._debugFragments(at: 0)
+        guard let reusedHeader = feed.renderEnvironment.visibleBlockStore.bitmap(for: headerKey)
+                ?? feed.renderEnvironment.frozenBitmapStore.bitmap(for: headerKey)
+        else {
+            return XCTFail("unchanged header must remain available through its part cache")
+        }
+        cell.applyLayout(afterFragments, synchronousContent: [headerID: reusedHeader])
+        let after = cell._debugPaintedBitmaps
+        XCTAssertTrue(after[backgroundID] === background, "unchanged chrome must retain its bitmap identity")
+        XCTAssertTrue(after[headerID] === header, "unchanged header must retain its bitmap identity")
+
+        guard let roundTripped = feed._debugExtractFragmentsFromWorkingRange(at: 0) else {
+            return XCTFail("synthetic code-block layout must be extractable")
+        }
+        XCTAssertEqual(roundTripped.map(\.id), [backgroundID, headerID, bodyID],
+            "synthetic tree must preserve background → header → body order")
+        XCTAssertEqual(roundTripped.map(\.frame), feed._debugFragments(at: 0).map(\.frame),
+            "synthetic extraction must reproduce the visible fast-path fragments")
+
+        await drainFeedWork(feed)
+    }
+
+    func testCodeBlockEdit_ReusesMeasuredImageGeometryByPreviousFragmentID() async {
+        let feed = makeCodeAndImageFeed()
+        feed.items = [CodeAndImageItem(id: 0, code: "let x = 1")]
+        feed.layoutSubviews()
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < deadline {
+            if feed._workingRangeMissCount(from: 0, to: 1) == 0 { break }
+            await Task.yield()
+            feed.layoutSubviews()
+        }
+
+        guard let imageBefore = feed._debugFragments(at: 0).first(where: {
+            if case .image = $0.content { return true }
+            return false
+        }) else {
+            return XCTFail("precondition: initial code card followed by an image must be committed")
+        }
+
+        feed.items = [CodeAndImageItem(id: 0, code: "let x = 1\nlet y = 2")]
+        feed.layoutSubviews()
+
+        XCTAssertEqual(feed._workingRangeMissCount(from: 0, to: 1), 0,
+            "the code edit must keep the item on the synchronous in-place path")
+        guard let imageAfter = feed._debugFragments(at: 0).first(where: {
+            if case .image = $0.content { return true }
+            return false
+        }) else {
+            return XCTFail("the reused image fragment must remain in the patched layout")
+        }
+        XCTAssertEqual(imageAfter.frame.size, imageBefore.frame.size,
+            "a reused measured image must recover its prior geometry by fragment id, not the code header's array index")
+        XCTAssertEqual(imageAfter.frame.height, 375, accuracy: 0.5,
+            "the image keeps its measured square height rather than inheriting the code header height")
+
+        await drainFeedWork(feed)
+    }
+
+    /// Stable owner identities survive sibling insertions.
+    func testCodeBlockHeaderIdentity_SurvivesSiblingInsertionShiftingNodeIndex() async {
+        let feed = makeCodeChatFeed()
+        feed.items = [CodeChatItem(id: 0, code: "let x = 1")]
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < deadline {
+            feed.layoutSubviews()
+            if feed._workingRangeMissCount(from: 0, to: 1) == 0 { break }
+            await Task.yield()
+        }
+
+        // Before the insertion the code block is NodeTable index 1 (0 = root VStack).
+        let headerKeyBefore = BlockKey(
+            itemID: 0, blockID: codePartID(owner: BlockID("code"), nodeIndex: 1, part: .codeHeader)
+        )
+        guard let headerBefore = feed.renderEnvironment.visibleBlockStore.bitmap(for: headerKeyBefore)
+                ?? feed.renderEnvironment.frozenBitmapStore.bitmap(for: headerKeyBefore)
+        else {
+            return XCTFail("precondition: committed code block must retain its header artifact")
+        }
+
+        // Insert a sibling paragraph before the code block -- its NodeTable index moves to 2.
+        feed.items = [CodeChatItem(id: 0, code: "let x = 1", showPreface: true)]
+        feed.layoutSubviews()
+
+        XCTAssertEqual(feed._workingRangeMissCount(from: 0, to: 1), 0,
+            "inserting a sibling ahead of a stably-identified code block must still take the in-place path")
+
+        // The stable-owner identity must be independent of nodeIndex -- looking it up with EITHER
+        // the old (1) or the new (2) nodeIndex must resolve to the very same BlockID.
+        let keyWithOldIndex = codePartID(owner: BlockID("code"), nodeIndex: 1, part: .codeHeader)
+        let keyWithNewIndex = codePartID(owner: BlockID("code"), nodeIndex: 2, part: .codeHeader)
+        XCTAssertEqual(keyWithOldIndex, keyWithNewIndex,
+            "a code block with a stable owner BlockID must keep the same part identity regardless of nodeIndex")
+
+        guard let headerAfter = feed.renderEnvironment.visibleBlockStore.bitmap(for: headerKeyBefore)
+                ?? feed.renderEnvironment.frozenBitmapStore.bitmap(for: headerKeyBefore)
+        else {
+            return XCTFail("header artifact must still be reachable under its pre-insertion key")
+        }
+        XCTAssertTrue(headerAfter === headerBefore,
+            "the unchanged header must keep its bitmap identity across a sibling insertion, not re-render")
+
+        await drainFeedWork(feed)
+    }
+
+    /// An empty language label remains in the extractable code-card triple.
+    func testSealedCodeBlockWithNilLanguage_InPlaceEdit_StillRoundTripsAllThreeParts() async {
+        let feed = makeCodeChatFeed()
+        feed.cellBuilder = { item in
+            VStackNode(spacing: 4) {
+                CodeBlockNode(language: nil, rawCode: item.code, blockID: BlockID("code"), blockLifecycle: .sealed)
+            }
+        }
+        feed.items = [CodeChatItem(id: 0, code: "let x = 1")]
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < deadline {
+            feed.layoutSubviews()
+            if feed._workingRangeMissCount(from: 0, to: 1) == 0 { break }
+            await Task.yield()
+        }
+        XCTAssertEqual(feed._workingRangeMissCount(from: 0, to: 1), 0,
+            "a nil-language code block must still commit to WorkingRange, not fall back forever")
+
+        let backgroundID = -4
+        let headerID = -5
+        let bodyID = 1
+        XCTAssertEqual(feed._debugFragments(at: 0).map(\.id), [backgroundID, headerID, bodyID],
+            "all three parts must be present even though the header label is empty")
+
+        feed.items = [CodeChatItem(id: 0, code: "let x = 1\nlet y = 2")]
+        feed.layoutSubviews()
+
+        XCTAssertEqual(feed._workingRangeMissCount(from: 0, to: 1), 0,
+            "a body-only edit on a nil-language code block must patch WorkingRange in place")
+        XCTAssertEqual(feed._debugFragments(at: 0).map(\.id), [backgroundID, headerID, bodyID],
+            "the empty header part must survive a body edit, not disappear from the fragment list")
+
+        guard let roundTripped = feed._debugExtractFragmentsFromWorkingRange(at: 0) else {
+            return XCTFail("synthetic code-block layout must be extractable even with an empty header")
+        }
+        XCTAssertEqual(roundTripped.map(\.id), [backgroundID, headerID, bodyID],
+            "synthetic extraction must reproduce all three parts, including the empty header")
 
         await drainFeedWork(feed)
     }

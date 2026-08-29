@@ -1239,25 +1239,8 @@ final class FeedScrollViewTests: XCTestCase {
 
     // MARK: - 22. Cache-hit floor: N=1000, 1 changed → builder called once, speedup ≥ 2×
 
-    /// Brackets the d7b identity+signature cache perf envelope with two measurement loops.
-    ///
-    /// Loop A — cache-miss: all N items change signature each iteration. Equivalent to the
-    /// force-miss path (no caching). Asserts builder called N times per iteration.
-    ///
-    /// Loop B — cache-hit: only 1 item changes signature per iteration. Asserts:
-    ///   (a) builder called exactly 1 time per iteration (999 items served from cache)
-    ///   (b) p99 < 10ms (ceiling that catches O(N²) regressions in the diff/rebuildFrames floor)
-    ///   (c) median speedup > 2× vs the miss-loop median
-    ///
-    /// NOTE on the original 60µs / 130× bead-spec target: that cost model counted only
-    /// builder+flatten overhead (~5ms for N=1000) and estimated cache-hit overhead at ~58µs,
-    /// excluding differ.diff()/rebuildFrames — both O(N), both run every call regardless of
-    /// cache (diff builds an N-entry AnyHashable dict and walks N tables; rebuildFrames fills N
-    /// survivors and iterates N frames), costing ~3ms for N=1000 and setting the function floor.
-    /// The cache does save ~5ms of builder+flatten work per call — a real ~2.6× speedup
-    /// (8ms → ~3ms) that grows with DSL tree depth since the diff floor stays flat.
-    ///
-    /// Median + p99 printed for CI trend tracking.
+    /// Cache hits build one item and remain at least twice as fast as misses.
+    /// Wall-clock timing can flake under loaded CI.
     func testItemsDidChangeCacheHitFloor() {
         struct StyleItem: Identifiable, Sendable {
             let id: Int

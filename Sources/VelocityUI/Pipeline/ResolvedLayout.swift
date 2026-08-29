@@ -3,6 +3,12 @@
 import Foundation
 import CoreGraphics
 
+enum RenderPartKind: Sendable, Hashable {
+    case codeBackground
+    case codeHeader
+    case codeBody
+}
+
 /// The output of measureNode for a single node.
 /// Sendable value type — crosses actor boundaries freely.
 public struct ResolvedLayout: Sendable {
@@ -15,12 +21,36 @@ public struct ResolvedLayout: Sendable {
     /// Index of the corresponding node in NodeTable.nodes.
     /// -1 for manually constructed layouts (e.g. placeholder, test fixtures).
     public let nodeIndex: Int
+    let renderPart: RenderPartKind?
 
-    public init(totalFrame: CGRect, contentFrame: CGRect? = nil, children: [ResolvedLayout] = [], nodeIndex: Int = -1) {
+    /// Creates a layout node with local child coordinates.
+    public init(
+        totalFrame: CGRect,
+        contentFrame: CGRect? = nil,
+        children: [ResolvedLayout] = [],
+        nodeIndex: Int = -1
+    ) {
+        self.init(
+            totalFrame: totalFrame,
+            contentFrame: contentFrame,
+            children: children,
+            nodeIndex: nodeIndex,
+            renderPart: nil
+        )
+    }
+
+    init(
+        totalFrame: CGRect,
+        contentFrame: CGRect? = nil,
+        children: [ResolvedLayout] = [],
+        nodeIndex: Int = -1,
+        renderPart: RenderPartKind?
+    ) {
         self.totalFrame = totalFrame
         self.contentFrame = contentFrame
         self.children = children
         self.nodeIndex = nodeIndex
+        self.renderPart = renderPart
     }
 
     // Offsets totalFrame/contentFrame only — children stay in local coordinate space.
@@ -31,7 +61,8 @@ public struct ResolvedLayout: Sendable {
             totalFrame: totalFrame.offsetBy(dx: 0, dy: dy),
             contentFrame: contentFrame?.offsetBy(dx: 0, dy: dy),
             children: children,
-            nodeIndex: nodeIndex
+            nodeIndex: nodeIndex,
+            renderPart: renderPart
         )
     }
 
@@ -40,7 +71,8 @@ public struct ResolvedLayout: Sendable {
             totalFrame: totalFrame.offsetBy(dx: dx, dy: dy),
             contentFrame: contentFrame?.offsetBy(dx: dx, dy: dy),
             children: children,
-            nodeIndex: nodeIndex
+            nodeIndex: nodeIndex,
+            renderPart: renderPart
         )
     }
 

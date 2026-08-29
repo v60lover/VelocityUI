@@ -54,10 +54,14 @@ public final class RenderCell {
     /// the legacy node-index identity.
     var sublayers: [LayerIdentity: CALayer] = [:]
     var layerIdentityByFragmentID: [Int: LayerIdentity] = [:]
+    private var codeBackgroundByIdentity: [LayerIdentity: CodeBlockBackgroundDescriptor] = [:]
     /// Ordered frame metadata survives while offscreen block layers are released.
     /// It lets the scroll path find the next resident span without recreating the full cell.
     private var blockFragments: [Fragment] = []
+    /// One non-overlapping search frame per logical block.
     private var blockFrames: [CGRect] = []
+    /// `blockFragments` index range each `blockFrames` entry expands to.
+    private var blockFragmentRanges: [Range<Int>] = []
     private var activeBlockFragmentIDs: Set<Int> = []
     private var mediaFragmentIDs: Set<Int> = []
     /// Fragment ids whose sublayer currently shows a decode-guaranteed thumbnail/BlurHash
@@ -134,7 +138,9 @@ public final class RenderCell {
             placeholderPaintedFragmentIDs.removeAll(keepingCapacity: true)
             blockFragments.removeAll(keepingCapacity: true)
             blockFrames.removeAll(keepingCapacity: true)
+            blockFragmentRanges.removeAll(keepingCapacity: true)
             activeBlockFragmentIDs.removeAll(keepingCapacity: true)
+            codeBackgroundByIdentity.removeAll(keepingCapacity: true)
             placeholderLayer.opacity = 1
             contentLayer.opacity = 0
             CATransaction.commit()
@@ -176,6 +182,7 @@ public final class RenderCell {
             for identity in sublayers.keys.filter({ !incomingIdentities.contains($0) }) {
                 sublayers[identity]?.removeFromSuperlayer()
                 sublayers.removeValue(forKey: identity)
+                codeBackgroundByIdentity.removeValue(forKey: identity)
                 let removedIDs = layerIdentityByFragmentID.keys.filter { layerIdentityByFragmentID[$0] == identity }
                 for id in removedIDs {
                     layerIdentityByFragmentID.removeValue(forKey: id)
@@ -230,10 +237,11 @@ public final class RenderCell {
                 }
                 mediaFragmentIDs.insert(fragment.id)
             } else if case .codeBlockBackground(let descriptor) = fragment.content {
-                // Unconditional overwrite, same policy as .text below: cheap to regenerate, and a
-                // cache miss must not retain a previous fragment's pixels after reclassification.
-                sub.contents = rasterizeCodeBlockBackground(cornerRadius: descriptor.cornerRadius, color: descriptor.color)
-                sub.contentsCenter = codeBlockBackgroundContentsCenter(cornerRadius: descriptor.cornerRadius)
+                if codeBackgroundByIdentity[identity] != descriptor || sub.contents == nil {
+                    sub.contents = rasterizeCodeBlockBackground(cornerRadius: descriptor.cornerRadius, color: descriptor.color)
+                    sub.contentsCenter = codeBlockBackgroundContentsCenter(cornerRadius: descriptor.cornerRadius)
+                    codeBackgroundByIdentity[identity] = descriptor
+                }
                 sub.backgroundColor = nil
                 mediaFragmentIDs.remove(fragment.id)
                 placeholderPaintedFragmentIDs.remove(fragment.id)
@@ -304,18 +312,22 @@ public final class RenderCell {
         synchronousContent: [Int: CGImage]
     ) -> [Fragment] {
         blockFragments = fragments
-        // BlockViewportRange requires frames sorted by minY and non-overlapping. A synthesized
-        // code-block background fragment's own frame is the union of its header+body siblings'
-        // frames, so it overlaps both -- using it as-is here would corrupt the binary search for
-        // every block after it, not just the code block. Its immediate successor (always the
-        // header, by construction -- see extractFragments) has the real, non-overlapping frame,
-        // so the background shares that as its search key: a duplicate key, not an overlap, so
-        // monotonicity holds and the background activates/deactivates in lockstep with its header.
-        blockFrames = fragments.enumerated().map { index, fragment in
-            if case .codeBlockBackground = fragment.content, index + 1 < fragments.count {
-                return fragments[index + 1].frame
+        blockFrames = []
+        blockFragmentRanges = []
+        blockFrames.reserveCapacity(fragments.count)
+        blockFragmentRanges.reserveCapacity(fragments.count)
+        var index = 0
+        while index < fragments.count {
+            let fragment = fragments[index]
+            if isCodeBlockTriple(fragments, startingAt: index) {
+                blockFrames.append(fragment.frame)
+                blockFragmentRanges.append(index..<(index + 3))
+                index += 3
+            } else {
+                blockFrames.append(fragment.frame)
+                blockFragmentRanges.append(index..<(index + 1))
+                index += 1
             }
-            return fragment.frame
         }
         activeBlockFragmentIDs.removeAll(keepingCapacity: true)
         return updateBlockViewport(viewportInCell: viewportInCell, synchronousContent: synchronousContent)
@@ -330,7 +342,10 @@ public final class RenderCell {
     ) -> [Fragment] {
         guard !blockFragments.isEmpty else { return [] }
 
-        let range = BlockViewportRange.activeRange(in: blockFrames, window: viewportInCell)
+        let groupRange = BlockViewportRange.activeRange(in: blockFrames, window: viewportInCell)
+        let range = groupRange.isEmpty
+            ? 0..<0
+            : blockFragmentRanges[groupRange.lowerBound].lowerBound..<blockFragmentRanges[groupRange.upperBound - 1].upperBound
         let active = Array(blockFragments[range])
         let nextIDs = Set(active.map(\.id))
         guard nextIDs != activeBlockFragmentIDs else { return [] }
@@ -474,7 +489,18 @@ public final class RenderCell {
     #endif
 
     private func layerIdentity(for fragment: Fragment) -> LayerIdentity {
-        fragment.blockID.map(LayerIdentity.block) ?? .positional(fragment.id)
+        fragment.blockID.map { .block($0) } ?? .positional(fragment.id)
+    }
+
+    private func isCodeBlockTriple(_ fragments: [Fragment], startingAt index: Int) -> Bool {
+        guard index + 2 < fragments.count,
+              case .codeBlockBackground = fragments[index].content,
+              case .text(let header) = fragments[index + 1].content,
+              case .header = header.codeBlockRole,
+              case .text(let body) = fragments[index + 2].content,
+              case .body = body.codeBlockRole
+        else { return false }
+        return true
     }
 
     private func layer(for fragmentID: Int) -> CALayer? {

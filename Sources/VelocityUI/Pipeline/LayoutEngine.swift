@@ -92,6 +92,23 @@ private func measureContent(
             return ResolvedLayout(totalFrame: CGRect(origin: .zero, size: size), nodeIndex: nodeIndex)
         }
 
+    case .codeBlock(let descriptor):
+        let header = await textPool.withContext { ctx in
+            let size = ctx.measure(descriptor.headerText, width: width)
+            return ResolvedLayout(totalFrame: CGRect(origin: .zero, size: size), nodeIndex: nodeIndex, renderPart: .codeHeader)
+        }
+        let bodyDescriptor = makeCodeTextDescriptor(
+            lines: descriptor.rawCode.components(separatedBy: "\n")[...], colorRuns: [],
+            font: descriptor.font, theme: .defaultLight
+        )
+        let body = await textPool.withContext { ctx in
+            let size = ctx.measure(bodyDescriptor, width: .greatestFiniteMagnitude)
+            return ResolvedLayout(totalFrame: CGRect(origin: .zero, size: size), nodeIndex: nodeIndex, renderPart: .codeBody)
+        }
+        let total = CGRect(x: 0, y: 0, width: max(width, body.totalFrame.width), height: header.totalFrame.height + body.totalFrame.height)
+        let background = ResolvedLayout(totalFrame: total, nodeIndex: nodeIndex, renderPart: .codeBackground)
+        return ResolvedLayout(totalFrame: total, children: [background, header, body.offsetBy(dy: header.totalFrame.height)], nodeIndex: nodeIndex)
+
     case .image(let d):
         let h = d.aspectRatio.map { width / $0 } ?? width
         return ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: width, height: h), nodeIndex: nodeIndex)

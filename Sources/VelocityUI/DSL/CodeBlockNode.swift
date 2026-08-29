@@ -2,11 +2,7 @@
 
 import Foundation
 
-/// Cornering + tint for a code block's container background. Threaded from `CodeBlockNode`
-/// through its header/body leaves' `codeBlockRole` so `extractFragments` can synthesize the
-/// background fragment without CodeBlockNode wrapping them in a container (see this file's
-/// doc comment on `flatten()`'s FLAT-siblings requirement, and VelocityUI-qinu for why the
-/// general ZStack sibling-size primitive is deliberately not used here instead).
+/// Cornering + tint for a code block's container background.
 struct CodeBlockChrome: Sendable, Equatable {
     let cornerRadius: CGFloat
     let backgroundColor: VColorDescriptor
@@ -15,9 +11,7 @@ struct CodeBlockChrome: Sendable, Equatable {
     let language: String?
 }
 
-/// Marks a `TextNode`/`TextDescriptor` as one of a code block's two expanded leaves. `nil` for
-/// ordinary text. `extractFragments` pairs an adjacent `.header` immediately followed by `.body`
-/// to synthesize the background fragment beneath both.
+/// Marks a text render part belonging to a code block. `nil` for ordinary text.
 enum CodeBlockRole: Sendable, Equatable {
     case header(CodeBlockChrome)
     case body(CodeBlockChrome)
@@ -25,11 +19,8 @@ enum CodeBlockRole: Sendable, Equatable {
 
 /// A fenced code block: language label + raw, verbatim source.
 ///
-/// `flatten()` expands this into two FLAT sibling leaves (header, body), not a nested
-/// container — `FeedScrollView.flatBlocks` requires direct children under a message's
-/// root VStack, and nesting would silently degrade the whole message to the slow
-/// full-refresh diff path. `.frame()`/`.renderID()` wrapping isn't supported; pass
-/// `blockID:` directly instead.
+/// `flatten()` preserves this as one direct code-block leaf. Its render plan owns the
+/// background, header, and body without introducing a nested container.
 ///
 /// Highlighting, card background, and horizontal scroll land in later beads
 /// (VelocityUI-oz5q.2–.7) — today this renders as plain monospaced text.
@@ -90,38 +81,18 @@ public struct CodeBlockNode: RenderNode {
         return h.finalize()
     }
 
-    /// The two flat leaves `flatten()` visits in this node's place. Internal — production
-    /// code never inspects this past flatten(), same convention as `VStackNode.children`.
-    var expandedChildren: (header: TextNode, body: TextNode) {
+    var descriptor: CodeBlockDescriptor {
         let chrome = CodeBlockChrome(cornerRadius: cornerRadius, backgroundColor: backgroundColor, language: language)
-        let header = TextNode(
-            language ?? "",
-            font: Self.headerFont,
-            color: .primary,
-            blockID: blockID.map { Self.derivedBlockID($0, suffix: "header") },
-            blockLifecycle: blockLifecycle,
-            codeBlockRole: .header(chrome)
-        )
-        let body = TextNode(
-            rawCode,
+        return CodeBlockDescriptor(
+            language: language,
+            rawCode: rawCode,
             font: font,
-            color: .primary,
-            lineBreakMode: .byClipping,
-            blockID: blockID.map { Self.derivedBlockID($0, suffix: "body") },
-            blockLifecycle: blockLifecycle,
-            codeBlockRole: .body(chrome)
+            headerFont: Self.headerFont,
+            chrome: chrome,
+            blockID: blockID,
+            lifecycle: blockLifecycle,
+            layoutHash: layoutHash,
+            appearanceHash: appearanceHash
         )
-        return (header, body)
-    }
-
-    /// Combines a base id + suffix into a distinct one. `BlockID.rawValue` is a boxed
-    /// `AnyHashable`, not a `String`, so this can't be plain concatenation.
-    private struct DerivedKey: Hashable, Sendable {
-        let base: BlockID
-        let suffix: String
-    }
-
-    private static func derivedBlockID(_ base: BlockID, suffix: String) -> BlockID {
-        BlockID(DerivedKey(base: base, suffix: suffix))
     }
 }

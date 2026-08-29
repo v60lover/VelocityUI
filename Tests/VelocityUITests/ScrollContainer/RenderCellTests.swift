@@ -31,6 +31,19 @@ final class RenderCellTests: XCTestCase {
         )
     }
 
+    private func codeTextFragment(id: Int, role: CodeBlockRole, frame: CGRect) -> Fragment {
+        Fragment(
+            id: id,
+            content: .text(TextDescriptor(
+                content: "Visible code", font: VFontDescriptor(size: 14, weight: 0),
+                color: VColorDescriptor(red: 0, green: 0, blue: 0, alpha: 1),
+                lineLimit: nil, lineBreakMode: 0, layoutHash: id, appearanceHash: id,
+                codeBlockRole: role
+            )),
+            frame: frame
+        )
+    }
+
     /// Known-valid canonical BlurHash string (public example from https://blurha.sh).
     private let validBlurHash = "L6PZfSi_.AyE_3t7t7R**0o#DgR4"
 
@@ -891,7 +904,7 @@ final class RenderCellTests: XCTestCase {
             "Correct applyContent for the current item must succeed")
     }
 
-    // MARK: - CodeBlockBackground fragment content (VelocityUI-oz5q.5)
+    // MARK: - CodeBlockBackground fragment content
 
     func testApplyLayout_CodeBlockBackground_SetsContentsAndContentsCenter_NeverCornerRadiusOrMasksToBounds() {
         let cell = makeCell()
@@ -912,19 +925,19 @@ final class RenderCellTests: XCTestCase {
         XCTAssertFalse(sub.masksToBounds, "must never set masksToBounds")
     }
 
-    // MARK: - BlockViewportRange regression guard: background must not break sorted-frame invariant
+    // MARK: - Code block viewport grouping
 
-    func testUpdateBlockViewport_CodeBlockBackground_ActivatesInLockstepWithHeader_NotBodyOrFollowingBlock() {
+    /// A code card uses its background frame as one viewport range.
+    func testUpdateBlockViewport_CodeBlockBackground_ActivatesAsOneUnitWithHeaderAndBody() {
         let cell = makeCell()
-        // background's own frame is the union of header+body -- overlaps both, which
-        // BlockViewportRange's "sorted, non-overlapping" contract forbids using directly.
+        let chrome = CodeBlockChrome(cornerRadius: 8, backgroundColor: .codeBlockBackground, language: nil)
         let background = Fragment(
             id: -1,
             content: .codeBlockBackground(CodeBlockBackgroundDescriptor(cornerRadius: 8, color: .codeBlockBackground)),
             frame: CGRect(x: 0, y: 0, width: 320, height: 90)
         )
-        let header = textFragment(id: 0, frame: CGRect(x: 0, y: 0, width: 320, height: 30))
-        let body = textFragment(id: 1, frame: CGRect(x: 0, y: 30, width: 320, height: 60))
+        let header = codeTextFragment(id: 0, role: .header(chrome), frame: CGRect(x: 0, y: 0, width: 320, height: 30))
+        let body = codeTextFragment(id: 1, role: .body(chrome), frame: CGRect(x: 0, y: 30, width: 320, height: 60))
         let unrelated = textFragment(id: 2, frame: CGRect(x: 0, y: 90, width: 320, height: 60))
 
         let active = cell.updateBlockViewport(
@@ -935,12 +948,89 @@ final class RenderCellTests: XCTestCase {
 
         let activeIDs = Set(active.map(\.id))
         XCTAssertTrue(activeIDs.contains(header.id), "header must be active when the viewport intersects it")
-        XCTAssertTrue(activeIDs.contains(background.id),
-            "background must activate in lockstep with its header partner (shared search key), " +
-            "not use its own overlapping frame, which would corrupt the sorted-frame binary search")
-        XCTAssertFalse(activeIDs.contains(body.id), "body must stay inactive -- the viewport doesn't reach it")
+        XCTAssertTrue(activeIDs.contains(background.id), "background must activate alongside its card")
+        XCTAssertTrue(activeIDs.contains(body.id),
+            "body must activate too -- the whole card is one unit, even though the window only reaches the header row")
         XCTAssertFalse(activeIDs.contains(unrelated.id),
-            "a block after the code block must not be pulled in by a corrupted sort order")
+            "a block after the code block must not be pulled in by the group's extended range")
+    }
+
+    /// A card stays resident while any of its parts intersects the viewport.
+    func testUpdateBlockViewport_HeaderScrolledAboveViewport_BackgroundStaysActiveWhileBodyVisible() {
+        let cell = makeCell()
+        let chrome = CodeBlockChrome(cornerRadius: 8, backgroundColor: .codeBlockBackground, language: nil)
+        let background = Fragment(
+            id: -1,
+            content: .codeBlockBackground(CodeBlockBackgroundDescriptor(cornerRadius: 8, color: .codeBlockBackground)),
+            frame: CGRect(x: 0, y: 0, width: 320, height: 90)
+        )
+        let header = codeTextFragment(id: 0, role: .header(chrome), frame: CGRect(x: 0, y: 0, width: 320, height: 30))
+        let body = codeTextFragment(id: 1, role: .body(chrome), frame: CGRect(x: 0, y: 30, width: 320, height: 60))
+
+        let active = cell.updateBlockViewport(
+            fragments: [background, header, body],
+            // header's own row (y 0-30) is entirely above this window -- only the body row is visible.
+            viewportInCell: CGRect(x: 0, y: 40, width: 320, height: 25),
+            synchronousContent: [:]
+        )
+
+        let activeIDs = Set(active.map(\.id))
+        XCTAssertTrue(activeIDs.contains(body.id), "body must be active -- the viewport intersects it")
+        XCTAssertTrue(activeIDs.contains(background.id),
+            "background must stay active while any part of its card (here, the body) is visible")
+        XCTAssertTrue(activeIDs.contains(header.id),
+            "header rides along with the rest of its card's atomic activation unit")
+    }
+
+    func testUpdateBlockViewport_MissingHeaderDoesNotGroupUnrelatedFragment() {
+        let cell = makeCell()
+        let chrome = CodeBlockChrome(cornerRadius: 8, backgroundColor: .codeBlockBackground, language: nil)
+        let background = Fragment(
+            id: -1,
+            content: .codeBlockBackground(CodeBlockBackgroundDescriptor(cornerRadius: 8, color: .codeBlockBackground)),
+            frame: CGRect(x: 0, y: 0, width: 320, height: 90)
+        )
+        let body = codeTextFragment(id: 0, role: .body(chrome), frame: CGRect(x: 0, y: 30, width: 320, height: 60))
+        let unrelated = textFragment(id: 1, frame: CGRect(x: 0, y: 90, width: 320, height: 60))
+
+        let active = cell.updateBlockViewport(
+            fragments: [background, body, unrelated],
+            viewportInCell: CGRect(x: 0, y: 0, width: 320, height: 25),
+            synchronousContent: [:]
+        )
+
+        XCTAssertEqual(Set(active.map(\.id)), Set([background.id]),
+            "a missing header must not let the next fragment join the code card")
+    }
+
+    func testUpdateBlockViewport_FramedNilLanguageCodeBlockKeepsTripleAndExcludesNextFragment() async throws {
+        let root = VStackNode {
+            VStackNode {
+                CodeBlockNode(language: nil, rawCode: "let value = 1")
+                TextNode("next fragment")
+            }
+            .frame(width: 320, height: 120, alignment: .top)
+        }
+        let table = flatten(root, itemID: "framed-code-block")
+        let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: TextMeasurementPool(capacity: 2))
+        let fragments = extractFragments(table: table, layout: layout)
+
+        XCTAssertEqual(fragments.count, 4, "a clipped code card must retain background, empty header, and body")
+        guard case .codeBlockBackground = fragments[0].content,
+              case .text(let header) = fragments[1].content,
+              case .header = header.codeBlockRole,
+              case .text(let body) = fragments[2].content,
+              case .body = body.codeBlockRole
+        else { return XCTFail("the code card must be an ordered triple") }
+
+        let cell = makeCell()
+        let active = cell.updateBlockViewport(
+            fragments: fragments,
+            viewportInCell: fragments[0].frame,
+            synchronousContent: [:]
+        )
+        XCTAssertEqual(Set(active.map(\.id)), Set(fragments.prefix(3).map(\.id)),
+            "the next fragment must not be treated as a clipped code card part")
     }
 }
 #endif

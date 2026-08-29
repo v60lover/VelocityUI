@@ -170,6 +170,10 @@ extension FeedScrollView {
         return extractFragments(table: tables[index], layout: entry.layout)
     }
 
+    func _debugFragments(at index: Int) -> [Fragment] {
+        workingRange.entry(at: index)?.fragments ?? []
+    }
+
     /// Count of indices still awaiting fragment delivery via refineKnownFrames — cells mounted
     /// with `applyLayout([])` during a WorkingRange miss LayoutCache couldn't resolve inline.
     /// Should be 0 whenever LayoutCache is warm for all visible indices at mount time.

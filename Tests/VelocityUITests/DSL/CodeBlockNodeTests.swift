@@ -18,24 +18,21 @@ final class CodeBlockNodeTests: XCTestCase {
         let node = CodeBlockNode(language: "swift", rawCode: raw)
         let table = flatten(node, itemID: "msg")
 
-        let bodyContent = table.nodes.compactMap { kind -> String? in
-            guard case .text(let d) = kind else { return nil }
-            return d.content
-        }.last
-
-        XCTAssertEqual(bodyContent, raw, "the body leaf's rendered content must be byte-identical to rawCode")
+        guard case .codeBlock(let descriptor) = table.nodes.first else {
+            return XCTFail("a code block must remain a single NodeTable node")
+        }
+        XCTAssertEqual(descriptor.rawCode, raw, "rawCode must cross the boundary byte-identically")
     }
 
     @MainActor
-    func testFlatten_ProducesExactlyTwoLeaves_HeaderThenBody() {
+    func testFlatten_ProducesExactlyOneCodeBlockNode_NotSeparateHeaderAndBodyLeaves() {
         let node = CodeBlockNode(language: "python", rawCode: "print(1)")
         let table = flatten(node, itemID: "msg")
 
-        let textContents: [String] = table.nodes.compactMap { kind in
-            guard case .text(let d) = kind else { return nil }
-            return d.content
-        }
-        XCTAssertEqual(textContents, ["python", "print(1)"], "header (language) must come before body (raw code)")
+        XCTAssertEqual(table.nodes.count, 1, "a code block must stay one NodeTable node, not two text leaves")
+        guard case .codeBlock(let descriptor) = table.nodes[0] else { return XCTFail("expected code block") }
+        XCTAssertEqual(descriptor.language, "python")
+        XCTAssertEqual(descriptor.rawCode, "print(1)")
     }
 
     @MainActor
@@ -43,10 +40,8 @@ final class CodeBlockNodeTests: XCTestCase {
         let node = CodeBlockNode(rawCode: "no fence language here")
         let table = flatten(node, itemID: "msg")
 
-        guard case .text(let header) = table.nodes[0] else {
-            return XCTFail("first leaf must be the header")
-        }
-        XCTAssertEqual(header.content, "")
+        guard case .codeBlock(let descriptor) = table.nodes[0] else { return XCTFail("expected code block") }
+        XCTAssertNil(descriptor.language)
     }
 
     // MARK: - Flat shape: no nested container, matches FeedScrollView.flatBlocks' requirement
@@ -68,28 +63,19 @@ final class CodeBlockNodeTests: XCTestCase {
             childIndices.count, table.nodes.count - 1,
             "every node besides the root must be a direct child — a code block must not introduce nesting"
         )
-        for index in childIndices {
-            guard case .text = table.nodes[index] else {
-                return XCTFail("every direct child must be a .text leaf, code block included")
-            }
-        }
-        // before(1) + header(1) + body(1) + after(1)
-        XCTAssertEqual(childIndices.count, 4)
+        XCTAssertEqual(childIndices.count, 3)
+        guard case .codeBlock = table.nodes[childIndices[1]] else { return XCTFail("code block must be a direct leaf") }
     }
 
-    // MARK: - Stable identity: header and body get distinct derived block ids
+    // MARK: - Stable identity
 
     @MainActor
     func testFlatten_WithBlockID_HeaderAndBodyGetDistinctIDs() {
         let node = CodeBlockNode(language: "swift", rawCode: "let x = 1", blockID: BlockID("code-1"))
         let table = flatten(node, itemID: "msg")
 
-        XCTAssertEqual(table.nodes.count, 2)
-        let id0 = table.blockID(at: 0)
-        let id1 = table.blockID(at: 1)
-        XCTAssertNotNil(id0)
-        XCTAssertNotNil(id1)
-        XCTAssertNotEqual(id0, id1, "header and body must not collide under one shared identity")
+        XCTAssertEqual(table.nodes.count, 1)
+        XCTAssertEqual(table.blockID(at: 0), BlockID("code-1"))
     }
 
     @MainActor
@@ -101,7 +87,6 @@ final class CodeBlockNodeTests: XCTestCase {
         let table = flatten(node, itemID: "msg")
 
         XCTAssertEqual(table.blockLifecycle(at: 0), .hot)
-        XCTAssertEqual(table.blockLifecycle(at: 1), .hot)
     }
 
     // MARK: - Parser wiring: fence language flows into the code block

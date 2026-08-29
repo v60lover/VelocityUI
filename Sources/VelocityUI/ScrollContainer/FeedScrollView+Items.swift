@@ -358,10 +358,8 @@ extension FeedScrollView {
 
         var workingRangeCommit: (layout: ResolvedLayout, fragments: [Fragment])?
         if canDeferInvalidation {
-            let syntheticLayout = ResolvedLayout(
-                totalFrame: CGRect(x: 0, y: 0, width: width, height: result.height),
-                children: result.fragments.map { ResolvedLayout(totalFrame: $0.frame, nodeIndex: $0.id) },
-                nodeIndex: 0
+            let syntheticLayout = makeSyntheticWorkingRangeLayout(
+                table: inputs.newTable, fragments: result.fragments, width: width, height: result.height
             )
             workingRangeCommit = (syntheticLayout, result.fragments)
         }
@@ -409,7 +407,6 @@ extension FeedScrollView {
     ) -> (height: CGFloat, fragments: [Fragment], textBitmaps: [Int: CGImage])? {
         guard let (previousBlocks, _) = flatBlocks(for: previousTable, itemID: itemID, width: width),
               let (newBlocks, spacing) = flatBlocks(for: newTable, itemID: itemID, width: width),
-              previousBlocks.count == previousFragments.count,
               !newBlocks.isEmpty
         else { return nil }
 
@@ -417,6 +414,17 @@ extension FeedScrollView {
         let d = diff(previous: previousBlocks, new: newBlocks)
         let store = environment.frozenBitmapStore
         let residentStore = environment.visibleBlockStore
+        let previousFragmentByID = Dictionary(uniqueKeysWithValues: previousFragments.map { ($0.id, $0) })
+        // `first(where:)` per code block would make an N-code-block message do O(N²)
+        // reconciliation; a single upfront dictionary keeps this O(N) overall.
+        let previousBlockByKey = Dictionary(previousBlocks.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+
+        func previousCodeDescriptor(for block: Block) -> CodeBlockDescriptor? {
+            guard let previous = previousBlockByKey[block.key],
+                  case .codeBlock(let descriptor) = previousTable.nodes[previous.fragment.id]
+            else { return nil }
+            return descriptor
+        }
 
         // Measures (+ rasterizes) one active text block via the `freeze(_:)` primitive and keeps
         // its artifact in the resident tier. A fresh function-scoped `cache` dict is passed on
@@ -575,7 +583,9 @@ extension FeedScrollView {
                 } else {
                     // Measured non-text has no synchronous geometry contract. Preserve the real
                     // prior fragment just as the pre-resolver path did for unchanged content.
-                    let previousFrame = previousFragments[match.previousIndex].frame
+                    guard let previousFrame = previousFragmentByID[
+                        previousBlocks[match.previousIndex].fragment.id
+                    ]?.frame else { return nil }
                     heights[match.newIndex] = previousFrame.height
                     localFragmentFrames[match.newIndex] = CGRect(
                         x: previousFrame.minX, y: 0,
@@ -624,11 +634,52 @@ extension FeedScrollView {
 
         var cursor: CGFloat = 0
         var fragments: [Fragment] = []
-        fragments.reserveCapacity(newBlocks.count)
+        fragments.reserveCapacity(newBlocks.count + 2)
         for (i, block) in newBlocks.enumerated() {
             let localFrame = localFragmentFrames[i].isNull
                 ? CGRect(x: 0, y: 0, width: width, height: heights[i])
                 : localFragmentFrames[i]
+            if case .codeBlock(let descriptor) = newTable.nodes[block.fragment.id] {
+                let headerPartID = codePartID(owner: block.blockID, nodeIndex: block.fragment.id, part: .codeHeader)
+                let headerKey = BlockKey(itemID: itemID, blockID: headerPartID)
+                let headerUnchanged = previousCodeDescriptor(for: block).map {
+                    codeBlockRenderPartHash($0, part: .codeHeader)
+                        == codeBlockRenderPartHash(descriptor, part: .codeHeader)
+                } ?? false
+                let residentHeader = headerUnchanged ? residentStore.bitmap(for: headerKey) : nil
+                let frozenHeader = headerUnchanged && residentHeader == nil ? store.bitmap(for: headerKey) : nil
+                let cachedHeader = residentHeader ?? frozenHeader
+                let cachedHeaderSize = headerUnchanged
+                    ? residentStore.size(for: headerKey)
+                        ?? store.size(for: headerKey)
+                        ?? previousFragmentByID[codeHeaderFragmentID(nodeIndex: block.fragment.id)]?.frame.size
+                    : nil
+                let headerSize = cachedHeaderSize ?? measureTextSync(descriptor.headerText, width: width)
+                let headerBitmap = cachedHeader ?? rasterizeText(descriptor.headerText, size: headerSize, scale: scale)
+                let headerWidth = cachedHeaderSize?.width ?? headerBitmap.map { CGFloat($0.width) / scale } ?? headerSize.width
+                let bodyFrame = localFrame.offsetBy(dx: 0, dy: cursor + headerSize.height)
+                let total = CGRect(
+                    x: 0, y: cursor, width: max(width, bodyFrame.width),
+                    height: headerSize.height + localFrame.height
+                )
+                let materialized = materializeCodeBlockFragments(
+                    descriptor: descriptor,
+                    nodeIndex: block.fragment.id,
+                    ownerBlockID: block.blockID,
+                    backgroundFrame: total,
+                    headerFrame: CGRect(x: 0, y: cursor, width: headerWidth, height: headerSize.height),
+                    bodyFrame: bodyFrame
+                )
+                fragments.append(contentsOf: materialized)
+                if let headerBitmap {
+                    residentStore.store(headerBitmap, size: headerSize, for: headerKey)
+                    if frozenHeader != nil { store.evict([headerKey]) }
+                    textBitmaps[materialized[1].id] = headerBitmap
+                }
+                cursor += total.height
+                if i < trailingIndex { cursor += spacing }
+                continue
+            }
             let frame = localFrame.offsetBy(dx: 0, dy: cursor)
             fragments.append(Fragment(
                 id: block.fragment.id,
@@ -640,6 +691,42 @@ extension FeedScrollView {
             if i < trailingIndex { cursor += spacing }
         }
         return (cursor, fragments, textBitmaps)
+    }
+
+    /// Reconstructs the flat root layout with explicit code-card children, so a later
+    /// `extractFragments(table:layout:)` sees the same background/header/body render plan.
+    private func makeSyntheticWorkingRangeLayout(
+        table: NodeTable, fragments: [Fragment], width: CGFloat, height: CGFloat
+    ) -> ResolvedLayout {
+        let byID = Dictionary(uniqueKeysWithValues: fragments.map { ($0.id, $0) })
+        let children = table.children(of: 0).compactMap { nodeIndex -> ResolvedLayout? in
+            guard nodeIndex < table.nodes.count else { return nil }
+            guard case .codeBlock = table.nodes[nodeIndex] else {
+                return byID[nodeIndex].map { ResolvedLayout(totalFrame: $0.frame, nodeIndex: nodeIndex) }
+            }
+            guard let background = byID[codeBackgroundFragmentID(nodeIndex: nodeIndex)],
+                  let header = byID[codeHeaderFragmentID(nodeIndex: nodeIndex)],
+                  let body = byID[nodeIndex]
+            else { return nil }
+            let origin = background.frame.origin
+            func local(_ fragment: Fragment) -> CGRect {
+                fragment.frame.offsetBy(dx: -origin.x, dy: -origin.y)
+            }
+            return ResolvedLayout(
+                totalFrame: background.frame,
+                children: [
+                    ResolvedLayout(totalFrame: local(background), nodeIndex: nodeIndex, renderPart: .codeBackground),
+                    ResolvedLayout(totalFrame: local(header), nodeIndex: nodeIndex, renderPart: .codeHeader),
+                    ResolvedLayout(totalFrame: local(body), nodeIndex: nodeIndex, renderPart: .codeBody),
+                ],
+                nodeIndex: nodeIndex
+            )
+        }
+        return ResolvedLayout(
+            totalFrame: CGRect(x: 0, y: 0, width: width, height: height),
+            children: children,
+            nodeIndex: 0
+        )
     }
 
     /// Recognizes the one item shape this diff optimizes: a root `.vstack` whose direct children
@@ -776,10 +863,8 @@ extension FeedScrollView {
         // Keep tables/WorkingRange continuously in sync with what's on screen — this is what
         // makes the gesture-end reconcile free. Mirrors itemsDidChange's fast-path commit shape.
         tables[lastIdx] = newTable
-        let syntheticLayout = ResolvedLayout(
-            totalFrame: CGRect(x: 0, y: 0, width: width, height: result.height),
-            children: result.fragments.map { ResolvedLayout(totalFrame: $0.frame, nodeIndex: $0.id) },
-            nodeIndex: 0
+        let syntheticLayout = makeSyntheticWorkingRangeLayout(
+            table: newTable, fragments: result.fragments, width: width, height: result.height
         )
         workingRange.commit(syntheticLayout, result.fragments, at: lastIdx)
 
