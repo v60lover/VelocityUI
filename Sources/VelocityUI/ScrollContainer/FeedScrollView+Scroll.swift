@@ -92,9 +92,15 @@ extension FeedScrollView {
                 }
                 if let entry = workingRange.entry(at: index) {
                     let syncMap = buildSyncMap(for: entry.fragments, itemID: tables[index].itemID)
+                    // A code body scrolling into view inside an already-mounted (tall, streaming)
+                    // cell enters here, not the fresh-mount branch below -- so it needs the same
+                    // codeBodyContent map. Without it the body mounts with an empty chunk list and
+                    // paints nothing (background + header still show), the "scroll to a sealed code
+                    // block, see only the card and its header" bug.
+                    let codeMap = buildCodeBodyContentMap(for: entry.fragments, itemID: tables[index].itemID)
                     let entering = keptCell.updateBlockViewport(
                         viewportInCell: blockViewport(for: keptCell.layer.frame),
-                        synchronousContent: syncMap
+                        synchronousContent: syncMap, codeBodyContent: codeMap
                     )
                     spawnMediaFetches(for: keptCell, fragments: entering, itemID: tables[index].itemID, syncMap: syncMap)
                 }
