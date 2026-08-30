@@ -14,6 +14,20 @@ public enum CodeStreamEventKind: Sendable, Equatable {
     case partialLineRasterized
 }
 
+/// `CGImage` is immutable after creation; this value only transports its pixels across tasks.
+struct CodeBodyLayerContent: @unchecked Sendable {
+    let sealedImage: CGImage?
+    let sealedSize: CGSize
+    let tailImage: CGImage?
+    let tailSize: CGSize
+
+    var totalSize: CGSize {
+        CGSize(width: max(sealedSize.width, tailSize.width), height: sealedSize.height + tailSize.height)
+    }
+
+    var image: CGImage? { sealedImage }
+}
+
 /// Per-`BlockKey` lifecycle owner for streaming a hot code block's body: per-line raster tiles
 /// that freeze the moment they're colorized, a replaceable plain partial-line tile, and one
 /// off-main tree-sitter parse per line-seal event. `@MainActor`, no locking -- touched only from
@@ -22,10 +36,8 @@ public enum CodeStreamEventKind: Sendable, Equatable {
 /// Keyed by `block.key` (not `codePartID(..., part: .codeBody)`) -- same convention as
 /// `HotBlockRasterizerStore`, so the two stores' eviction sweeps stay parallel.
 ///
-/// The single-composite delivery this store produces still recomposites the whole sealed image on
-/// every hot append -- a real O(1) tail-only path needs a two-`CALayer` (sealed + tail) delivery
-/// model in `RenderCell`, tracked separately as a follow-up. What this store does bound is
-/// per-token *CPU* work: it no longer re-splits the whole block's text or
+/// Two-layer delivery updates the sealed composite only when a line seals or recolors; tail-only
+/// appends replace just their own small raster. The store also avoids re-splitting the whole block's text or
 /// re-sums every tile's height on every token, it cancels stale off-main parses instead of letting
 /// them race a remount, and it never colorizes more than a bounded chunk of lines in one MainActor
 /// turn.
@@ -46,7 +58,7 @@ public final class HotCodeStreamStore {
         /// never pays an O(line count) `reduce` per token. Colorizing a tile never changes its
         /// measured size (same font, same text, only color), so recolor never touches this.
         var sealedHeight: CGFloat = 0
-        var composite: CGImage?
+        var sealedComposite: CGImage?
         var themeGeneration: Int
         /// Bitmap pixels depend on display scale as well as theme -- mirrors
         /// `CodeBodyRasterIdentity`, which the sealed-cache path already keys on both.
@@ -90,7 +102,7 @@ public final class HotCodeStreamStore {
             coloredLineCount = 0
             maxWidth = 0
             sealedHeight = 0
-            composite = nil
+            sealedComposite = nil
             isDeferred = false
             tailText = ""
             processedUTF8Count = 0
@@ -117,8 +129,18 @@ public final class HotCodeStreamStore {
         self.adaptiveDeferLineThreshold = adaptiveDeferLineThreshold
     }
 
+    func content(for key: BlockKey) -> CodeBodyLayerContent? {
+        guard let state = entries[key] else { return nil }
+        return CodeBodyLayerContent(
+            sealedImage: state.sealedComposite,
+            sealedSize: CGSize(width: state.maxWidth, height: state.sealedHeight),
+            tailImage: state.lastTailImage,
+            tailSize: CGSize(width: state.maxWidth, height: state.lastTailHeight)
+        )
+    }
+
     /// Appends `rawCode`'s current content (the block's full text so far) for `key`'s hot code
-    /// block, returning the current composited body image. Any newly sealed line gets an
+    /// block, returning separate sealed and tail layer content. Any newly sealed line gets an
     /// immediate plain tile (first-paint-before-highlighting); the tail is always plain. When new
     /// lines seal and the block isn't past `adaptiveDeferLineThreshold`, spawns one off-main
     /// tree-sitter parse of the whole sealed prefix; its result lands later via `onRecolor`.
@@ -136,8 +158,8 @@ public final class HotCodeStreamStore {
         scale: CGFloat,
         measure: @escaping (TextDescriptor, CGFloat) -> CGSize,
         eventObserver: (@Sendable (CodeStreamEventKind) -> Void)?,
-        onRecolor: @escaping (CGImage, CGSize) -> Void
-    ) -> (height: CGFloat, image: CGImage?) {
+        onRecolor: @MainActor @escaping (CodeBodyLayerContent) -> Void
+    ) -> (height: CGFloat, content: CodeBodyLayerContent) {
         let state = entries[key] ?? State(themeGeneration: themeGeneration, scale: scale)
         entries[key] = state
         if state.themeGeneration != themeGeneration || state.scale != scale {
@@ -185,14 +207,13 @@ public final class HotCodeStreamStore {
         state.lastTailImage = tailImage
         state.lastTailHeight = tailSize.height
 
-        let composite = Self.recomposite(
-            from: newLinesSealedThisCall ? previousTileCount : state.tiles.count,
-            tiles: state.tiles, tileHeights: state.tileHeights, sealedHeight: state.sealedHeight,
-            previousComposite: state.composite,
-            tailImage: tailImage, tailHeight: tailSize.height,
-            maxWidth: state.maxWidth, scale: scale
-        )
-        state.composite = composite
+        if newLinesSealedThisCall {
+            state.sealedComposite = Self.recomposite(
+                from: previousTileCount, tiles: state.tiles, tileHeights: state.tileHeights,
+                sealedHeight: state.sealedHeight, previousComposite: state.sealedComposite,
+                tailImage: nil, tailHeight: 0, maxWidth: state.maxWidth, scale: scale
+            )
+        }
         let totalHeight = state.sealedHeight + tailSize.height
 
         if newLinesSealedThisCall, !state.isDeferred {
@@ -208,7 +229,12 @@ public final class HotCodeStreamStore {
             }
         }
 
-        return (totalHeight, composite)
+        return (totalHeight, CodeBodyLayerContent(
+            sealedImage: state.sealedComposite,
+            sealedSize: CGSize(width: state.maxWidth, height: state.sealedHeight),
+            tailImage: tailImage,
+            tailSize: tailSize
+        ))
     }
 
     /// Called when a code fence closes: the block's content is now fully known and won't grow
@@ -233,8 +259,8 @@ public final class HotCodeStreamStore {
         scale: CGFloat,
         measure: @escaping (TextDescriptor, CGFloat) -> CGSize,
         eventObserver: (@Sendable (CodeStreamEventKind) -> Void)?,
-        onRecolor: @escaping (CGImage, CGSize) -> Void
-    ) -> (height: CGFloat, image: CGImage?, needsAsyncColorization: Bool) {
+        onRecolor: @MainActor @escaping (CodeBodyLayerContent) -> Void
+    ) -> (height: CGFloat, content: CodeBodyLayerContent, needsAsyncColorization: Bool) {
         let state = entries[key] ?? State(themeGeneration: themeGeneration, scale: scale)
         entries[key] = state
         if state.themeGeneration != themeGeneration || state.scale != scale {
@@ -280,13 +306,12 @@ public final class HotCodeStreamStore {
         state.lastTailHeight = 0
         state.isDeferred = false
 
-        let composite = Self.recomposite(
+        state.sealedComposite = Self.recomposite(
             from: previousTileCount, tiles: state.tiles, tileHeights: state.tileHeights, sealedHeight: state.sealedHeight,
-            previousComposite: state.composite,
+            previousComposite: state.sealedComposite,
             tailImage: nil, tailHeight: 0,
             maxWidth: state.maxWidth, scale: scale
         )
-        state.composite = composite
 
         let needsAsync = state.coloredLineCount < state.tiles.count
         if needsAsync {
@@ -298,7 +323,12 @@ public final class HotCodeStreamStore {
             )
         }
 
-        return (state.sealedHeight, composite, needsAsync)
+        return (state.sealedHeight, CodeBodyLayerContent(
+            sealedImage: state.sealedComposite,
+            sealedSize: CGSize(width: state.maxWidth, height: state.sealedHeight),
+            tailImage: nil,
+            tailSize: .zero
+        ), needsAsync)
     }
 
     /// Tears down every hot-stream entry for a key that scrolled out of the working range, was

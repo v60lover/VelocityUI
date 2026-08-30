@@ -23,7 +23,7 @@ extension HotCodeStreamStore {
         scale: CGFloat,
         measure: @escaping (TextDescriptor, CGFloat) -> CGSize,
         eventObserver: (@Sendable (CodeStreamEventKind) -> Void)?,
-        onRecolor: @escaping (CGImage, CGSize) -> Void
+        onRecolor: @MainActor @escaping (CodeBodyLayerContent) -> Void
     ) {
         eventObserver?(.parseCall)
         let sealedSnapshot = state.sealedLineTexts
@@ -39,7 +39,7 @@ extension HotCodeStreamStore {
             return TreeSitterHighlighter().colorRuns(for: sealedSnapshot[...], grammar: grammar, theme: theme)
         }
         state.pendingDetachedTask = detached
-        state.pendingTask = Task { [weak self] in
+        state.pendingTask = Task { @MainActor [weak self] in
             let colorRuns = await detached.value
             guard let self, !Task.isCancelled else { return }
             self.deliverColorRuns(
@@ -68,7 +68,7 @@ extension HotCodeStreamStore {
         theme: Theme,
         scale: CGFloat,
         measure: @escaping (TextDescriptor, CGFloat) -> CGSize,
-        onRecolor: @escaping (CGImage, CGSize) -> Void
+        onRecolor: @MainActor @escaping (CodeBodyLayerContent) -> Void
     ) {
         guard let state: HotCodeStreamStore.State = entries[key], state.generation == generation else { return }
         let upper = min(coveredLineCount, state.tiles.count)
@@ -87,23 +87,21 @@ extension HotCodeStreamStore {
         }
         state.coloredLineCount = chunkEnd
 
-        // Bound the redraw to just this chunk: `to: chunkEnd` lets `recomposite` reuse the
-        // still-plain tiles beyond `chunkEnd` verbatim from `previousComposite` instead of
-        // redrawing the whole remaining tail every turn -- `recolorChunkSize` only means
-        // anything if the compositing step is bounded by it too.
-        let composite = Self.recomposite(
+        state.sealedComposite = Self.recomposite(
             from: start, to: chunkEnd, tiles: state.tiles, tileHeights: state.tileHeights, sealedHeight: state.sealedHeight,
-            previousComposite: state.composite,
-            tailImage: state.lastTailImage, tailHeight: state.lastTailHeight,
+            previousComposite: state.sealedComposite,
+            tailImage: nil, tailHeight: 0,
             maxWidth: state.maxWidth, scale: scale
         )
-        state.composite = composite
-        guard let composite else { return }
-        let totalHeight = state.sealedHeight + state.lastTailHeight
-        onRecolor(composite, CGSize(width: state.maxWidth, height: totalHeight))
+        onRecolor(CodeBodyLayerContent(
+            sealedImage: state.sealedComposite,
+            sealedSize: CGSize(width: state.maxWidth, height: state.sealedHeight),
+            tailImage: state.lastTailImage,
+            tailSize: CGSize(width: state.maxWidth, height: state.lastTailHeight)
+        ))
 
         if chunkEnd < upper {
-            state.pendingTask = Task { [weak self] in
+            state.pendingTask = Task { @MainActor [weak self] in
                 await Task.yield()
                 guard let self, !Task.isCancelled else { return }
                 self.deliverColorRuns(

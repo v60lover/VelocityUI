@@ -335,8 +335,8 @@ extension FeedScrollView {
                   itemID: items[nextIdx].id,
                   width: width,
                   scale: scale,
-                  codeStreamDelivery: { [weak cell] fragmentID, image in
-                      cell?.applyCodeBodyTile(id: fragmentID, image: image, for: inputs.newTable.itemID)
+                  codeStreamDelivery: { [weak cell] fragmentID, content in
+                      cell?.applyCodeBodyTile(id: fragmentID, content: content, for: inputs.newTable.itemID)
                   }
               )
         else {
@@ -352,10 +352,12 @@ extension FeedScrollView {
         // overwrite-merge is safe.
         var syncMap = buildSyncMap(for: result.fragments, itemID: inputs.newTable.itemID)
         for (id, bitmap) in result.textBitmaps { syncMap[id] = bitmap }
+        let codeMap = result.codeBodyContents
         let entering = cell.updateBlockViewport(
             fragments: result.fragments,
             viewportInCell: blockViewport(for: cell.layer.frame),
-            synchronousContent: syncMap
+            synchronousContent: syncMap,
+            codeBodyContent: codeMap
         )
         spawnMediaFetches(for: cell, fragments: entering, itemID: inputs.newTable.itemID, syncMap: syncMap)
 
@@ -407,8 +409,8 @@ extension FeedScrollView {
         itemID: ID,
         width: CGFloat,
         scale: CGFloat,
-        codeStreamDelivery: @escaping (Int, CGImage) -> Void = { _, _ in }
-    ) -> (height: CGFloat, fragments: [Fragment], textBitmaps: [Int: CGImage])? {
+        codeStreamDelivery: @MainActor @escaping (Int, CodeBodyLayerContent) -> Void = { _, _ in }
+    ) -> (height: CGFloat, fragments: [Fragment], textBitmaps: [Int: CGImage], codeBodyContents: [Int: CodeBodyLayerContent])? {
         guard let (previousBlocks, _) = flatBlocks(for: previousTable, itemID: itemID, width: width),
               let (newBlocks, spacing) = flatBlocks(for: newTable, itemID: itemID, width: width),
               !newBlocks.isEmpty
@@ -477,7 +479,7 @@ extension FeedScrollView {
                 let fragmentID = block.fragment.id
                 let hotCodeStreamStore = environment.hotCodeStreamStore
                 let result = hotCodeStreamStore.finalize(
-                    block.key,
+                    bodyKey,
                     rawCode: descriptor.content,
                     font: descriptor.font,
                     theme: themeSnapshot.theme,
@@ -487,7 +489,7 @@ extension FeedScrollView {
                     scale: scale,
                     measure: { [self] d, w in measureTextSync(d, width: w) },
                     eventObserver: environment.codeStreamObserver,
-                    onRecolor: { [residentStore] image, size in
+                    onRecolor: { [residentStore] content in
                         // `finalize`'s colorization can land across several bounded chunks (see
                         // `HotCodeStreamStore.recolorChunkSize`) -- evicting or stamping the
                         // stable `codeBodyIdentity` on anything but the LAST chunk would strand
@@ -496,19 +498,22 @@ extension FeedScrollView {
                         // bitmap be cached as if it were the identity's final, authoritative
                         // raster. `isFullyColorized` is checked fresh on every delivery so only
                         // the chunk that actually completes colorization treats itself as final.
-                        let isFinal = hotCodeStreamStore.isFullyColorized(block.key)
-                        residentStore.store(
-                            image, size: size, for: bodyKey,
-                            codeBodyIdentity: isFinal ? codeBodyIdentity : nil
-                        )
-                        codeStreamDelivery(fragmentID, image)
+                        let isFinal = hotCodeStreamStore.isFullyColorized(bodyKey)
+                        if let image = content.sealedImage {
+                            residentStore.store(
+                                image, size: content.sealedSize, for: bodyKey,
+                                codeBodyIdentity: isFinal ? codeBodyIdentity : nil
+                            )
+                        }
+                        codeStreamDelivery(fragmentID, content)
                         if isFinal {
-                            hotCodeStreamStore.evict([block.key])
+                            hotCodeStreamStore.evict([bodyKey])
                         }
                     }
                 )
-                guard let bitmap = result.image else { return (result.height, nil) }
-                let size = CGSize(width: CGFloat(bitmap.width) / scale, height: result.height)
+                codeBodyContents[fragmentID] = result.content
+                guard let bitmap = result.content.sealedImage else { return (result.height, nil) }
+                let size = result.content.sealedSize
                 // Only stamp the stable `codeBodyIdentity` when this synchronous result is
                 // already fully colorized -- a plain/partially-colored bitmap stored under the
                 // same identity as the eventual colorized one would let a scroll-out demote (see
@@ -520,7 +525,7 @@ extension FeedScrollView {
                     codeBodyIdentity: result.needsAsyncColorization ? nil : codeBodyIdentity
                 )
                 if !result.needsAsyncColorization {
-                    hotCodeStreamStore.evict([block.key])
+                    hotCodeStreamStore.evict([bodyKey])
                 }
                 return (result.height, bitmap)
             }
@@ -567,7 +572,7 @@ extension FeedScrollView {
             if case .body(let chrome) = descriptor.codeBlockRole {
                 let fragmentID = block.fragment.id
                 let result = environment.hotCodeStreamStore.append(
-                    block.key,
+                    codeBodyKey(for: block),
                     rawCode: descriptor.content,
                     font: descriptor.font,
                     theme: themeSnapshot.theme,
@@ -577,14 +582,10 @@ extension FeedScrollView {
                     scale: scale,
                     measure: { [self] d, w in measureTextSync(d, width: w) },
                     eventObserver: environment.codeStreamObserver,
-                    onRecolor: { image, _ in codeStreamDelivery(fragmentID, image) }
+                    onRecolor: { content in codeStreamDelivery(fragmentID, content) }
                 )
-                if let image = result.image {
-                    residentStore.store(
-                        image, size: CGSize(width: CGFloat(image.width) / scale, height: result.height), for: block.key
-                    )
-                }
-                return (result.height, result.image)
+                codeBodyContents[fragmentID] = result.content
+                return (result.height, result.content.image)
             }
             let result = environment.hotBlockRasterizerStore.append(
                 descriptor, width: block.width, scale: scale, contentHash: block.contentHash, for: block.key
@@ -598,6 +599,7 @@ extension FeedScrollView {
         var heights = [CGFloat](repeating: 0, count: newBlocks.count)
         var localFragmentFrames = [CGRect](repeating: .null, count: newBlocks.count)
         var textBitmaps: [Int: CGImage] = [:]
+        var codeBodyContents: [Int: CodeBodyLayerContent] = [:]
         var resolvedIndices = Set<Int>()
 
         func resolveDeterministicGeometry(_ block: Block) -> LeafGeometryResolution? {
@@ -807,7 +809,7 @@ extension FeedScrollView {
             cursor += heights[i]
             if i < trailingIndex { cursor += spacing }
         }
-        return (cursor, fragments, textBitmaps)
+        return (cursor, fragments, textBitmaps, codeBodyContents)
     }
 
     /// Reconstructs the flat root layout with explicit code-card children, so a later
@@ -972,8 +974,8 @@ extension FeedScrollView {
             itemID: item.id,
             width: width,
             scale: scale,
-            codeStreamDelivery: { [weak cell] fragmentID, image in
-                cell?.applyCodeBodyTile(id: fragmentID, image: image, for: newTable.itemID)
+            codeStreamDelivery: { [weak cell] fragmentID, content in
+                cell?.applyCodeBodyTile(id: fragmentID, content: content, for: newTable.itemID)
             }
         ) else { return false }
 
@@ -983,10 +985,12 @@ extension FeedScrollView {
 
         var syncMap = buildSyncMap(for: result.fragments, itemID: newTable.itemID)
         for (id, bitmap) in result.textBitmaps { syncMap[id] = bitmap }
+        let codeMap = result.codeBodyContents
         let entering = cell.updateBlockViewport(
             fragments: result.fragments,
             viewportInCell: blockViewport(for: cell.layer.frame),
-            synchronousContent: syncMap
+            synchronousContent: syncMap,
+            codeBodyContent: codeMap
         )
         spawnMediaFetches(for: cell, fragments: entering, itemID: newTable.itemID, syncMap: syncMap)
 

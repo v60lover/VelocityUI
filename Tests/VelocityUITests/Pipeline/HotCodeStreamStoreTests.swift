@@ -94,10 +94,10 @@ final class HotCodeStreamStoreTests: XCTestCase {
         let result = store.append(
             key, rawCode: "let x = 1\nlet y", font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 1,
-            measure: measure, eventObserver: { counter.observe($0) }, onRecolor: { _, _ in }
+            measure: measure, eventObserver: { counter.observe($0) }, onRecolor: { _ in }
         )
 
-        guard let image = result.image else { return XCTFail("expected an immediate plain composite before any parse result lands") }
+        guard let image = result.content.tailImage else { return XCTFail("expected an immediate plain tail before any parse result lands") }
         XCTAssertGreaterThan(image.width, 0)
         XCTAssertGreaterThan(result.height, 0)
         XCTAssertEqual(counter.sealedLineTiles, 1, "exactly one new sealed line this call")
@@ -115,14 +115,14 @@ final class HotCodeStreamStoreTests: XCTestCase {
         _ = store.append(
             key, rawCode: "let x = 1\nlet y", font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 1,
-            measure: measure, eventObserver: { counter.observe($0) }, onRecolor: { _, _ in }
+            measure: measure, eventObserver: { counter.observe($0) }, onRecolor: { _ in }
         )
         XCTAssertEqual(counter.parseCalls, 1)
 
         _ = store.append(
             key, rawCode: "let x = 1\nlet y = 2", font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 1,
-            measure: measure, eventObserver: { counter.observe($0) }, onRecolor: { _, _ in }
+            measure: measure, eventObserver: { counter.observe($0) }, onRecolor: { _ in }
         )
 
         XCTAssertEqual(counter.parseCalls, 1, "no new line sealed -- tail-only growth must not trigger tree-sitter")
@@ -142,12 +142,12 @@ final class HotCodeStreamStoreTests: XCTestCase {
             key, rawCode: "let keyword = 1\n", font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 2,
             measure: measure, eventObserver: nil,
-            onRecolor: { image, _ in
-                recoloredImage = image
+            onRecolor: { content in
+                recoloredImage = content.sealedImage
                 exp.fulfill()
             }
         )
-        guard let plainImage = plain.image else { return XCTFail("expected a plain composite") }
+        guard let plainImage = plain.content.sealedImage else { return XCTFail("expected a plain sealed image") }
 
         wait(for: [exp], timeout: 5)
 
@@ -169,7 +169,7 @@ final class HotCodeStreamStoreTests: XCTestCase {
             key, rawCode: "let keyword = 1\n", font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 2,
             measure: measure, eventObserver: nil,
-            onRecolor: { _, _ in exp.fulfill() }
+            onRecolor: { _ in exp.fulfill() }
         )
         wait(for: [exp], timeout: 5)
 
@@ -177,9 +177,9 @@ final class HotCodeStreamStoreTests: XCTestCase {
         let afterRecolor = store.append(
             key, rawCode: "let keyword = 1\nsecond", font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 2,
-            measure: measure, eventObserver: nil, onRecolor: { _, _ in }
+            measure: measure, eventObserver: nil, onRecolor: { _ in }
         )
-        guard let imageA = afterRecolor.image else { return XCTFail("expected a composite") }
+        guard let imageA = afterRecolor.content.sealedImage else { return XCTFail("expected a sealed image") }
         let lineHeightPixels = Int((font.uiFont.lineHeight * 2).rounded())
         guard let firstLineBandA = imageA.cropping(to: CGRect(x: 0, y: 0, width: imageA.width, height: min(lineHeightPixels, imageA.height))) else {
             return XCTFail("expected a croppable first-line band")
@@ -189,9 +189,9 @@ final class HotCodeStreamStoreTests: XCTestCase {
         let later = store.append(
             key, rawCode: "let keyword = 1\nsecond\nthird\nfourth", font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 2,
-            measure: measure, eventObserver: nil, onRecolor: { _, _ in }
+            measure: measure, eventObserver: nil, onRecolor: { _ in }
         )
-        guard let imageB = later.image,
+        guard let imageB = later.content.sealedImage,
               let firstLineBandB = imageB.cropping(to: CGRect(x: 0, y: 0, width: imageA.width, height: min(lineHeightPixels, imageB.height)))
         else { return XCTFail("expected a croppable first-line band after later appends") }
 
@@ -214,7 +214,7 @@ final class HotCodeStreamStoreTests: XCTestCase {
             _ = store.append(
                 key, rawCode: rawCode, font: font, theme: theme, themeGeneration: 0,
                 languageID: .swift, highlightRegistry: registry, scale: 1,
-                measure: measure, eventObserver: { counter.observe($0) }, onRecolor: { _, _ in }
+                measure: measure, eventObserver: { counter.observe($0) }, onRecolor: { _ in }
             )
         }
 
@@ -235,7 +235,7 @@ final class HotCodeStreamStoreTests: XCTestCase {
         _ = store.append(
             key, rawCode: "one\ntwo\n", font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 1,
-            measure: measure, eventObserver: { counter.observe($0) }, onRecolor: { _, _ in }
+            measure: measure, eventObserver: { counter.observe($0) }, onRecolor: { _ in }
         )
         XCTAssertEqual(counter.sealedLineTiles, 2)
 
@@ -243,7 +243,7 @@ final class HotCodeStreamStoreTests: XCTestCase {
         _ = store.append(
             key, rawCode: "one\ntwo\n", font: font, theme: .defaultDark, themeGeneration: 1,
             languageID: .swift, highlightRegistry: registry, scale: 1,
-            measure: measure, eventObserver: { counter.observe($0) }, onRecolor: { _, _ in }
+            measure: measure, eventObserver: { counter.observe($0) }, onRecolor: { _ in }
         )
 
         XCTAssertEqual(counter.sealedLineTiles, 4, "a theme change must rebuild every previously-sealed line's tile, not reuse the old-theme pixels")
@@ -261,12 +261,12 @@ final class HotCodeStreamStoreTests: XCTestCase {
         _ = store.append(
             keyA, rawCode: "a\n", font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 1,
-            measure: measure, eventObserver: { counterA.observe($0) }, onRecolor: { _, _ in }
+            measure: measure, eventObserver: { counterA.observe($0) }, onRecolor: { _ in }
         )
         _ = store.append(
             keyB, rawCode: "b\n", font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 1,
-            measure: measure, eventObserver: { counterB.observe($0) }, onRecolor: { _, _ in }
+            measure: measure, eventObserver: { counterB.observe($0) }, onRecolor: { _ in }
         )
 
         store.evict([keyA])
@@ -275,7 +275,7 @@ final class HotCodeStreamStoreTests: XCTestCase {
         _ = store.append(
             keyA, rawCode: "a\n", font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 1,
-            measure: measure, eventObserver: { counterA.observe($0) }, onRecolor: { _, _ in }
+            measure: measure, eventObserver: { counterA.observe($0) }, onRecolor: { _ in }
         )
         XCTAssertEqual(counterA.sealedLineTiles, 2, "keyA was evicted -- the next append must re-tile from scratch, not reuse a torn-down entry")
     }
@@ -291,7 +291,7 @@ final class HotCodeStreamStoreTests: XCTestCase {
             key, rawCode: "let keyword = 1\n", font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 1,
             measure: measure, eventObserver: nil,
-            onRecolor: { _, _ in staleRecolorDeliveries += 1 }
+            onRecolor: { _ in staleRecolorDeliveries += 1 }
         )
         // Evict immediately -- must cancel the parse this append just spawned before it can land.
         store.evict([key])
@@ -303,8 +303,8 @@ final class HotCodeStreamStoreTests: XCTestCase {
             key, rawCode: "second\n", font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 1,
             measure: measure, eventObserver: nil,
-            onRecolor: { image, _ in
-                recoloredAfterRemount = image
+            onRecolor: { content in
+                recoloredAfterRemount = content.sealedImage
                 exp.fulfill()
             }
         )
@@ -324,7 +324,7 @@ final class HotCodeStreamStoreTests: XCTestCase {
         _ = store.append(
             key, rawCode: "one\ntwo\n", font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 1,
-            measure: measure, eventObserver: { counter.observe($0) }, onRecolor: { _, _ in }
+            measure: measure, eventObserver: { counter.observe($0) }, onRecolor: { _ in }
         )
         XCTAssertEqual(counter.sealedLineTiles, 2)
 
@@ -333,7 +333,7 @@ final class HotCodeStreamStoreTests: XCTestCase {
         _ = store.append(
             key, rawCode: "one\ntwo\n", font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 2,
-            measure: measure, eventObserver: { counter.observe($0) }, onRecolor: { _, _ in }
+            measure: measure, eventObserver: { counter.observe($0) }, onRecolor: { _ in }
         )
 
         XCTAssertEqual(counter.sealedLineTiles, 4, "a scale change must rebuild every previously-sealed line's tile, not reuse the old-scale pixels")
@@ -352,7 +352,7 @@ final class HotCodeStreamStoreTests: XCTestCase {
             _ = store.append(
                 key, rawCode: rawCode, font: font, theme: theme, themeGeneration: 0,
                 languageID: .swift, highlightRegistry: registry, scale: 1,
-                measure: measure, eventObserver: { counter.observe($0) }, onRecolor: { _, _ in }
+                measure: measure, eventObserver: { counter.observe($0) }, onRecolor: { _ in }
             )
         }
         XCTAssertEqual(counter.parseCalls, 2, "defer must have already stopped intermediate parses")
@@ -363,13 +363,13 @@ final class HotCodeStreamStoreTests: XCTestCase {
             key, rawCode: rawCode, font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 1,
             measure: measure, eventObserver: { counter.observe($0) },
-            onRecolor: { image, _ in
-                finalImage = image
+            onRecolor: { content in
+                finalImage = content.sealedImage
                 exp.fulfill()
             }
         )
         XCTAssertTrue(result.needsAsyncColorization, "the deferred lines were never colorized -- finalize must still colorize them")
-        guard let plainImage = result.image else { return XCTFail("finalize must return a composite synchronously without blocking on the parse") }
+        guard let plainImage = result.content.sealedImage else { return XCTFail("finalize must return sealed pixels synchronously without blocking on the parse") }
 
         wait(for: [exp], timeout: 5)
         XCTAssertEqual(counter.parseCalls, 3, "closing the fence spawns exactly one final parse regardless of defer")
@@ -393,7 +393,7 @@ final class HotCodeStreamStoreTests: XCTestCase {
         _ = store.append(
             key, rawCode: rawCode, font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 1,
-            measure: measure, eventObserver: nil, onRecolor: { _, _ in }
+            measure: measure, eventObserver: nil, onRecolor: { _ in }
         )
         // All 90 sealed lines above are still plain -- defer engaged after the first.
 
@@ -403,7 +403,7 @@ final class HotCodeStreamStoreTests: XCTestCase {
             key, rawCode: rawCode, font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 1,
             measure: measure, eventObserver: nil,
-            onRecolor: { _, _ in
+            onRecolor: { _ in
                 deliveryCount += 1
                 // 90 lines exceeds one chunk's line budget -- if this ever regresses to one
                 // synchronous callback covering the whole range, this count collapses to 1.
@@ -433,7 +433,7 @@ final class HotCodeStreamStoreTests: XCTestCase {
         _ = store.append(
             key, rawCode: rawCode, font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 1,
-            measure: measure, eventObserver: nil, onRecolor: { _, _ in }
+            measure: measure, eventObserver: nil, onRecolor: { _ in }
         )
         // All 90 sealed lines above are still plain -- defer engaged after the first.
 
@@ -443,7 +443,7 @@ final class HotCodeStreamStoreTests: XCTestCase {
             key, rawCode: rawCode, font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 1,
             measure: measure, eventObserver: nil,
-            onRecolor: { [weak store] _, _ in
+            onRecolor: { [weak store] _ in
                 guard let store else { return }
                 let isFinal = store.isFullyColorized(key)
                 isFullyColorizedAtEachDelivery.append(isFinal)
@@ -478,7 +478,7 @@ final class HotCodeStreamStoreTests: XCTestCase {
         _ = store.append(
             key, rawCode: rawCode, font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 1,
-            measure: measure, eventObserver: nil, onRecolor: { _, _ in }
+            measure: measure, eventObserver: nil, onRecolor: { _ in }
         )
 
         var lastImage: CGImage?
@@ -487,15 +487,15 @@ final class HotCodeStreamStoreTests: XCTestCase {
             key, rawCode: rawCode, font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 1,
             measure: measure, eventObserver: nil,
-            onRecolor: { image, _ in
-                lastImage = image
+            onRecolor: { content in
+                lastImage = content.sealedImage
                 if store.isFullyColorized(key) {
                     store.evict([key])
                     exp.fulfill()
                 }
             }
         )
-        guard let plainImage = result.image else { return XCTFail("expected a plain synchronous composite") }
+        guard let plainImage = result.content.sealedImage else { return XCTFail("expected plain synchronous sealed pixels") }
         wait(for: [exp], timeout: 5)
         guard let finalImage = lastImage else { return XCTFail("expected a final colorized delivery") }
 

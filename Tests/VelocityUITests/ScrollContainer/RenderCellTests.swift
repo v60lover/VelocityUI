@@ -1032,5 +1032,82 @@ final class RenderCellTests: XCTestCase {
         XCTAssertEqual(Set(active.map(\.id)), Set(fragments.prefix(3).map(\.id)),
             "the next fragment must not be treated as a clipped code card part")
     }
+
+    func testCodeBodyUsesSeparateSealedAndTailLayers() {
+        let cell = makeCell()
+        let fragment = codeTextFragment(
+            id: 9,
+            role: .body(CodeBlockChrome(
+                cornerRadius: 0,
+                backgroundColor: VColorDescriptor(red: 0, green: 0, blue: 0, alpha: 1),
+                language: "swift"
+            )),
+            frame: CGRect(x: 4, y: 20, width: 300, height: 60)
+        )
+        let sealed = makeCGImage(width: 120, height: 20)
+        let tail = makeCGImage(width: 80, height: 20)
+        let content = CodeBodyLayerContent(
+            sealedImage: sealed, sealedSize: CGSize(width: 120, height: 20),
+            tailImage: tail, tailSize: CGSize(width: 80, height: 20)
+        )
+
+        cell.applyLayout([fragment], synchronousContent: [:], codeBodyContent: [fragment.id: content])
+
+        guard let layers = contentLayer(of: cell)?.sublayers else {
+            return XCTFail("Expected code-body layers")
+        }
+        XCTAssertEqual(layers.count, 2)
+        XCTAssertTrue((layers[0].contents as! CGImage) === sealed)
+        XCTAssertTrue((layers[1].contents as! CGImage) === tail)
+        XCTAssertEqual(layers[0].frame, CGRect(x: 4, y: 20, width: 120, height: 20))
+        XCTAssertEqual(layers[1].frame, CGRect(x: 4, y: 40, width: 80, height: 20))
+    }
+
+    func testCodeBodyTailSurvivesViewportExitAndReentry() {
+        let fragment = codeTextFragment(
+            id: 9,
+            role: .body(CodeBlockChrome(
+                cornerRadius: 0,
+                backgroundColor: VColorDescriptor(red: 0, green: 0, blue: 0, alpha: 1),
+                language: "swift"
+            )),
+            frame: CGRect(x: 4, y: 20, width: 300, height: 60)
+        )
+
+        for sealed in [makeCGImage(width: 120, height: 20), nil] {
+            let cell = makeCell()
+            let tail = makeCGImage(width: 80, height: 20)
+            let content = CodeBodyLayerContent(
+                sealedImage: sealed,
+                sealedSize: sealed == nil ? .zero : CGSize(width: 120, height: 20),
+                tailImage: tail,
+                tailSize: CGSize(width: 80, height: 20)
+            )
+
+            _ = cell.updateBlockViewport(
+                fragments: [fragment],
+                viewportInCell: fragment.frame,
+                synchronousContent: [:],
+                codeBodyContent: [fragment.id: content]
+            )
+            _ = cell.updateBlockViewport(
+                viewportInCell: CGRect(x: 0, y: 200, width: 300, height: 20),
+                synchronousContent: [:],
+                codeBodyContent: [:]
+            )
+            _ = cell.updateBlockViewport(
+                viewportInCell: fragment.frame,
+                synchronousContent: [:],
+                codeBodyContent: [:]
+            )
+
+            guard let layers = contentLayer(of: cell)?.sublayers else {
+                return XCTFail("Expected re-entered code-body layers")
+            }
+            XCTAssertEqual(layers.count, 2)
+            XCTAssertTrue((layers[1].contents as! CGImage) === tail)
+            XCTAssertEqual(layers[1].frame.origin.y, 20 + (sealed == nil ? 0 : 20))
+        }
+    }
 }
 #endif

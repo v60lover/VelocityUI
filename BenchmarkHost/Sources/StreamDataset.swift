@@ -119,15 +119,15 @@ enum StreamDataset {
         result.reserveCapacity(textNodes.count + (frontier / 2) + 1)
         for (index, node) in textNodes.enumerated() {
             result.append(node)
-//            if index >= imageAfterBlockIndex, index > 10, index % 2 == 0 {
-//                result.append(
-//                    AsyncImageNode(url: imageURL, aspectRatio: 16.0 / 9.0, contentMode: .fill)
-//                        .renderID("stream-image-after-\(index)")
-//                )
-//            }
-//            if index == ruleAfterBlockIndex, frontier > ruleAfterBlockIndex {
-//                result.append(SpacerNode(minLength: 12).renderID("stream-rule-after-\(index)"))
-//            }
+            if index >= imageAfterBlockIndex, index > 10, index % 2 == 0 {
+                result.append(
+                    AsyncImageNode(url: imageURL, aspectRatio: 16.0 / 9.0, contentMode: .fill)
+                        .renderID("stream-image-after-\(index)")
+                )
+            }
+            if index == ruleAfterBlockIndex, index > 10, index % 2 == 1 {
+                result.append(SpacerNode(minLength: 12).renderID("stream-rule-after-\(index)"))
+            }
         }
         return result
     }

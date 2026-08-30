@@ -55,9 +55,10 @@ extension FeedScrollView {
             }
             if !leavingKeys.isEmpty {
                 environment.visibleBlockStore.demote(leavingKeys, to: environment.frozenBitmapStore)
-                // A live hot rasterizer's NSTextLayoutManager must not leak when its cell recycles away.
+                // Generic hot text owns an NSTextLayoutManager and can be discarded here. A code
+                // stream retains its split sealed/tail delivery until it seals or its item leaves,
+                // so a viewport re-entry cannot reconstruct a stretched single-layer bitmap.
                 environment.hotBlockRasterizerStore.evict(leavingKeys)
-                environment.hotCodeStreamStore.evict(leavingKeys)
             }
         }
         for index in _recycleBuffer {
@@ -113,10 +114,11 @@ extension FeedScrollView {
             if let entry = workingRange.entry(at: index) {
                 cell.layer.frame = frame
                 let syncMap = buildSyncMap(for: entry.fragments, itemID: table.itemID)
+                let codeMap = buildCodeBodyContentMap(for: entry.fragments, itemID: table.itemID)
                 let entering = cell.updateBlockViewport(
                     fragments: entry.fragments,
                     viewportInCell: blockViewport(for: frame),
-                    synchronousContent: syncMap
+                    synchronousContent: syncMap, codeBodyContent: codeMap
                 )
                 spawnMediaFetches(for: cell, fragments: entering, itemID: table.itemID,
                                   syncMap: syncMap)
@@ -145,10 +147,11 @@ extension FeedScrollView {
 
                 cell.layer.frame = mountFrame
                 let syncMap = buildSyncMap(for: entry.fragments, itemID: table.itemID)
+                let codeMap = buildCodeBodyContentMap(for: entry.fragments, itemID: table.itemID)
                 let entering = cell.updateBlockViewport(
                     fragments: entry.fragments,
                     viewportInCell: blockViewport(for: mountFrame),
-                    synchronousContent: syncMap
+                    synchronousContent: syncMap, codeBodyContent: codeMap
                 )
                 spawnMediaFetches(for: cell, fragments: entering, itemID: table.itemID,
                                   syncMap: syncMap)

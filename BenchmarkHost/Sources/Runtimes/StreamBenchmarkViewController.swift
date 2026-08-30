@@ -105,6 +105,18 @@ final class StreamBenchmarkViewController: UIViewController {
     }
 }
 
+// MARK: - Theme
+
+extension MarkdownTheme {
+    /// `.default` with a smaller code font (16pt vs. the 20pt body/code default) — just for this
+    /// scenario's readability at benchmark cell widths.
+    fileprivate static let stream: MarkdownTheme = {
+        var theme = MarkdownTheme.default
+        theme.code = VFontDescriptor(size: 13, weight: VFontDescriptor.regularWeight)
+        return theme
+    }()
+}
+
 // MARK: - SwiftUI-observable message store
 
 /// Bridges `StreamDriver`'s UIKit-side ticks into the SwiftUI state `AsyncFeed` observes.
@@ -122,7 +134,7 @@ private final class StreamStore: ObservableObject {
     /// backs rendering. Tokens keep accumulating into the controller even while a
     /// `StreamGestureCoalescer` is buffering (not publishing) — the buffered path must never lose
     /// a token just because the last few appends happened during an active gesture.
-    private let controllers: [Int: StreamingMarkdownController] = [0: StreamingMarkdownController()]
+    private let controllers: [Int: StreamingMarkdownController] = [0: StreamingMarkdownController(theme: .stream)]
     private var coalescer: StreamGestureCoalescer?
 
     /// The only message id this scenario ever drives is 0; a lookup miss is a programmer error.

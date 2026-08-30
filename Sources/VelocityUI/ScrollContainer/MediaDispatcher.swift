@@ -96,7 +96,8 @@ final class MediaDispatcher {
                 ) {
                     map[fragment.id] = image
                 }
-            case .text:
+            case .text(let descriptor):
+                if case .body = descriptor.codeBlockRole { continue }
                 let key = BlockKey(
                     boxedItemID: itemID,
                     index: position,

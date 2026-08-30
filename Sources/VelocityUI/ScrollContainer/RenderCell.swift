@@ -53,6 +53,8 @@ public final class RenderCell {
     /// Layers follow an explicit block identity through insertions; positional fragments retain
     /// the legacy node-index identity.
     var sublayers: [LayerIdentity: CALayer] = [:]
+    private var codeTailSublayers: [LayerIdentity: CALayer] = [:]
+    private var codeBodyContentByFragmentID: [Int: CodeBodyLayerContent] = [:]
     var layerIdentityByFragmentID: [Int: LayerIdentity] = [:]
     private var codeBackgroundByIdentity: [LayerIdentity: CodeBlockBackgroundDescriptor] = [:]
     /// Ordered frame metadata survives while offscreen block layers are released.
@@ -134,6 +136,7 @@ public final class RenderCell {
                 sub.contents = nil
                 sub.backgroundColor = nil
             }
+            for sub in codeTailSublayers.values { sub.contents = nil }
             mediaFragmentIDs.removeAll(keepingCapacity: true)
             placeholderPaintedFragmentIDs.removeAll(keepingCapacity: true)
             blockFragments.removeAll(keepingCapacity: true)
@@ -141,6 +144,7 @@ public final class RenderCell {
             blockFragmentRanges.removeAll(keepingCapacity: true)
             activeBlockFragmentIDs.removeAll(keepingCapacity: true)
             codeBackgroundByIdentity.removeAll(keepingCapacity: true)
+            codeBodyContentByFragmentID.removeAll(keepingCapacity: true)
             placeholderLayer.opacity = 1
             contentLayer.opacity = 0
             CATransaction.commit()
@@ -163,6 +167,14 @@ public final class RenderCell {
     /// `synchronousContent` get their decoded CGImage applied inline (no Task, no fade, no gray
     /// tint), and if every image fragment is covered, contentLayer is revealed immediately.
     public func applyLayout(_ fragments: [Fragment], synchronousContent: [Int: CGImage]) {
+        applyLayout(fragments, synchronousContent: synchronousContent, codeBodyContent: [:])
+    }
+
+    func applyLayout(
+        _ fragments: [Fragment],
+        synchronousContent: [Int: CGImage],
+        codeBodyContent: [Int: CodeBodyLayerContent]
+    ) {
         let cellBounds = CGRect(origin: .zero, size: layer.bounds.size)
 
         CATransaction.begin()
@@ -182,6 +194,7 @@ public final class RenderCell {
             for identity in sublayers.keys.filter({ !incomingIdentities.contains($0) }) {
                 sublayers[identity]?.removeFromSuperlayer()
                 sublayers.removeValue(forKey: identity)
+                codeTailSublayers.removeValue(forKey: identity)?.removeFromSuperlayer()
                 codeBackgroundByIdentity.removeValue(forKey: identity)
                 let removedIDs = layerIdentityByFragmentID.keys.filter { layerIdentityByFragmentID[$0] == identity }
                 for id in removedIDs {
@@ -217,6 +230,8 @@ public final class RenderCell {
             // Classify on EVERY iteration — handles id-reuse across content types so
             // mediaFragmentIDs never becomes stale relative to the current fragment set.
             if case .image(let descriptor) = fragment.content {
+                codeTailSublayers.removeValue(forKey: identity)?.removeFromSuperlayer()
+                codeBodyContentByFragmentID.removeValue(forKey: fragment.id)
                 if let image = synchronousContent[fragment.id] {
                     // Sync paint: image is already decoded — set contents inline.
                     // No gray tint (image is present), no CATransition (no delay to mask).
@@ -237,6 +252,8 @@ public final class RenderCell {
                 }
                 mediaFragmentIDs.insert(fragment.id)
             } else if case .codeBlockBackground(let descriptor) = fragment.content {
+                codeTailSublayers.removeValue(forKey: identity)?.removeFromSuperlayer()
+                codeBodyContentByFragmentID.removeValue(forKey: fragment.id)
                 if codeBackgroundByIdentity[identity] != descriptor || sub.contents == nil {
                     sub.contents = rasterizeCodeBlockBackground(cornerRadius: descriptor.cornerRadius, color: descriptor.color)
                     sub.contentsCenter = codeBlockBackgroundContentsCenter(cornerRadius: descriptor.cornerRadius)
@@ -245,7 +262,44 @@ public final class RenderCell {
                 sub.backgroundColor = nil
                 mediaFragmentIDs.remove(fragment.id)
                 placeholderPaintedFragmentIDs.remove(fragment.id)
-            } else if case .text = fragment.content {
+            } else if case .text(let descriptor) = fragment.content {
+                if case .body = descriptor.codeBlockRole {
+                    let tail: CALayer
+                    if let existing = codeTailSublayers[identity] {
+                        tail = existing
+                    } else {
+                        let layer = CALayer()
+                        layer.masksToBounds = false
+                        layer.cornerRadius = 0
+                        contentLayer.addSublayer(layer)
+                        codeTailSublayers[identity] = layer
+                        tail = layer
+                    }
+                    if let incoming = codeBodyContent[fragment.id] {
+                        codeBodyContentByFragmentID[fragment.id] = incoming
+                    }
+                    let delivery = codeBodyContentByFragmentID[fragment.id]
+                    sub.contents = delivery?.sealedImage
+                    sub.frame = CGRect(origin: fragment.frame.origin, size: delivery?.sealedSize ?? .zero)
+                    tail.contents = delivery?.tailImage
+                    tail.frame = CGRect(
+                        x: fragment.frame.minX,
+                        y: fragment.frame.minY + (delivery?.sealedSize.height ?? 0),
+                        width: delivery?.tailSize.width ?? 0,
+                        height: delivery?.tailSize.height ?? 0
+                    )
+                    sub.backgroundColor = nil
+                    tail.backgroundColor = nil
+                    mediaFragmentIDs.remove(fragment.id)
+                    placeholderPaintedFragmentIDs.remove(fragment.id)
+                    #if DEBUG
+                    assertLayerInvariants(sub)
+                    assertLayerInvariants(tail)
+                    #endif
+                    continue
+                }
+                codeTailSublayers.removeValue(forKey: identity)?.removeFromSuperlayer()
+                codeBodyContentByFragmentID.removeValue(forKey: fragment.id)
                 // Text has no async delivery path — set unconditionally so a cache miss can't
                 // retain a previous fragment's pixels after reclassification at the same id.
                 // INVARIANT: for text, `fragment.frame.size` MUST equal the bitmap's point size.
@@ -258,6 +312,8 @@ public final class RenderCell {
                 mediaFragmentIDs.remove(fragment.id)
                 placeholderPaintedFragmentIDs.remove(fragment.id)
             } else {
+                codeTailSublayers.removeValue(forKey: identity)?.removeFromSuperlayer()
+                codeBodyContentByFragmentID.removeValue(forKey: fragment.id)
                 sub.backgroundColor = nil
                 sub.contents = nil  // image→geometry reclassification must not leave stale image visible
                 mediaFragmentIDs.remove(fragment.id)
@@ -282,7 +338,8 @@ public final class RenderCell {
         // Reveal any already-paintable text immediately. The full-cell gradient must not cover
         // it while an unrelated image is still loading; that image keeps its own gray tint.
         let hasPaintedText = fragments.contains { fragment in
-            if case .text = fragment.content {
+            if case .text(let descriptor) = fragment.content {
+                if case .body = descriptor.codeBlockRole { return codeBodyContent[fragment.id] != nil }
                 return synchronousContent[fragment.id] != nil
             }
             return false
@@ -311,6 +368,18 @@ public final class RenderCell {
         viewportInCell: CGRect,
         synchronousContent: [Int: CGImage]
     ) -> [Fragment] {
+        updateBlockViewport(
+            fragments: fragments, viewportInCell: viewportInCell,
+            synchronousContent: synchronousContent, codeBodyContent: [:]
+        )
+    }
+
+    func updateBlockViewport(
+        fragments: [Fragment],
+        viewportInCell: CGRect,
+        synchronousContent: [Int: CGImage],
+        codeBodyContent: [Int: CodeBodyLayerContent]
+    ) -> [Fragment] {
         blockFragments = fragments
         blockFrames = []
         blockFragmentRanges = []
@@ -330,7 +399,9 @@ public final class RenderCell {
             }
         }
         activeBlockFragmentIDs.removeAll(keepingCapacity: true)
-        return updateBlockViewport(viewportInCell: viewportInCell, synchronousContent: synchronousContent)
+        return updateBlockViewport(
+            viewportInCell: viewportInCell, synchronousContent: synchronousContent, codeBodyContent: codeBodyContent
+        )
     }
 
     /// Updates residency from already-recorded layout metadata. This is the scroll-path entry
@@ -339,6 +410,16 @@ public final class RenderCell {
     public func updateBlockViewport(
         viewportInCell: CGRect,
         synchronousContent: [Int: CGImage]
+    ) -> [Fragment] {
+        updateBlockViewport(
+            viewportInCell: viewportInCell, synchronousContent: synchronousContent, codeBodyContent: [:]
+        )
+    }
+
+    func updateBlockViewport(
+        viewportInCell: CGRect,
+        synchronousContent: [Int: CGImage],
+        codeBodyContent: [Int: CodeBodyLayerContent]
     ) -> [Fragment] {
         guard !blockFragments.isEmpty else { return [] }
 
@@ -357,7 +438,7 @@ public final class RenderCell {
 
         // The active set can change without changing its count, so force the exact id diff.
         needsSublayerReconcile = true
-        applyLayout(active, synchronousContent: synchronousContent)
+        applyLayout(active, synchronousContent: synchronousContent, codeBodyContent: codeBodyContent)
         return active.filter { enteringIDs.contains($0.id) }
     }
 
@@ -412,22 +493,31 @@ public final class RenderCell {
 
     /// Applies a late-arriving recolored composite for a still-hot code block's body tile.
     /// Colorizing never changes a line's measured size (same font, same text, only color), so
-    /// only `contents` is touched -- `frame` is left exactly as the last synchronous `applyLayout`
-    /// set it. No crossfade: recoloring already-visible text doesn't need one.
+    /// Updates the sealed bitmap and positions the tail directly below it. No crossfade: recoloring
+    /// already-visible text doesn't need one.
     ///
     /// `itemID` must match `currentItemID`, mirroring `applyContent`'s cross-item privacy guard
     /// against a stale callback racing a recycle.
     @discardableResult
-    func applyCodeBodyTile(id: Int, image: CGImage, for itemID: AnyHashable) -> Bool {
+    func applyCodeBodyTile(id: Int, content: CodeBodyLayerContent, for itemID: AnyHashable) -> Bool {
         if let currentID = currentItemID, currentID != itemID {
             RenderCell._privacyGuardFiredCount += 1
             return false
         }
-        guard let sub = layer(for: id) else { return false }
+        guard let identity = layerIdentityByFragmentID[id], let sub = sublayers[identity],
+              let tail = codeTailSublayers[identity]
+        else { return false }
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        sub.contents = image
+        codeBodyContentByFragmentID[id] = content
+        sub.contents = content.sealedImage
+        sub.frame.size = content.sealedSize
+        tail.contents = content.tailImage
+        tail.frame = CGRect(
+            origin: CGPoint(x: sub.frame.minX, y: sub.frame.minY + content.sealedSize.height),
+            size: content.tailSize
+        )
         CATransaction.commit()
         return true
     }

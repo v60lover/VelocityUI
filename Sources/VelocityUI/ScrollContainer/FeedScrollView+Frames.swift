@@ -110,10 +110,11 @@ extension FeedScrollView {
             if let cell = visibleCells[index], _pendingFragmentIndices.remove(index) != nil {
                 cell.layer.frame = resolvedFrames[index]
                 let syncMap = buildSyncMap(for: entry.fragments, itemID: tables[index].itemID)
+                let codeMap = buildCodeBodyContentMap(for: entry.fragments, itemID: tables[index].itemID)
                 let entering = cell.updateBlockViewport(
                     fragments: entry.fragments,
                     viewportInCell: blockViewport(for: cell.layer.frame),
-                    synchronousContent: syncMap
+                    synchronousContent: syncMap, codeBodyContent: codeMap
                 )
                 spawnMediaFetches(for: cell, fragments: entering, itemID: tables[index].itemID,
                                   syncMap: syncMap)
