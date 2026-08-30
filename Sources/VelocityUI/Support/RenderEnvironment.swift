@@ -33,6 +33,11 @@ public final class RenderEnvironment: Sendable {
     /// class`, not `Sendable` — touched only from `FeedScrollView`'s synchronous MainActor scroll-path.
     public let hotBlockRasterizerStore: HotBlockRasterizerStore
 
+    /// Per-`BlockKey` lifecycle owner for streaming a hot code block's body into per-line raster
+    /// tiles. `@MainActor final class`, not `Sendable` -- same touched-only-from-the-scroll-path
+    /// contract as `hotBlockRasterizerStore`, which it replaces for `.body` code descriptors.
+    public let hotCodeStreamStore: HotCodeStreamStore
+
     /// Gates the trailing hot block between the O(appended) incremental path
     /// (`hotBlockRasterizerStore.append`) and the O(block) fallback (a full `rasterizeText` pass
     /// every append). `true` in every production call site — exists so BenchmarkHost can compare
@@ -66,6 +71,12 @@ public final class RenderEnvironment: Sendable {
     /// production.
     public let codeBodyRetokenizeObserver: (@Sendable () -> Void)?
 
+    /// Fires on each parse call, sealed-line tile rasterization, and partial-line rasterization
+    /// `HotCodeStreamStore` performs while streaming a hot code block's body -- production-safe
+    /// counters distinguishing the three, mirroring `codeBodyRetokenizeObserver`. `nil` in
+    /// production.
+    public let codeStreamObserver: (@Sendable (CodeStreamEventKind) -> Void)?
+
     /// Compiled-grammar LRU + active theme for syntax-highlighted code blocks.
     /// No shared-identity contract with another collaborator, so it defaults freely in both inits.
     public let highlightRegistry: HighlightRegistry
@@ -77,6 +88,13 @@ public final class RenderEnvironment: Sendable {
     /// Enforces two identity DI contracts at runtime: `imageActor.dimensionCache === dimensionCache`
     /// (separate instances break `classify()`'s hit contract) and
     /// `videoController.videoPreparation === videoPreparation` (must share one actor).
+    ///
+    /// `hotCodeStreamStore` is a required parameter with no default -- a deliberate, source-breaking
+    /// addition for any external caller of this designated init, matching the existing
+    /// `hotBlockRasterizerStore` convention: owned collaborators get no default here (see the
+    /// "default-arg footguns" rule) so `RenderEnvironment` stays the one place that wires them.
+    /// `HotCodeStreamStore()` has a default-arg convenience init of its own, so callers only need
+    /// to write `HotCodeStreamStore()` at the call site, not construct it by hand.
     public init(
         textPool: TextMeasurementPool,
         layoutCache: LayoutCache,
@@ -88,11 +106,13 @@ public final class RenderEnvironment: Sendable {
         frozenBitmapStore: FrozenBitmapStore,
         visibleBlockStore: VisibleBlockStore = .init(),
         hotBlockRasterizerStore: HotBlockRasterizerStore,
+        hotCodeStreamStore: HotCodeStreamStore,
         hotBlockRasterizeEnabled: Bool = true,
         placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer(),
         contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil,
         pipelineTaskSpawnObserver: (@Sendable () -> Void)? = nil,
         codeBodyRetokenizeObserver: (@Sendable () -> Void)? = nil,
+        codeStreamObserver: (@Sendable (CodeStreamEventKind) -> Void)? = nil,
         highlightRegistry: HighlightRegistry = .init()
     ) {
         precondition(
@@ -113,11 +133,13 @@ public final class RenderEnvironment: Sendable {
         self.frozenBitmapStore = frozenBitmapStore
         self.visibleBlockStore = visibleBlockStore
         self.hotBlockRasterizerStore = hotBlockRasterizerStore
+        self.hotCodeStreamStore = hotCodeStreamStore
         self.hotBlockRasterizeEnabled = hotBlockRasterizeEnabled
         self.placeholderRenderer = placeholderRenderer
         self.contentDeliveryObserver = contentDeliveryObserver
         self.pipelineTaskSpawnObserver = pipelineTaskSpawnObserver
         self.codeBodyRetokenizeObserver = codeBodyRetokenizeObserver
+        self.codeStreamObserver = codeStreamObserver
         self.highlightRegistry = highlightRegistry
     }
 
@@ -140,11 +162,13 @@ public final class RenderEnvironment: Sendable {
         frozenBitmapStore: FrozenBitmapStore = .init(),
         visibleBlockStore: VisibleBlockStore = .init(),
         hotBlockRasterizerStore: HotBlockRasterizerStore = .init(),
+        hotCodeStreamStore: HotCodeStreamStore = .init(),
         hotBlockRasterizeEnabled: Bool = true,
         placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer(),
         contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil,
         pipelineTaskSpawnObserver: (@Sendable () -> Void)? = nil,
         codeBodyRetokenizeObserver: (@Sendable () -> Void)? = nil,
+        codeStreamObserver: (@Sendable (CodeStreamEventKind) -> Void)? = nil,
         highlightRegistry: HighlightRegistry = .init()
     ) {
         let dc = DimensionCache(session: session)
@@ -160,11 +184,13 @@ public final class RenderEnvironment: Sendable {
             frozenBitmapStore: frozenBitmapStore,
             visibleBlockStore: visibleBlockStore,
             hotBlockRasterizerStore: hotBlockRasterizerStore,
+            hotCodeStreamStore: hotCodeStreamStore,
             hotBlockRasterizeEnabled: hotBlockRasterizeEnabled,
             placeholderRenderer: placeholderRenderer,
             contentDeliveryObserver: contentDeliveryObserver,
             pipelineTaskSpawnObserver: pipelineTaskSpawnObserver,
             codeBodyRetokenizeObserver: codeBodyRetokenizeObserver,
+            codeStreamObserver: codeStreamObserver,
             highlightRegistry: highlightRegistry
         )
     }

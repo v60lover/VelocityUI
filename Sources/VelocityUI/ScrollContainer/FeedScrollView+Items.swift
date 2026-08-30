@@ -334,7 +334,10 @@ extension FeedScrollView {
                   newTable: inputs.newTable,
                   itemID: items[nextIdx].id,
                   width: width,
-                  scale: scale
+                  scale: scale,
+                  codeStreamDelivery: { [weak cell] fragmentID, image in
+                      cell?.applyCodeBodyTile(id: fragmentID, image: image, for: inputs.newTable.itemID)
+                  }
               )
         else {
             return .kept(nextIdx: nextIdx, blockDiffResolved: false, workingRangeCommit: nil)
@@ -403,7 +406,8 @@ extension FeedScrollView {
         newTable: NodeTable,
         itemID: ID,
         width: CGFloat,
-        scale: CGFloat
+        scale: CGFloat,
+        codeStreamDelivery: @escaping (Int, CGImage) -> Void = { _, _ in }
     ) -> (height: CGFloat, fragments: [Fragment], textBitmaps: [Int: CGImage])? {
         guard let (previousBlocks, _) = flatBlocks(for: previousTable, itemID: itemID, width: width),
               let (newBlocks, spacing) = flatBlocks(for: newTable, itemID: itemID, width: width),
@@ -459,23 +463,66 @@ extension FeedScrollView {
             // from history) never touched HotBlockRasterizerStore above -- it needs the real
             // syntax-highlighted, non-wrapping raster, not the generic freeze() path below (which
             // would rasterize the plain, container-clipped TextDescriptor Flattener produced).
+            //
+            // `finalize` folds any still-open tail into a final sealed line and spawns at most one
+            // off-main parse for whatever isn't colorized yet -- it never runs tree-sitter or a
+            // whole-block rasterization inline, so a large block never hitches this scroll-adjacent
+            // seal path. The synchronous return may still contain plain (uncolored) tiles; the
+            // fully-colorized composite lands later via `onRecolor`, which persists it into
+            // `residentStore` under the same identity and pushes it to the live cell, then frees
+            // the per-line streaming state -- eviction only happens here immediately when no async
+            // colorization is pending.
             if case .body(let chrome) = descriptor.codeBlockRole {
-                let lines = descriptor.content.components(separatedBy: "\n")[...]
-                let theme = themeSnapshot.theme
-                let grammar = environment.highlightRegistry.grammar(for: LanguageID(fenceInfo: chrome.language))
-                let colorRuns = TreeSitterHighlighter().colorRuns(for: lines, grammar: grammar, theme: theme)
-                let result = rasterizeCodeBlockSync(
-                    lines: lines, colorRuns: colorRuns, font: descriptor.font, theme: theme, scale: scale,
-                    measure: { [self] d, w in measureTextSync(d, width: w) }
+                let bodyKey = codeBodyKey(for: block)
+                let fragmentID = block.fragment.id
+                let hotCodeStreamStore = environment.hotCodeStreamStore
+                let result = hotCodeStreamStore.finalize(
+                    block.key,
+                    rawCode: descriptor.content,
+                    font: descriptor.font,
+                    theme: themeSnapshot.theme,
+                    themeGeneration: themeSnapshot.generation,
+                    languageID: LanguageID(fenceInfo: chrome.language),
+                    highlightRegistry: environment.highlightRegistry,
+                    scale: scale,
+                    measure: { [self] d, w in measureTextSync(d, width: w) },
+                    eventObserver: environment.codeStreamObserver,
+                    onRecolor: { [residentStore] image, size in
+                        // `finalize`'s colorization can land across several bounded chunks (see
+                        // `HotCodeStreamStore.recolorChunkSize`) -- evicting or stamping the
+                        // stable `codeBodyIdentity` on anything but the LAST chunk would strand
+                        // the remaining lines uncolored (a later chunk's `deliverColorRuns` would
+                        // find its entry gone and silently drop) and let a still-partially-plain
+                        // bitmap be cached as if it were the identity's final, authoritative
+                        // raster. `isFullyColorized` is checked fresh on every delivery so only
+                        // the chunk that actually completes colorization treats itself as final.
+                        let isFinal = hotCodeStreamStore.isFullyColorized(block.key)
+                        residentStore.store(
+                            image, size: size, for: bodyKey,
+                            codeBodyIdentity: isFinal ? codeBodyIdentity : nil
+                        )
+                        codeStreamDelivery(fragmentID, image)
+                        if isFinal {
+                            hotCodeStreamStore.evict([block.key])
+                        }
+                    }
                 )
-                guard let bitmap = result.image else { return (result.size.height, nil) }
+                guard let bitmap = result.image else { return (result.height, nil) }
+                let size = CGSize(width: CGFloat(bitmap.width) / scale, height: result.height)
+                // Only stamp the stable `codeBodyIdentity` when this synchronous result is
+                // already fully colorized -- a plain/partially-colored bitmap stored under the
+                // same identity as the eventual colorized one would let a scroll-out demote (see
+                // `FeedScrollView+Scroll.swift`) freeze it into the cache as a permanently "valid"
+                // hit for that identity, even though colorization never finished (the async
+                // delivery is dropped once the entry is evicted underneath it).
                 residentStore.store(
-                    bitmap,
-                    size: result.size,
-                    for: codeBodyKey(for: block),
-                    codeBodyIdentity: codeBodyIdentity
+                    bitmap, size: size, for: bodyKey,
+                    codeBodyIdentity: result.needsAsyncColorization ? nil : codeBodyIdentity
                 )
-                return (result.size.height, bitmap)
+                if !result.needsAsyncColorization {
+                    hotCodeStreamStore.evict([block.key])
+                }
+                return (result.height, bitmap)
             }
             var localCache: [BlockKey: FreezeState] = [:]
             // `freeze(_:)` always measures before rasterizing, but on a rasterize failure
@@ -512,9 +559,33 @@ extension FeedScrollView {
         // Hot-append path for the trailing volatile block — O(appended) cost via
         // HotBlockRasterizerStore instead of O(block size) measure/rasterize. Never persists
         // into FrozenBitmapStore since the block is still growing; artifact stays resident.
+        // A code-block body streams instead through HotCodeStreamStore, whose per-line tiles and
+        // adaptive defer replace the generic growing-plain-bitmap artifact.
         func measureAndRasterizeHot(_ block: Block) -> (height: CGFloat, bitmap: CGImage?)? {
             guard case .text(let descriptor) = block.fragment.content else { return nil }
             _testHooks.blockDiffHotAppendCallCount += 1
+            if case .body(let chrome) = descriptor.codeBlockRole {
+                let fragmentID = block.fragment.id
+                let result = environment.hotCodeStreamStore.append(
+                    block.key,
+                    rawCode: descriptor.content,
+                    font: descriptor.font,
+                    theme: themeSnapshot.theme,
+                    themeGeneration: themeSnapshot.generation,
+                    languageID: LanguageID(fenceInfo: chrome.language),
+                    highlightRegistry: environment.highlightRegistry,
+                    scale: scale,
+                    measure: { [self] d, w in measureTextSync(d, width: w) },
+                    eventObserver: environment.codeStreamObserver,
+                    onRecolor: { image, _ in codeStreamDelivery(fragmentID, image) }
+                )
+                if let image = result.image {
+                    residentStore.store(
+                        image, size: CGSize(width: CGFloat(image.width) / scale, height: result.height), for: block.key
+                    )
+                }
+                return (result.height, result.image)
+            }
             let result = environment.hotBlockRasterizerStore.append(
                 descriptor, width: block.width, scale: scale, contentHash: block.contentHash, for: block.key
             )
@@ -675,6 +746,7 @@ extension FeedScrollView {
             store.evict(removed)
             residentStore.evict(removed)
             environment.hotBlockRasterizerStore.evict(removed)
+            environment.hotCodeStreamStore.evict(removed)
         }
 
         var cursor: CGFloat = 0
@@ -899,7 +971,10 @@ extension FeedScrollView {
             newTable: newTable,
             itemID: item.id,
             width: width,
-            scale: scale
+            scale: scale,
+            codeStreamDelivery: { [weak cell] fragmentID, image in
+                cell?.applyCodeBodyTile(id: fragmentID, image: image, for: newTable.itemID)
+            }
         ) else { return false }
 
         let delta = VerticalLayoutProvider.refineFrames(&resolvedFrames, at: lastIdx, newHeight: result.height)

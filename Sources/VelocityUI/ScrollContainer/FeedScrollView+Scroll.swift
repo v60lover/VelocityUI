@@ -57,6 +57,7 @@ extension FeedScrollView {
                 environment.visibleBlockStore.demote(leavingKeys, to: environment.frozenBitmapStore)
                 // A live hot rasterizer's NSTextLayoutManager must not leak when its cell recycles away.
                 environment.hotBlockRasterizerStore.evict(leavingKeys)
+                environment.hotCodeStreamStore.evict(leavingKeys)
             }
         }
         for index in _recycleBuffer {

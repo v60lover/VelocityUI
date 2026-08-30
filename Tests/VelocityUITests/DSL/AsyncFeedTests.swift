@@ -44,7 +44,8 @@ final class AsyncFeedTests: XCTestCase {
             videoController: VideoController(videoPreparation: videoPrep),
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(),
-            hotBlockRasterizerStore: HotBlockRasterizerStore()
+            hotBlockRasterizerStore: HotBlockRasterizerStore(),
+            hotCodeStreamStore: HotCodeStreamStore()
         )
     }
 

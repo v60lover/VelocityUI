@@ -410,6 +410,28 @@ public final class RenderCell {
         return transitionKind
     }
 
+    /// Applies a late-arriving recolored composite for a still-hot code block's body tile.
+    /// Colorizing never changes a line's measured size (same font, same text, only color), so
+    /// only `contents` is touched -- `frame` is left exactly as the last synchronous `applyLayout`
+    /// set it. No crossfade: recoloring already-visible text doesn't need one.
+    ///
+    /// `itemID` must match `currentItemID`, mirroring `applyContent`'s cross-item privacy guard
+    /// against a stale callback racing a recycle.
+    @discardableResult
+    func applyCodeBodyTile(id: Int, image: CGImage, for itemID: AnyHashable) -> Bool {
+        if let currentID = currentItemID, currentID != itemID {
+            RenderCell._privacyGuardFiredCount += 1
+            return false
+        }
+        guard let sub = layer(for: id) else { return false }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        sub.contents = image
+        CATransaction.commit()
+        return true
+    }
+
     // MARK: - Media Handles
 
     /// Register a Task token for a pending image fetch. The Task's body must capture this cell

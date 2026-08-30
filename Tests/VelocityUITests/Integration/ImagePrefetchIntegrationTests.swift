@@ -91,7 +91,8 @@ final class ImagePrefetchIntegrationTests: XCTestCase {
             videoController: VideoController(videoPreparation: videoPrep),
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(),
-            hotBlockRasterizerStore: HotBlockRasterizerStore()
+            hotBlockRasterizerStore: HotBlockRasterizerStore(),
+            hotCodeStreamStore: HotCodeStreamStore()
         )
     }
 

@@ -125,6 +125,7 @@ extension HighlightRegistryTests {
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(),
             hotBlockRasterizerStore: HotBlockRasterizerStore(),
+            hotCodeStreamStore: HotCodeStreamStore(),
             highlightRegistry: highlightRegistry
         )
     }

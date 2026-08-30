@@ -8,6 +8,8 @@
 .claude
 .gitnexus
 .build
+.vscode/
+.sourcekit-lsp/
 CLAUDE.md
 FEATURE_MATRIX.md
 ARCHITECTURE-RULES.md

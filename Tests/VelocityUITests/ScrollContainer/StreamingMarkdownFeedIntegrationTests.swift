@@ -37,6 +37,7 @@ final class StreamingMarkdownFeedIntegrationTests: XCTestCase {
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(),
             hotBlockRasterizerStore: HotBlockRasterizerStore(),
+            hotCodeStreamStore: HotCodeStreamStore(),
             hotBlockRasterizeEnabled: hotBlockRasterizeEnabled
         )
     }

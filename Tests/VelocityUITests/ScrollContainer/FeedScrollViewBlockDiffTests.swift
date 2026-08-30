@@ -35,7 +35,8 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
             videoController: VideoController(videoPreparation: videoPrep),
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(),
-            hotBlockRasterizerStore: HotBlockRasterizerStore()
+            hotBlockRasterizerStore: HotBlockRasterizerStore(),
+            hotCodeStreamStore: HotCodeStreamStore()
         )
     }
 
@@ -814,8 +815,12 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
 
         XCTAssertEqual(feed._workingRangeMissCount(from: 0, to: 1), 0,
             "body-only edit must patch the existing WorkingRange entry")
-        XCTAssertEqual(feed._blockDiffMeasureCallCount - measureBefore, 1,
-            "only the changed code body may be measured")
+        // HotCodeStreamStore.finalize tiles the body per-line, not as one whole-block descriptor --
+        // this body was never hot in this session, so its first finalize() measures both of its own
+        // sealed lines from scratch (2), not the whole-body-in-one-descriptor count (1) the older
+        // single-raster model produced. The header/chrome stay untouched either way (0 measures).
+        XCTAssertEqual(feed._blockDiffMeasureCallCount - measureBefore, 2,
+            "only the changed code body's own lines may be measured")
 
         let afterFragments = feed._debugFragments(at: 0)
         guard let reusedHeader = feed.renderEnvironment.visibleBlockStore.bitmap(for: headerKey)
@@ -1010,7 +1015,8 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
             videoController: VideoController(videoPreparation: videoPrep),
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(byteBudget: 1),
-            hotBlockRasterizerStore: HotBlockRasterizerStore()
+            hotBlockRasterizerStore: HotBlockRasterizerStore(),
+            hotCodeStreamStore: HotCodeStreamStore()
         )
         let feed = makeChatFeed(environment: env)
 
