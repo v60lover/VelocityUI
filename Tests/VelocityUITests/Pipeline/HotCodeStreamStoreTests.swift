@@ -20,6 +20,15 @@ final class HotCodeStreamStoreTests: XCTestCase {
         TextMeasurementContext().measure(d, width: width)
     }
 
+    /// Flattens a chunked delivery into one image for assertions that predate chunking (byte
+    /// comparisons, y-band crops across the whole sealed height) -- same helper production uses to
+    /// persist one bitmap into the cold cache once a block leaves the hot streaming path.
+    private func composedSealed(_ content: CodeBodyLayerContent, scale: CGFloat) -> CGImage? {
+        HotCodeStreamStore.composeFullImage(
+            CodeBodyLayerContent(chunks: content.chunks, tailImage: nil, tailSize: .zero), scale: scale
+        )?.image
+    }
+
     private func pixelBytes(of image: CGImage) -> Data? {
         let w = image.width, h = image.height
         guard w > 0, h > 0,
@@ -142,12 +151,12 @@ final class HotCodeStreamStoreTests: XCTestCase {
             key, rawCode: "let keyword = 1\n", font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 2,
             measure: measure, eventObserver: nil,
-            onRecolor: { content in
-                recoloredImage = content.sealedImage
+            onRecolor: { [self] content in
+                recoloredImage = composedSealed(content, scale: 2)
                 exp.fulfill()
             }
         )
-        guard let plainImage = plain.content.sealedImage else { return XCTFail("expected a plain sealed image") }
+        guard let plainImage = composedSealed(plain.content, scale: 2) else { return XCTFail("expected a plain sealed image") }
 
         wait(for: [exp], timeout: 5)
 
@@ -179,7 +188,7 @@ final class HotCodeStreamStoreTests: XCTestCase {
             languageID: .swift, highlightRegistry: registry, scale: 2,
             measure: measure, eventObserver: nil, onRecolor: { _ in }
         )
-        guard let imageA = afterRecolor.content.sealedImage else { return XCTFail("expected a sealed image") }
+        guard let imageA = composedSealed(afterRecolor.content, scale: 2) else { return XCTFail("expected a sealed image") }
         let lineHeightPixels = Int((font.uiFont.lineHeight * 2).rounded())
         guard let firstLineBandA = imageA.cropping(to: CGRect(x: 0, y: 0, width: imageA.width, height: min(lineHeightPixels, imageA.height))) else {
             return XCTFail("expected a croppable first-line band")
@@ -191,7 +200,7 @@ final class HotCodeStreamStoreTests: XCTestCase {
             languageID: .swift, highlightRegistry: registry, scale: 2,
             measure: measure, eventObserver: nil, onRecolor: { _ in }
         )
-        guard let imageB = later.content.sealedImage,
+        guard let imageB = composedSealed(later.content, scale: 2),
               let firstLineBandB = imageB.cropping(to: CGRect(x: 0, y: 0, width: imageA.width, height: min(lineHeightPixels, imageB.height)))
         else { return XCTFail("expected a croppable first-line band after later appends") }
 
@@ -303,8 +312,8 @@ final class HotCodeStreamStoreTests: XCTestCase {
             key, rawCode: "second\n", font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 1,
             measure: measure, eventObserver: nil,
-            onRecolor: { content in
-                recoloredAfterRemount = content.sealedImage
+            onRecolor: { [self] content in
+                recoloredAfterRemount = composedSealed(content, scale: 1)
                 exp.fulfill()
             }
         )
@@ -363,13 +372,13 @@ final class HotCodeStreamStoreTests: XCTestCase {
             key, rawCode: rawCode, font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 1,
             measure: measure, eventObserver: { counter.observe($0) },
-            onRecolor: { content in
-                finalImage = content.sealedImage
+            onRecolor: { [self] content in
+                finalImage = composedSealed(content, scale: 1)
                 exp.fulfill()
             }
         )
         XCTAssertTrue(result.needsAsyncColorization, "the deferred lines were never colorized -- finalize must still colorize them")
-        guard let plainImage = result.content.sealedImage else { return XCTFail("finalize must return sealed pixels synchronously without blocking on the parse") }
+        guard let plainImage = composedSealed(result.content, scale: 1) else { return XCTFail("finalize must return sealed pixels synchronously without blocking on the parse") }
 
         wait(for: [exp], timeout: 5)
         XCTAssertEqual(counter.parseCalls, 3, "closing the fence spawns exactly one final parse regardless of defer")
@@ -487,15 +496,15 @@ final class HotCodeStreamStoreTests: XCTestCase {
             key, rawCode: rawCode, font: font, theme: theme, themeGeneration: 0,
             languageID: .swift, highlightRegistry: registry, scale: 1,
             measure: measure, eventObserver: nil,
-            onRecolor: { content in
-                lastImage = content.sealedImage
+            onRecolor: { [self] content in
+                lastImage = composedSealed(content, scale: 1)
                 if store.isFullyColorized(key) {
                     store.evict([key])
                     exp.fulfill()
                 }
             }
         )
-        guard let plainImage = result.content.sealedImage else { return XCTFail("expected plain synchronous sealed pixels") }
+        guard let plainImage = composedSealed(result.content, scale: 1) else { return XCTFail("expected plain synchronous sealed pixels") }
         wait(for: [exp], timeout: 5)
         guard let finalImage = lastImage else { return XCTFail("expected a final colorized delivery") }
 
@@ -516,6 +525,86 @@ final class HotCodeStreamStoreTests: XCTestCase {
         XCTAssertNotEqual(
             pixelBytes(of: plainBand), pixelBytes(of: coloredBand),
             "line 89 (past the first 40-line chunk) must be colorized once colorization completes -- this is exactly what the unconditional-evict-on-first-callback bug never delivered"
+        )
+    }
+
+    // MARK: - Performance: per-seal cost and per-chunk allocation stay flat as the block grows
+
+    /// A monolithic O(sealed height) recomposite (the bug this chunking model replaces) would make
+    /// each `append` call that seals a new line cost proportional to how many lines have already
+    /// sealed -- late-stream seals in a long block would take many times longer than early ones, and
+    /// the single sealed bitmap would grow without bound. Chunking bounds both: every seal only
+    /// recomposites at most `chunkLineBudget` lines (the still-growing hot chunk, plus at most one
+    /// newly-frozen chunk), and every frozen chunk's own pixel buffer stays the same fixed size
+    /// regardless of total block length.
+    ///
+    /// Streams `adaptiveDeferLineThreshold: 0` so only the very first line seal spawns an off-main
+    /// parse (every later seal is deferred) -- this isolates the synchronous append/recomposite cost
+    /// this test measures from unrelated Task-spawn overhead.
+    func testStreaming_PerSealCostAndChunkAllocationStayFlatAsBlockGrows() {
+        let store = HotCodeStreamStore(adaptiveDeferLineThreshold: 0)
+        let key = BlockKey(itemID: "msg", index: 0)
+        let scale: CGFloat = 1
+        // +5 past an exact chunk multiple so the final chunk is a genuine still-growing hot chunk,
+        // not another full frozen one -- keeps `dropLast()` below unambiguous.
+        let totalLines = 32 * HotCodeStreamStore.chunkLineBudget + 5
+
+        var rawCode = ""
+        var perLineNanoseconds: [UInt64] = []
+        perLineNanoseconds.reserveCapacity(totalLines)
+        var lastContent: CodeBodyLayerContent?
+
+        for lineNumber in 0..<totalLines {
+            rawCode += "let v\(lineNumber) = \(lineNumber)\n"
+            let start = DispatchTime.now().uptimeNanoseconds
+            let result = store.append(
+                key, rawCode: rawCode, font: font, theme: theme, themeGeneration: 0,
+                languageID: .swift, highlightRegistry: registry, scale: scale,
+                measure: measure, eventObserver: nil, onRecolor: { _ in }
+            )
+            let end = DispatchTime.now().uptimeNanoseconds
+            perLineNanoseconds.append(end - start)
+            lastContent = result.content
+        }
+
+        guard let content = lastContent else { return XCTFail("expected a final delivery") }
+        let frozenChunks = content.chunks.dropLast() // last chunk is still the growing hot chunk
+        XCTAssertGreaterThanOrEqual(frozenChunks.count, 30, "512 lines at a 16-line budget must freeze at least 30 chunks")
+
+        // Bounded allocation: every frozen chunk's own composite is the same fixed size (bounded by
+        // chunkLineBudget lines), never growing with how many lines came before it.
+        guard let firstChunkHeight = frozenChunks.first?.size.height, firstChunkHeight > 0 else {
+            return XCTFail("expected a non-empty first frozen chunk")
+        }
+        for chunk in frozenChunks {
+            XCTAssertEqual(
+                chunk.size.height, firstChunkHeight, accuracy: 0.5,
+                "every frozen chunk must be the same bounded size regardless of how many lines sealed before it -- a growing chunk height would mean the O(sealed height) recomposite this bead removes is still happening"
+            )
+        }
+
+        // Flat per-seal cost: median cost of an early window of seals vs. a late window, after a
+        // warmup window to let allocator/caches settle. A monolithic recomposite would make the late
+        // window many times slower (proportional to sealedHeight, ~16x more sealed lines by the late
+        // window here); the chunked model keeps both windows close, within noise.
+        func median(_ values: [UInt64]) -> Double {
+            let sorted = values.sorted()
+            let mid = sorted.count / 2
+            return sorted.count % 2 == 0
+                ? Double(sorted[mid - 1] + sorted[mid]) / 2
+                : Double(sorted[mid])
+        }
+        let warmupLines = 4 * HotCodeStreamStore.chunkLineBudget
+        let windowSize = 4 * HotCodeStreamStore.chunkLineBudget
+        let earlyWindow = Array(perLineNanoseconds[warmupLines..<(warmupLines + windowSize)])
+        let lateWindow = Array(perLineNanoseconds[(totalLines - windowSize)...])
+        let earlyMedian = median(earlyWindow)
+        let lateMedian = median(lateWindow)
+
+        XCTAssertLessThan(
+            lateMedian, earlyMedian * 5,
+            "median per-seal MainActor time late in a 512-line stream (\(lateMedian)ns) must stay within a small "
+            + "constant factor of the early-stream median (\(earlyMedian)ns), not scale with total sealed lines"
         )
     }
 }

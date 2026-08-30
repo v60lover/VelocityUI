@@ -52,7 +52,7 @@ extension FeedScrollView {
             guard let image = environment.visibleBlockStore.bitmap(for: key) else { continue }
             let size = environment.visibleBlockStore.size(for: key) ?? fragment.frame.size
             map[fragment.id] = CodeBodyLayerContent(
-                sealedImage: image, sealedSize: size, tailImage: nil, tailSize: .zero
+                chunks: [CodeBodyChunk(image: image, size: size)], tailImage: nil, tailSize: .zero
             )
         }
         return map

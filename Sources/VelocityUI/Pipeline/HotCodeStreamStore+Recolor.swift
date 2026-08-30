@@ -87,17 +87,12 @@ extension HotCodeStreamStore {
         }
         state.coloredLineCount = chunkEnd
 
-        state.sealedComposite = Self.recomposite(
-            from: start, to: chunkEnd, tiles: state.tiles, tileHeights: state.tileHeights, sealedHeight: state.sealedHeight,
-            previousComposite: state.sealedComposite,
-            tailImage: nil, tailHeight: 0,
-            maxWidth: state.maxWidth, scale: scale
-        )
+        Self.recompositeChunks(in: start..<chunkEnd, state: state, scale: scale)
         onRecolor(CodeBodyLayerContent(
-            sealedImage: state.sealedComposite,
-            sealedSize: CGSize(width: state.maxWidth, height: state.sealedHeight),
+            chunks: state.allChunks,
             tailImage: state.lastTailImage,
-            tailSize: CGSize(width: state.maxWidth, height: state.lastTailHeight)
+            tailSize: CGSize(width: state.maxWidth, height: state.lastTailHeight),
+            sealedSize: CGSize(width: state.maxWidth, height: state.sealedHeight)
         ))
 
         if chunkEnd < upper {

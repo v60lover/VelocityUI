@@ -499,11 +499,12 @@ extension FeedScrollView {
                         // raster. `isFullyColorized` is checked fresh on every delivery so only
                         // the chunk that actually completes colorization treats itself as final.
                         let isFinal = hotCodeStreamStore.isFullyColorized(bodyKey)
-                        if let image = content.sealedImage {
-                            residentStore.store(
-                                image, size: content.sealedSize, for: bodyKey,
-                                codeBodyIdentity: isFinal ? codeBodyIdentity : nil
-                            )
+                        // Only flatten+persist on the delivery that actually finishes colorization.
+                        // `composeFullImage` is O(sealed height) -- fine once per block, but calling
+                        // it on every intermediate chunked delivery would reintroduce exactly the
+                        // O(sealedHeight)-per-turn cost this bead removes from the recolor path.
+                        if isFinal, let composed = HotCodeStreamStore.composeFullImage(content, scale: scale) {
+                            residentStore.store(composed.image, size: composed.size, for: bodyKey, codeBodyIdentity: codeBodyIdentity)
                         }
                         codeStreamDelivery(fragmentID, content)
                         if isFinal {
@@ -512,8 +513,11 @@ extension FeedScrollView {
                     }
                 )
                 codeBodyContents[fragmentID] = result.content
-                guard let bitmap = result.content.sealedImage else { return (result.height, nil) }
-                let size = result.content.sealedSize
+                // Runs once per `finalize()` call (fence close), not per line -- an O(sealed
+                // height) one-shot flatten here is fine, unlike on the hot append path.
+                guard let composed = HotCodeStreamStore.composeFullImage(result.content, scale: scale) else {
+                    return (result.height, nil)
+                }
                 // Only stamp the stable `codeBodyIdentity` when this synchronous result is
                 // already fully colorized -- a plain/partially-colored bitmap stored under the
                 // same identity as the eventual colorized one would let a scroll-out demote (see
@@ -521,13 +525,13 @@ extension FeedScrollView {
                 // hit for that identity, even though colorization never finished (the async
                 // delivery is dropped once the entry is evicted underneath it).
                 residentStore.store(
-                    bitmap, size: size, for: bodyKey,
+                    composed.image, size: composed.size, for: bodyKey,
                     codeBodyIdentity: result.needsAsyncColorization ? nil : codeBodyIdentity
                 )
                 if !result.needsAsyncColorization {
                     hotCodeStreamStore.evict([bodyKey])
                 }
-                return (result.height, bitmap)
+                return (result.height, composed.image)
             }
             var localCache: [BlockKey: FreezeState] = [:]
             // `freeze(_:)` always measures before rasterizing, but on a rasterize failure
@@ -585,7 +589,9 @@ extension FeedScrollView {
                     onRecolor: { content in codeStreamDelivery(fragmentID, content) }
                 )
                 codeBodyContents[fragmentID] = result.content
-                return (result.height, result.content.image)
+                // No single bitmap to hand back (chunk list) -- `recordTextResult` reads
+                // `codeBodyContents` directly for this fragment's frame width instead.
+                return (result.height, nil)
             }
             let result = environment.hotBlockRasterizerStore.append(
                 descriptor, width: block.width, scale: scale, contentHash: block.contentHash, for: block.key
@@ -621,7 +627,16 @@ extension FeedScrollView {
             // "heading in a stretched font" bug. Full-width bitmaps (wrapped prose, hot blocks
             // rasterised at block.width) already match this, so it's a no-op for them. Mirrors the
             // initial-layout path, which already frames text to its measured width.
-            let frameWidth = result.bitmap.map { CGFloat($0.width) / scale } ?? width
+            //
+            // A code body has no single bitmap (its sealed portion is a chunk list) -- its width
+            // comes straight from the already-computed chunk content instead.
+            let frameWidth: CGFloat
+            if case .text(let descriptor) = block.fragment.content, case .body = descriptor.codeBlockRole,
+               let content = codeBodyContents[block.fragment.id] {
+                frameWidth = content.totalSize.width
+            } else {
+                frameWidth = result.bitmap.map { CGFloat($0.width) / scale } ?? width
+            }
             localFragmentFrames[index] = CGRect(x: 0, y: 0, width: frameWidth, height: result.height)
             textBitmaps[block.fragment.id] = result.bitmap
         }

@@ -1047,7 +1047,7 @@ final class RenderCellTests: XCTestCase {
         let sealed = makeCGImage(width: 120, height: 20)
         let tail = makeCGImage(width: 80, height: 20)
         let content = CodeBodyLayerContent(
-            sealedImage: sealed, sealedSize: CGSize(width: 120, height: 20),
+            chunks: [CodeBodyChunk(image: sealed, size: CGSize(width: 120, height: 20))],
             tailImage: tail, tailSize: CGSize(width: 80, height: 20)
         )
 
@@ -1056,11 +1056,12 @@ final class RenderCellTests: XCTestCase {
         guard let layers = contentLayer(of: cell)?.sublayers else {
             return XCTFail("Expected code-body layers")
         }
-        XCTAssertEqual(layers.count, 2)
-        XCTAssertTrue((layers[0].contents as! CGImage) === sealed)
-        XCTAssertTrue((layers[1].contents as! CGImage) === tail)
-        XCTAssertEqual(layers[0].frame, CGRect(x: 4, y: 20, width: 120, height: 20))
-        XCTAssertEqual(layers[1].frame, CGRect(x: 4, y: 40, width: 80, height: 20))
+        let painted = layers.filter { $0.contents != nil }
+        XCTAssertEqual(painted.count, 2, "one chunk layer + one tail layer")
+        XCTAssertTrue((painted[0].contents as! CGImage) === sealed)
+        XCTAssertTrue((painted[1].contents as! CGImage) === tail)
+        XCTAssertEqual(painted[0].frame, CGRect(x: 4, y: 20, width: 120, height: 20))
+        XCTAssertEqual(painted[1].frame, CGRect(x: 4, y: 40, width: 80, height: 20))
     }
 
     func testCodeBodyTailSurvivesViewportExitAndReentry() {
@@ -1077,12 +1078,8 @@ final class RenderCellTests: XCTestCase {
         for sealed in [makeCGImage(width: 120, height: 20), nil] {
             let cell = makeCell()
             let tail = makeCGImage(width: 80, height: 20)
-            let content = CodeBodyLayerContent(
-                sealedImage: sealed,
-                sealedSize: sealed == nil ? .zero : CGSize(width: 120, height: 20),
-                tailImage: tail,
-                tailSize: CGSize(width: 80, height: 20)
-            )
+            let chunks = sealed.map { [CodeBodyChunk(image: $0, size: CGSize(width: 120, height: 20))] } ?? []
+            let content = CodeBodyLayerContent(chunks: chunks, tailImage: tail, tailSize: CGSize(width: 80, height: 20))
 
             _ = cell.updateBlockViewport(
                 fragments: [fragment],
@@ -1104,9 +1101,10 @@ final class RenderCellTests: XCTestCase {
             guard let layers = contentLayer(of: cell)?.sublayers else {
                 return XCTFail("Expected re-entered code-body layers")
             }
-            XCTAssertEqual(layers.count, 2)
-            XCTAssertTrue((layers[1].contents as! CGImage) === tail)
-            XCTAssertEqual(layers[1].frame.origin.y, 20 + (sealed == nil ? 0 : 20))
+            guard let tailLayer = layers.first(where: { $0.contents != nil && ($0.contents as! CGImage) === tail }) else {
+                return XCTFail("expected the tail layer to survive re-entry")
+            }
+            XCTAssertEqual(tailLayer.frame.origin.y, 20 + (sealed == nil ? 0 : 20))
         }
     }
 }

@@ -326,5 +326,41 @@ final class StreamingMarkdownFeedIntegrationTests: XCTestCase {
 
         await drainFeedWork(feed)
     }
+
+    // MARK: - Hot code body width before any line has sealed
+
+    /// Regression test: a code fence whose first line hasn't sealed yet (no trailing `\n`) has
+    /// zero sealed lines -- only the tail carries the wide unterminated line. The code body's
+    /// on-screen frame width must reflect that wide tail, not collapse to 0/narrow, or a long
+    /// in-progress first line gets clamped to a near-zero-width fragment until its first newline.
+    func testHotCodeFenceBody_BeforeFirstLineSeal_FrameWidthReflectsWideUnsealedTail() async {
+        let feed = makeStreamingFeed()
+        var parser = IncrementalMarkdownParser()
+        parser.append("Here is code:\n```swift\n")
+        feed.items = [StreamingMessage(id: 0, markdownParser: parser)]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+
+        // One very long line, no trailing newline -- zero sealed lines, only a wide tail.
+        let longLine = "let \(String(repeating: "x", count: 200)) = 1"
+        parser.append(longLine)
+        feed.items = [StreamingMessage(id: 0, markdownParser: parser)]
+        feed.layoutSubviews()
+
+        guard let bodyFragment = feed._debugFragments(at: 0).first(where: {
+            if case .text(let descriptor) = $0.content, case .body = descriptor.codeBlockRole { return true }
+            return false
+        }) else {
+            return XCTFail("expected a code body fragment while the fence is still open")
+        }
+
+        XCTAssertGreaterThan(
+            bodyFragment.frame.width, 375,
+            "an unterminated wide first line (zero sealed lines yet) must not collapse the code "
+            + "body frame width -- it must reflect the tail's real width instead"
+        )
+
+        await drainFeedWork(feed)
+    }
 }
 #endif

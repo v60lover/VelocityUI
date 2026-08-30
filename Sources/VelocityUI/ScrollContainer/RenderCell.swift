@@ -54,6 +54,10 @@ public final class RenderCell {
     /// the legacy node-index identity.
     var sublayers: [LayerIdentity: CALayer] = [:]
     private var codeTailSublayers: [LayerIdentity: CALayer] = [:]
+    /// One stacked CALayer per frozen/hot chunk in a code body's current `CodeBodyLayerContent` --
+    /// see `RenderCell+CodeChunks.swift`. Mounted whenever any part of the code card is resident
+    /// (no sub-block viewport residency yet).
+    var codeChunkSublayers: [LayerIdentity: [CALayer]] = [:]
     private var codeBodyContentByFragmentID: [Int: CodeBodyLayerContent] = [:]
     var layerIdentityByFragmentID: [Int: LayerIdentity] = [:]
     private var codeBackgroundByIdentity: [LayerIdentity: CodeBlockBackgroundDescriptor] = [:]
@@ -137,6 +141,7 @@ public final class RenderCell {
                 sub.backgroundColor = nil
             }
             for sub in codeTailSublayers.values { sub.contents = nil }
+            for layers in codeChunkSublayers.values { layers.forEach { $0.contents = nil } }
             mediaFragmentIDs.removeAll(keepingCapacity: true)
             placeholderPaintedFragmentIDs.removeAll(keepingCapacity: true)
             blockFragments.removeAll(keepingCapacity: true)
@@ -195,6 +200,7 @@ public final class RenderCell {
                 sublayers[identity]?.removeFromSuperlayer()
                 sublayers.removeValue(forKey: identity)
                 codeTailSublayers.removeValue(forKey: identity)?.removeFromSuperlayer()
+                codeChunkSublayers.removeValue(forKey: identity)?.forEach { $0.removeFromSuperlayer() }
                 codeBackgroundByIdentity.removeValue(forKey: identity)
                 let removedIDs = layerIdentityByFragmentID.keys.filter { layerIdentityByFragmentID[$0] == identity }
                 for id in removedIDs {
@@ -231,6 +237,7 @@ public final class RenderCell {
             // mediaFragmentIDs never becomes stale relative to the current fragment set.
             if case .image(let descriptor) = fragment.content {
                 codeTailSublayers.removeValue(forKey: identity)?.removeFromSuperlayer()
+                codeChunkSublayers.removeValue(forKey: identity)?.forEach { $0.removeFromSuperlayer() }
                 codeBodyContentByFragmentID.removeValue(forKey: fragment.id)
                 if let image = synchronousContent[fragment.id] {
                     // Sync paint: image is already decoded — set contents inline.
@@ -253,6 +260,7 @@ public final class RenderCell {
                 mediaFragmentIDs.insert(fragment.id)
             } else if case .codeBlockBackground(let descriptor) = fragment.content {
                 codeTailSublayers.removeValue(forKey: identity)?.removeFromSuperlayer()
+                codeChunkSublayers.removeValue(forKey: identity)?.forEach { $0.removeFromSuperlayer() }
                 codeBodyContentByFragmentID.removeValue(forKey: fragment.id)
                 if codeBackgroundByIdentity[identity] != descriptor || sub.contents == nil {
                     sub.contents = rasterizeCodeBlockBackground(cornerRadius: descriptor.cornerRadius, color: descriptor.color)
@@ -264,6 +272,16 @@ public final class RenderCell {
                 placeholderPaintedFragmentIDs.remove(fragment.id)
             } else if case .text(let descriptor) = fragment.content {
                 if case .body = descriptor.codeBlockRole {
+                    if let incoming = codeBodyContent[fragment.id] {
+                        codeBodyContentByFragmentID[fragment.id] = incoming
+                    }
+                    let delivery = codeBodyContentByFragmentID[fragment.id]
+                    let chunks = delivery?.chunks ?? []
+                    // Reconcile the chunk layers before creating the tail layer so a fresh mount's
+                    // sublayer insertion order stacks chunk(s) then tail -- matches the visual
+                    // top-to-bottom order and keeps layer position stable for anyone inspecting
+                    // `contentLayer.sublayers`.
+                    reconcileChunkLayers(identity: identity, chunks: chunks, origin: fragment.frame.origin)
                     let tail: CALayer
                     if let existing = codeTailSublayers[identity] {
                         tail = existing
@@ -275,19 +293,19 @@ public final class RenderCell {
                         codeTailSublayers[identity] = layer
                         tail = layer
                     }
-                    if let incoming = codeBodyContent[fragment.id] {
-                        codeBodyContentByFragmentID[fragment.id] = incoming
-                    }
-                    let delivery = codeBodyContentByFragmentID[fragment.id]
-                    sub.contents = delivery?.sealedImage
-                    sub.frame = CGRect(origin: fragment.frame.origin, size: delivery?.sealedSize ?? .zero)
+                    let sealedHeight = delivery?.sealedSize.height ?? 0
                     tail.contents = delivery?.tailImage
                     tail.frame = CGRect(
                         x: fragment.frame.minX,
-                        y: fragment.frame.minY + (delivery?.sealedSize.height ?? 0),
+                        y: fragment.frame.minY + sealedHeight,
                         width: delivery?.tailSize.width ?? 0,
                         height: delivery?.tailSize.height ?? 0
                     )
+                    // `sub` is not painted for a code body -- the chunk layers carry the pixels --
+                    // but it stays in `sublayers` so the generic prune/reconcile bookkeeping every
+                    // fragment goes through keeps working unmodified.
+                    sub.contents = nil
+                    sub.frame = CGRect(origin: fragment.frame.origin, size: .zero)
                     sub.backgroundColor = nil
                     tail.backgroundColor = nil
                     mediaFragmentIDs.remove(fragment.id)
@@ -295,10 +313,12 @@ public final class RenderCell {
                     #if DEBUG
                     assertLayerInvariants(sub)
                     assertLayerInvariants(tail)
+                    for chunkLayer in codeChunkSublayers[identity] ?? [] { assertLayerInvariants(chunkLayer) }
                     #endif
                     continue
                 }
                 codeTailSublayers.removeValue(forKey: identity)?.removeFromSuperlayer()
+                codeChunkSublayers.removeValue(forKey: identity)?.forEach { $0.removeFromSuperlayer() }
                 codeBodyContentByFragmentID.removeValue(forKey: fragment.id)
                 // Text has no async delivery path — set unconditionally so a cache miss can't
                 // retain a previous fragment's pixels after reclassification at the same id.
@@ -313,6 +333,7 @@ public final class RenderCell {
                 placeholderPaintedFragmentIDs.remove(fragment.id)
             } else {
                 codeTailSublayers.removeValue(forKey: identity)?.removeFromSuperlayer()
+                codeChunkSublayers.removeValue(forKey: identity)?.forEach { $0.removeFromSuperlayer() }
                 codeBodyContentByFragmentID.removeValue(forKey: fragment.id)
                 sub.backgroundColor = nil
                 sub.contents = nil  // image→geometry reclassification must not leave stale image visible
@@ -511,11 +532,11 @@ public final class RenderCell {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         codeBodyContentByFragmentID[id] = content
-        sub.contents = content.sealedImage
-        sub.frame.size = content.sealedSize
+        let origin = sub.frame.origin
+        reconcileChunkLayers(identity: identity, chunks: content.chunks, origin: origin)
         tail.contents = content.tailImage
         tail.frame = CGRect(
-            origin: CGPoint(x: sub.frame.minX, y: sub.frame.minY + content.sealedSize.height),
+            origin: CGPoint(x: origin.x, y: origin.y + content.sealedSize.height),
             size: content.tailSize
         )
         CATransaction.commit()

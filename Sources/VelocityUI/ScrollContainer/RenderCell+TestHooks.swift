@@ -25,18 +25,28 @@ extension RenderCell {
     /// arrived before a pending image. Tests must not infer this from async-delivery counters.
     var _debugIsContentRevealed: Bool { contentLayer.opacity == 1 }
 
-    /// Every fragment id currently painting a `CGImage`, mapped to that exact instance.
-    /// Test-only — lets tests assert pixel identity, not just frame height.
+    /// Every fragment id currently painting a `CGImage`, mapped to that exact instance. For a code
+    /// body (whose pixels live in `codeChunkSublayers`, not `sublayers`), reports the widest
+    /// mounted chunk, since a chunked body has no single bitmap. Test-only — lets tests assert
+    /// pixel identity, not just frame height.
     var _debugPaintedBitmaps: [Int: CGImage] {
-        var result: [Int: CGImage] = [:]
-        for (id, identity) in layerIdentityByFragmentID {
-            guard let layer = sublayers[identity] else { continue }
+        func cgImage(from layer: CALayer) -> CGImage? {
             // `contents as? CGImage` always succeeds for any CF-bridged Any — CFGetTypeID is the
             // correct way to check a CF type identity before the cast.
-            guard let contents = layer.contents else { continue }
+            guard let contents = layer.contents else { return nil }
             let cf = contents as CFTypeRef
-            guard CFGetTypeID(cf) == CGImage.typeID else { continue }
-            result[id] = (cf as! CGImage)
+            guard CFGetTypeID(cf) == CGImage.typeID else { return nil }
+            return (cf as! CGImage)
+        }
+        var result: [Int: CGImage] = [:]
+        for (id, identity) in layerIdentityByFragmentID {
+            if let layer = sublayers[identity], let image = cgImage(from: layer) {
+                result[id] = image
+                continue
+            }
+            if let widest = (codeChunkSublayers[identity] ?? []).compactMap(cgImage).max(by: { $0.width < $1.width }) {
+                result[id] = widest
+            }
         }
         return result
     }

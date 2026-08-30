@@ -14,18 +14,43 @@ public enum CodeStreamEventKind: Sendable, Equatable {
     case partialLineRasterized
 }
 
+/// One frozen, never-redrawn-again composite covering a contiguous run of sealed lines (at most
+/// `HotCodeStreamStore.chunkLineBudget`, except the still-growing last chunk). `CGImage` is
+/// immutable after creation; this value only transports its pixels across tasks.
+struct CodeBodyChunk: @unchecked Sendable {
+    let image: CGImage?
+    let size: CGSize
+}
+
 /// `CGImage` is immutable after creation; this value only transports its pixels across tasks.
+///
+/// `chunks` replaces a single monolithic sealed composite with an ordered list of fixed-size
+/// frozen chunks plus one still-growing tail. Compositing a chunk costs O(chunkLineBudget), never
+/// O(sealed line count), so `HotCodeStreamStore.append` stays flat in N regardless of how many
+/// lines a block has already sealed.
 struct CodeBodyLayerContent: @unchecked Sendable {
-    let sealedImage: CGImage?
-    let sealedSize: CGSize
+    let chunks: [CodeBodyChunk]
     let tailImage: CGImage?
     let tailSize: CGSize
+    let sealedSize: CGSize
+
+    /// `sealedSize` defaults to scanning `chunks` (O(chunk count)) when the caller has no cheaper
+    /// source. `HotCodeStreamStore`'s own append/finalize/recolor call sites pass it explicitly
+    /// from `state.maxWidth`/`state.sealedHeight`, which are already maintained incrementally, so
+    /// those hot-path constructions stay O(1) instead of re-summing every chunk on every line seal.
+    init(chunks: [CodeBodyChunk], tailImage: CGImage?, tailSize: CGSize, sealedSize: CGSize? = nil) {
+        self.chunks = chunks
+        self.tailImage = tailImage
+        self.tailSize = tailSize
+        self.sealedSize = sealedSize ?? CGSize(
+            width: chunks.map(\.size.width).max() ?? 0,
+            height: chunks.reduce(0) { $0 + $1.size.height }
+        )
+    }
 
     var totalSize: CGSize {
         CGSize(width: max(sealedSize.width, tailSize.width), height: sealedSize.height + tailSize.height)
     }
-
-    var image: CGImage? { sealedImage }
 }
 
 /// Per-`BlockKey` lifecycle owner for streaming a hot code block's body: per-line raster tiles
@@ -58,7 +83,15 @@ public final class HotCodeStreamStore {
         /// never pays an O(line count) `reduce` per token. Colorizing a tile never changes its
         /// measured size (same font, same text, only color), so recolor never touches this.
         var sealedHeight: CGFloat = 0
-        var sealedComposite: CGImage?
+        /// Frozen chunks (never redrawn once pushed here) covering `tiles[0..<hotChunkStartIndex]`.
+        var sealedChunks: [CodeBodyChunk] = []
+        /// First tile index not yet folded into `sealedChunks` -- the still-growing chunk starts here.
+        var hotChunkStartIndex: Int = 0
+        /// Composite of `tiles[hotChunkStartIndex...]` -- rebuilt (bounded by `chunkLineBudget`
+        /// tiles) on every seal, never on the whole sealed range. `nil` once every sealed tile has
+        /// been frozen into `sealedChunks` (nothing left in the hot chunk).
+        var hotChunkComposite: CGImage?
+        var hotChunkHeight: CGFloat = 0
         var themeGeneration: Int
         /// Bitmap pixels depend on display scale as well as theme -- mirrors
         /// `CodeBodyRasterIdentity`, which the sealed-cache path already keys on both.
@@ -102,13 +135,23 @@ public final class HotCodeStreamStore {
             coloredLineCount = 0
             maxWidth = 0
             sealedHeight = 0
-            sealedComposite = nil
+            sealedChunks = []
+            hotChunkStartIndex = 0
+            hotChunkComposite = nil
+            hotChunkHeight = 0
             isDeferred = false
             tailText = ""
             processedUTF8Count = 0
             self.themeGeneration = themeGeneration
             self.scale = scale
             generation += 1
+        }
+
+        /// Frozen chunks plus the still-growing hot chunk (omitted once it's empty) -- the
+        /// delivery-ready chunk list in top-to-bottom order.
+        var allChunks: [CodeBodyChunk] {
+            guard hotChunkHeight > 0 else { return sealedChunks }
+            return sealedChunks + [CodeBodyChunk(image: hotChunkComposite, size: CGSize(width: maxWidth, height: hotChunkHeight))]
         }
     }
 
@@ -117,6 +160,11 @@ public final class HotCodeStreamStore {
     /// lands after adaptive defer (hundreds of sealed lines at once, e.g. via `finalize`) would
     /// recolor its entire coverage synchronously in a single callback and stall a frame.
     static let recolorChunkSize = 40
+
+    /// Upper bound on how many sealed lines one frozen chunk covers. Bounds the canvas size of
+    /// every `recomposite` call on the append/recolor path to O(chunkLineBudget), independent of
+    /// how many lines the block has sealed overall.
+    static let chunkLineBudget = 16
 
     var entries: [BlockKey: State] = [:]
     let adaptiveDeferLineThreshold: Int
@@ -132,10 +180,10 @@ public final class HotCodeStreamStore {
     func content(for key: BlockKey) -> CodeBodyLayerContent? {
         guard let state = entries[key] else { return nil }
         return CodeBodyLayerContent(
-            sealedImage: state.sealedComposite,
-            sealedSize: CGSize(width: state.maxWidth, height: state.sealedHeight),
+            chunks: state.allChunks,
             tailImage: state.lastTailImage,
-            tailSize: CGSize(width: state.maxWidth, height: state.lastTailHeight)
+            tailSize: CGSize(width: state.maxWidth, height: state.lastTailHeight),
+            sealedSize: CGSize(width: state.maxWidth, height: state.sealedHeight)
         )
     }
 
@@ -184,7 +232,6 @@ public final class HotCodeStreamStore {
         state.processedUTF8Count = rawUTF8Count
 
         let (newSealedLines, tail) = Self.splitSealedAndTail(state.tailText + delta)
-        let previousTileCount = state.tiles.count
         for line in newSealedLines {
             let (image, size) = Self.rasterizeLine(
                 line, colorRuns: nil, font: font, theme: theme, scale: scale, measure: measure
@@ -208,11 +255,7 @@ public final class HotCodeStreamStore {
         state.lastTailHeight = tailSize.height
 
         if newLinesSealedThisCall {
-            state.sealedComposite = Self.recomposite(
-                from: previousTileCount, tiles: state.tiles, tileHeights: state.tileHeights,
-                sealedHeight: state.sealedHeight, previousComposite: state.sealedComposite,
-                tailImage: nil, tailHeight: 0, maxWidth: state.maxWidth, scale: scale
-            )
+            Self.updateChunks(state, scale: scale)
         }
         let totalHeight = state.sealedHeight + tailSize.height
 
@@ -230,10 +273,10 @@ public final class HotCodeStreamStore {
         }
 
         return (totalHeight, CodeBodyLayerContent(
-            sealedImage: state.sealedComposite,
-            sealedSize: CGSize(width: state.maxWidth, height: state.sealedHeight),
+            chunks: state.allChunks,
             tailImage: tailImage,
-            tailSize: tailSize
+            tailSize: tailSize,
+            sealedSize: CGSize(width: state.maxWidth, height: state.sealedHeight)
         ))
     }
 
@@ -289,7 +332,6 @@ public final class HotCodeStreamStore {
         if !finalTail.isEmpty {
             newSealedLines.append(finalTail)
         }
-        let previousTileCount = state.tiles.count
         for line in newSealedLines {
             let (image, size) = Self.rasterizeLine(
                 line, colorRuns: nil, font: font, theme: theme, scale: scale, measure: measure
@@ -306,12 +348,7 @@ public final class HotCodeStreamStore {
         state.lastTailHeight = 0
         state.isDeferred = false
 
-        state.sealedComposite = Self.recomposite(
-            from: previousTileCount, tiles: state.tiles, tileHeights: state.tileHeights, sealedHeight: state.sealedHeight,
-            previousComposite: state.sealedComposite,
-            tailImage: nil, tailHeight: 0,
-            maxWidth: state.maxWidth, scale: scale
-        )
+        Self.updateChunks(state, scale: scale)
 
         let needsAsync = state.coloredLineCount < state.tiles.count
         if needsAsync {
@@ -324,10 +361,10 @@ public final class HotCodeStreamStore {
         }
 
         return (state.sealedHeight, CodeBodyLayerContent(
-            sealedImage: state.sealedComposite,
-            sealedSize: CGSize(width: state.maxWidth, height: state.sealedHeight),
+            chunks: state.allChunks,
             tailImage: nil,
-            tailSize: .zero
+            tailSize: .zero,
+            sealedSize: CGSize(width: state.maxWidth, height: state.sealedHeight)
         ), needsAsync)
     }
 
