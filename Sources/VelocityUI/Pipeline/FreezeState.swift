@@ -23,8 +23,10 @@ public enum FreezeState: @unchecked Sendable {
 /// without linking UIKit.
 public typealias TextMeasure = (TextDescriptor, CGFloat) -> CGSize
 
-/// Signature of `rasterizeText(_:size:scale:)`. Injected for the same reason as `TextMeasure`.
-public typealias TextRasterize = (TextDescriptor, CGSize, CGFloat) -> CGImage?
+/// Signature of `rasterizeText(_:layoutWidth:outputSize:scale:)`. Injected for the same reason
+/// as `TextMeasure`. Params: descriptor, layoutWidth (the width text was measured at), output
+/// size (tight canvas), scale.
+public typealias TextRasterize = (TextDescriptor, CGFloat, CGSize, CGFloat) -> CGImage?
 
 // MARK: - freeze
 
@@ -55,7 +57,10 @@ public nonisolated func freeze(
     }
 
     let size = measure(descriptor, block.width)
-    guard let bitmap = rasterize(descriptor, size, scale) else {
+    // Lay out at block.width (the width the height was measured at) but draw into the tight
+    // `size` canvas — keeps rasterized wrap identical to measured wrap, so height never
+    // undershoots and nothing clips. See rasterizeText's layoutWidth/outputSize split.
+    guard let bitmap = rasterize(descriptor, block.width, size, scale) else {
         return .hot
     }
 

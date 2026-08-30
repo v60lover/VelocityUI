@@ -67,6 +67,7 @@ targets:
     platform: iOS
     sources:
       - path: ../Tests/VelocityUITests
+      - path: ../BenchmarkHost/Sources/StreamDataset.swift
     dependencies:
       - target: DeviceTestHost
       - package: VelocityUI

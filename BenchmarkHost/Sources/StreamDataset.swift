@@ -85,7 +85,7 @@ enum StreamDataset {
     /// answer end to end.
     private static func markdownFeatureShowcase() -> [String] {
         var chunks: [String] = []
-        chunks += literal("## Key implementation details\n\n")
+        chunks += literal("## Key implementation details lalalalala alalalalal a alalalalal alalaalall \n\n")
         chunks += literal("A few invariants make this possible: the *working range* is a **ring buffer**, never a `[Int: ResolvedLayout]` dictionary — a plain dictionary can't answer 'give me the next visible cell' without scanning every key. ~~A flat array indexed by position~~ almost works, but it can't grow from one end while shrinking from the other the way a ring buffer can. See the [architecture notes](https://example.com) for the rest of the invariants.\n\n")
         chunks += literal("What happens on every appended token, in order:\n\n")
         chunks += literal("1. A token lands in the parser's buffer.\n2. Only the still-open blocks are re-tokenized; sealed blocks are left untouched.\n  3. Runs that actually changed are re-styled — bold, italic, code, and link spans included.\n4. The block seals the moment its closing delimiter appears, and its bitmap is cached from then on.\n\n")

@@ -121,7 +121,7 @@ final class BlockReuseTests: XCTestCase {
             return CGSize(width: width, height: CGFloat(max(1, descriptor.content.count)))
         }
 
-        func rasterize(_ descriptor: TextDescriptor, size: CGSize, scale: CGFloat) -> CGImage? {
+        func rasterize(_ descriptor: TextDescriptor, layoutWidth: CGFloat, size: CGSize, scale: CGFloat) -> CGImage? {
             rasterizeCallCount += 1
             return BlockReuseTests.makeFakeCGImage(width: Int(size.width), height: Int(size.height))
         }
@@ -602,7 +602,7 @@ final class BlockReuseTests: XCTestCase {
             let scale: CGFloat = descriptor.contentSizeCategory == .accessibilityExtraExtraExtraLarge ? 3 : 1
             return CGSize(width: width, height: CGFloat(descriptor.content.count) * scale)
         }
-        func fakeRasterize(_ descriptor: TextDescriptor, size: CGSize, scale: CGFloat) -> CGImage? {
+        func fakeRasterize(_ descriptor: TextDescriptor, layoutWidth: CGFloat, size: CGSize, scale: CGFloat) -> CGImage? {
             BlockReuseTests.makeFakeCGImage(width: Int(size.width), height: Int(size.height))
         }
 
@@ -707,7 +707,9 @@ extension BlockReuseTests {
                 freeze(
                     newBlocks[i], scale: scale, cache: &cache,
                     measure: { descriptor, w in frozenCtx.measure(descriptor, width: w) },
-                    rasterize: { descriptor, size, s in rasterizeText(descriptor, size: size, scale: s) }
+                    rasterize: { descriptor, layoutWidth, size, s in
+                        rasterizeText(descriptor, layoutWidth: layoutWidth, outputSize: size, scale: s)
+                    }
                 )
                 frozenPathSeconds += Date().timeIntervalSince(start)
             }

@@ -18,13 +18,20 @@ struct TextBitmapArtifact: @unchecked Sendable {
 nonisolated func rasterizeTextFragment(
     _ descriptor: TextDescriptor,
     frameSize: CGSize,
+    layoutWidth: CGFloat,
     scale: CGFloat,
     highlightRegistry: HighlightRegistry,
     theme: Theme,
     existingBodyRaster: (image: CGImage, size: CGSize)?
 ) -> (image: CGImage?, size: CGSize, retokenized: Bool) {
     guard case .body(let chrome) = descriptor.codeBlockRole else {
-        return (rasterizeText(descriptor, size: frameSize, scale: scale), frameSize, false)
+        // layoutWidth is the full width the fragment was measured at (see LayoutEngine's
+        // `.text` case); frameSize is the tight measured size -- laying out narrower than
+        // measurement here is exactly the clip bug this split fixes.
+        return (
+            rasterizeText(descriptor, layoutWidth: layoutWidth, outputSize: frameSize, scale: scale),
+            frameSize, false
+        )
     }
     if let existingBodyRaster {
         return (existingBodyRaster.image, existingBodyRaster.size, false)
@@ -47,6 +54,7 @@ nonisolated func rasterizeTextFragment(
 nonisolated func rasterizeTextArtifacts(
     table: NodeTable,
     fragments: [Fragment],
+    layoutWidth: CGFloat,
     scale: CGFloat,
     highlightRegistry: HighlightRegistry,
     themeSnapshot: HighlightThemeSnapshot,
@@ -67,7 +75,7 @@ nonisolated func rasterizeTextArtifacts(
             ? reusableFrom?.codeBodyRaster(for: key, identity: codeBodyIdentity)
             : nil
         let (image, size, retokenized) = rasterizeTextFragment(
-            descriptor, frameSize: fragment.frame.size, scale: scale,
+            descriptor, frameSize: fragment.frame.size, layoutWidth: layoutWidth, scale: scale,
             highlightRegistry: highlightRegistry,
             theme: themeSnapshot.theme,
             existingBodyRaster: existing

@@ -196,20 +196,26 @@ extension TextRun {
 
 // MARK: - rasterizeText
 
-/// Rasterise a TextDescriptor into a CGImage at exactly `size`, using the same TextKit 2
-/// pipeline as `TextMeasurementContext` so rendered height matches measured height.
+/// Rasterise a TextDescriptor with line-breaking laid out at `layoutWidth`, drawn into a
+/// canvas of `outputSize` (typically the tight measured size). Splitting layout width from
+/// canvas size keeps bitmaps tight (memory win) while making the wrap identical to what was
+/// measured at `layoutWidth` — the container never re-lays-out narrower than measurement, so
+/// no line can shift below the canvas and clip. The canvas width is derived from the widest
+/// laid-out line plus `inkGuard`, so `outputSize.width` is a floor, not the final width.
 ///
 /// Thread-safe: creates all TextKit 2 objects fresh per call. Pass `scale` from a @MainActor
 /// call site — `UIScreen.main.scale` is off-limits off-main.
 public nonisolated func rasterizeText(
     _ descriptor: TextDescriptor,
-    size: CGSize,
-    scale: CGFloat = 1
+    layoutWidth: CGFloat,
+    outputSize: CGSize,
+    scale: CGFloat = 1,
+    inkGuard: CGFloat = 2
 ) -> CGImage? {
-    guard size.width > 0, size.height > 0 else { return nil }
+    guard outputSize.width > 0, outputSize.height > 0, layoutWidth > 0 else { return nil }
 
     let storage = NSTextContentStorage()
-    let container = NSTextContainer(size: size)
+    let container = NSTextContainer(size: CGSize(width: layoutWidth, height: .greatestFiniteMagnitude))
     container.lineBreakMode = NSLineBreakMode(rawValue: descriptor.lineBreakMode) ?? .byWordWrapping
     container.maximumNumberOfLines = descriptor.lineLimit ?? 0
     let lm = NSTextLayoutManager()
@@ -223,7 +229,22 @@ public nonisolated func rasterizeText(
     format.scale = scale
     format.opaque = false
 
-    let renderer = UIGraphicsImageRenderer(size: size, format: format)
+    // Canvas width = widest laid-out line + `inkGuard`. A fragment's layoutFragmentFrame width
+    // is the typographic advance, which can sit a hair inside the glyph ink (bold right-side
+    // bearing); a canvas exactly that wide clips the last glyph's tail — the horizontal twin of
+    // the vertical clip the layout/output split already fixes. `inkGuard` is 0 via the
+    // compat wrapper for non-wrapping callers (code bodies, hot compositing) that need an exact
+    // fit. Round up to a whole device pixel so CoreGraphics can't shave a hair rounding down.
+    var widestLine: CGFloat = 0
+    lm.enumerateTextLayoutFragments(from: lm.documentRange.location, options: [.ensuresLayout]) { fragment in
+        widestLine = max(widestLine, fragment.layoutFragmentFrame.maxX)
+        return true
+    }
+    let canvasWidth = max(outputSize.width, widestLine + inkGuard)
+    let safeWidth = scale > 0 ? (canvasWidth * scale).rounded(.up) / scale : canvasWidth
+    let renderSize = CGSize(width: safeWidth, height: outputSize.height)
+
+    let renderer = UIGraphicsImageRenderer(size: renderSize, format: format)
     let uiImage = renderer.image { ctx in
         lm.enumerateTextLayoutFragments(
             from: lm.documentRange.location,
@@ -234,5 +255,15 @@ public nonisolated func rasterizeText(
         }
     }
     return uiImage.cgImage
+}
+
+/// Compatibility wrapper for callers that measured and rasterize at the same width (code
+/// bodies at `.greatestFiniteMagnitude`, hot-path compositing already at the layout width).
+public nonisolated func rasterizeText(
+    _ descriptor: TextDescriptor,
+    size: CGSize,
+    scale: CGFloat = 1
+) -> CGImage? {
+    rasterizeText(descriptor, layoutWidth: size.width, outputSize: size, scale: scale, inkGuard: 0)
 }
 #endif

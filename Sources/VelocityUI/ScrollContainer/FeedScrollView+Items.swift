@@ -547,9 +547,9 @@ extension FeedScrollView {
                     measuredSize = s
                     return s
                 },
-                rasterize: { [self] descriptor, size, s in
+                rasterize: { [self] descriptor, layoutWidth, size, s in
                     _testHooks.blockDiffRasterizeCallCount += 1
-                    return rasterizeText(descriptor, size: size, scale: s)
+                    return rasterizeText(descriptor, layoutWidth: layoutWidth, outputSize: size, scale: s)
                 }
             )
             switch state {
@@ -789,7 +789,9 @@ extension FeedScrollView {
                         ?? previousFragmentByID[codeHeaderFragmentID(nodeIndex: block.fragment.id)]?.frame.size
                     : nil
                 let headerSize = cachedHeaderSize ?? measureTextSync(descriptor.headerText, width: width)
-                let headerBitmap = cachedHeader ?? rasterizeText(descriptor.headerText, size: headerSize, scale: scale)
+                let headerBitmap = cachedHeader ?? rasterizeText(
+                    descriptor.headerText, layoutWidth: width, outputSize: headerSize, scale: scale
+                )
                 let headerWidth = cachedHeaderSize?.width ?? headerBitmap.map { CGFloat($0.width) / scale } ?? headerSize.width
                 let bodyFrame = localFrame.offsetBy(dx: 0, dy: cursor + headerSize.height)
                 let total = CGRect(

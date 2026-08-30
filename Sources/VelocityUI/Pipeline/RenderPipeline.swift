@@ -200,6 +200,7 @@ public actor RenderPipeline {
                             let (artifacts, retokenizeCount) = rasterizeTextArtifacts(
                                 table: table,
                                 fragments: entry.fragments,
+                                layoutWidth: availableWidth,
                                 scale: capturedScale,
                                 highlightRegistry: registry,
                                 themeSnapshot: themeSnapshot,
@@ -218,6 +219,7 @@ public actor RenderPipeline {
                         let (artifacts, retokenizeCount) = rasterizeTextArtifacts(
                             table: table,
                             fragments: fragments,
+                            layoutWidth: availableWidth,
                             scale: capturedScale,
                             highlightRegistry: registry,
                             themeSnapshot: themeSnapshot,
