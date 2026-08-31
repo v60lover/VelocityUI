@@ -98,7 +98,9 @@ public final class HotCodeStreamStore {
         var scale: CGFloat
         var isDeferred: Bool = false
         var lastTailImage: CGImage?
-        var lastTailHeight: CGFloat = 0
+        /// Exact point-space size paired with `lastTailImage` -- read atomically, never rebuilt
+        /// from `maxWidth` (a short tail must not inherit the block's longest sealed line width).
+        var lastTailSize: CGSize = .zero
         /// The unsealed suffix carried across calls -- `append` only re-scans text appended since
         /// `processedUTF8Count`, not the whole block, for new sealed lines.
         var tailText: String = ""
@@ -140,6 +142,8 @@ public final class HotCodeStreamStore {
             hotChunkComposite = nil
             hotChunkHeight = 0
             isDeferred = false
+            lastTailImage = nil
+            lastTailSize = .zero
             tailText = ""
             processedUTF8Count = 0
             self.themeGeneration = themeGeneration
@@ -182,7 +186,7 @@ public final class HotCodeStreamStore {
         return CodeBodyLayerContent(
             chunks: state.allChunks,
             tailImage: state.lastTailImage,
-            tailSize: CGSize(width: state.maxWidth, height: state.lastTailHeight),
+            tailSize: state.lastTailSize,
             sealedSize: CGSize(width: state.maxWidth, height: state.sealedHeight)
         )
     }
@@ -252,7 +256,7 @@ public final class HotCodeStreamStore {
         eventObserver?(.partialLineRasterized)
         state.maxWidth = max(state.maxWidth, tailSize.width)
         state.lastTailImage = tailImage
-        state.lastTailHeight = tailSize.height
+        state.lastTailSize = tailSize
 
         if newLinesSealedThisCall {
             Self.updateChunks(state, scale: scale)
@@ -345,7 +349,7 @@ public final class HotCodeStreamStore {
         }
         state.tailText = ""
         state.lastTailImage = nil
-        state.lastTailHeight = 0
+        state.lastTailSize = .zero
         state.isDeferred = false
 
         Self.updateChunks(state, scale: scale)

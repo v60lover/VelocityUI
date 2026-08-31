@@ -91,7 +91,7 @@ extension HotCodeStreamStore {
         onRecolor(CodeBodyLayerContent(
             chunks: state.allChunks,
             tailImage: state.lastTailImage,
-            tailSize: CGSize(width: state.maxWidth, height: state.lastTailHeight),
+            tailSize: state.lastTailSize,
             sealedSize: CGSize(width: state.maxWidth, height: state.sealedHeight)
         ))
 

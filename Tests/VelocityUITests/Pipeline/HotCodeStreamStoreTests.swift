@@ -607,5 +607,156 @@ final class HotCodeStreamStoreTests: XCTestCase {
             + "constant factor of the early-stream median (\(earlyMedian)ns), not scale with total sealed lines"
         )
     }
+
+    // MARK: - tail size fix: tail frame size is tail's own tight width, not block maxWidth
+
+    func testAppend_ShortTailAfterLongSealedLine_TailSizeIsTailsOwnTightWidth() {
+        let store = HotCodeStreamStore()
+        let key = BlockKey(itemID: "msg", index: 0)
+
+        // Long sealed line + short tail in one call. The sealed line's width will be set as maxWidth.
+        let result = store.append(
+            key,
+            rawCode: "let aVeryLongVariableNameThatMakesThisLineWide = 12345678\nx",
+            font: font, theme: theme, themeGeneration: 0,
+            languageID: .swift, highlightRegistry: registry, scale: 1,
+            measure: measure, eventObserver: nil, onRecolor: { _ in }
+        )
+
+        // The tail ("x") must have a width strictly less than the sealed line's width.
+        XCTAssertLessThan(
+            result.content.tailSize.width, result.content.sealedSize.width,
+            "tail size must be the tail's own tight width, not inherited from the sealed line's maxWidth"
+        )
+        XCTAssertGreaterThan(result.content.tailSize.width, 0, "the tail 'x' must have non-zero width")
+    }
+
+    func testAppend_ShortTailAfterLongSealedLine_OnRecolorDeliversTailAtItsOwnTightWidth_NotBlockMaxWidth() {
+        let store = HotCodeStreamStore()
+        let key = BlockKey(itemID: "msg", index: 0)
+        let exp = expectation(description: "onRecolor delivers with fixed tail size")
+
+        _ = store.append(
+            key,
+            rawCode: "let aVeryLongVariableNameThatMakesThisLineWide = 12345678\nx",
+            font: font, theme: theme, themeGeneration: 0,
+            languageID: .swift, highlightRegistry: registry, scale: 1,
+            measure: measure, eventObserver: nil,
+            onRecolor: { content in
+                // The delivered content's tail size must also be strictly less than sealed size.
+                XCTAssertLessThan(
+                    content.tailSize.width, content.sealedSize.width,
+                    "onRecolor must deliver the tail at its own tight width, not block maxWidth"
+                )
+                XCTAssertGreaterThan(content.tailSize.width, 0, "the tail 'x' must have non-zero width in the recolor delivery")
+                exp.fulfill()
+            }
+        )
+
+        wait(for: [exp], timeout: 5)
+    }
+
+    func testAppend_TailGrowsWhileParseInFlight_DeliveredTailSizeMatchesLatestTail_NotStale() {
+        let store = HotCodeStreamStore()
+        let key = BlockKey(itemID: "msg", index: 0)
+        let exp = expectation(description: "onRecolor fires with the latest tail size")
+        var expectedTailSize: CGSize = .zero
+
+        // First append: long sealed line + short tail, spawns the ONLY off-main parse for this
+        // key -- its own `onRecolor` is what fires when the parse lands (a second append with no
+        // newly-sealed line never spawns its own parse, so a closure passed there would be dead
+        // code and this expectation would never fulfill).
+        _ = store.append(
+            key,
+            rawCode: "let aVeryLongVariableNameThatMakesThisLineWide = 12345678\nx",
+            font: font, theme: theme, themeGeneration: 0,
+            languageID: .swift, highlightRegistry: registry, scale: 1,
+            measure: measure, eventObserver: nil,
+            onRecolor: { content in
+                // The delivered tail size must match the LATEST append's tail ("xyz"), not the first one's ("x").
+                XCTAssertEqual(content.tailSize, expectedTailSize, "delivered tail size must match the latest appended tail")
+                exp.fulfill()
+            }
+        )
+
+        // Immediately append again with the tail extended, before the parse from the first append lands.
+        // Both appends are synchronous MainActor calls, so this completes before the async parse task runs.
+        let result2 = store.append(
+            key,
+            rawCode: "let aVeryLongVariableNameThatMakesThisLineWide = 12345678\nxyz",
+            font: font, theme: theme, themeGeneration: 0,
+            languageID: .swift, highlightRegistry: registry, scale: 1,
+            measure: measure, eventObserver: nil, onRecolor: { _ in }
+        )
+        expectedTailSize = result2.content.tailSize
+
+        wait(for: [exp], timeout: 5)
+    }
+
+    func testContentForKey_ReflectsLatestAppendedTailSize_AcrossRepeatedCalls() {
+        let store = HotCodeStreamStore()
+        let key = BlockKey(itemID: "msg", index: 0)
+
+        // Append once with a short tail.
+        let result = store.append(
+            key,
+            rawCode: "let aVeryLongVariableNameThatMakesThisLineWide = 12345678\nx",
+            font: font, theme: theme, themeGeneration: 0,
+            languageID: .swift, highlightRegistry: registry, scale: 1,
+            measure: measure, eventObserver: nil, onRecolor: { _ in }
+        )
+
+        // Call content(for:) twice in a row (simulating a viewport exit/re-entry re-fetch).
+        let content1 = store.content(for: key)
+        let content2 = store.content(for: key)
+
+        guard let content1, let content2 else { return XCTFail("expected non-nil content from both calls") }
+
+        // Both calls must return the identical tailSize.
+        XCTAssertEqual(content1.tailSize, content2.tailSize, "repeated content(for:) calls must return the same tail size")
+
+        // And it must match the tailSize returned from the append call.
+        XCTAssertEqual(content1.tailSize, result.content.tailSize, "content(for:) must return the tail size from the most recent append")
+    }
+
+    func testAppend_TrailingNewline_TailImageNilAndTailSizeZeroWidthWithLineHeight() {
+        let store = HotCodeStreamStore()
+        let key = BlockKey(itemID: "msg", index: 0)
+
+        // Append code ending in a newline — the tail is empty.
+        let result = store.append(
+            key,
+            rawCode: "let x = 1\n",
+            font: font, theme: theme, themeGeneration: 0,
+            languageID: .swift, highlightRegistry: registry, scale: 1,
+            measure: measure, eventObserver: nil, onRecolor: { _ in }
+        )
+
+        // When the tail is empty, tailImage must be nil, width must be zero, but height must reflect a line height.
+        XCTAssertNil(result.content.tailImage, "an empty tail must have no image")
+        XCTAssertEqual(result.content.tailSize.width, 0, "an empty tail must have zero width")
+        XCTAssertGreaterThan(result.content.tailSize.height, 0, "an empty tail must still have a line-height height")
+    }
+
+    func testAppend_ScaleGreaterThanOne_TailSizeStaysTightNotBlockWidth_WithRoundingTolerance() {
+        let store = HotCodeStreamStore()
+        let key = BlockKey(itemID: "msg", index: 0)
+
+        // Same long sealed line + short tail setup as test 1, but at a non-1 display scale.
+        let result = store.append(
+            key,
+            rawCode: "let aVeryLongVariableNameThatMakesThisLineWide = 12345678\nx",
+            font: font, theme: theme, themeGeneration: 0,
+            languageID: .swift, highlightRegistry: registry, scale: 2,
+            measure: measure, eventObserver: nil, onRecolor: { _ in }
+        )
+
+        // The tail must still be strictly narrower than the sealed line's width, even at scale 2.
+        XCTAssertLessThan(
+            result.content.tailSize.width, result.content.sealedSize.width,
+            "at scale 2, tail size must remain the tail's own tight width, not block maxWidth"
+        )
+        XCTAssertGreaterThan(result.content.tailSize.width, 0, "the tail 'x' must have non-zero width at scale 2")
+    }
 }
 #endif
