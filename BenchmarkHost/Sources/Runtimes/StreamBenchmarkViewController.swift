@@ -112,7 +112,7 @@ extension MarkdownTheme {
     /// scenario's readability at benchmark cell widths.
     fileprivate static let stream: MarkdownTheme = {
         var theme = MarkdownTheme.default
-        theme.code = VFontDescriptor(size: 13, weight: VFontDescriptor.regularWeight)
+        theme.code = VFontDescriptor(size: 15, weight: VFontDescriptor.regularWeight)
         return theme
     }()
 }
@@ -186,6 +186,7 @@ private struct StreamFeedView: View {
             return StreamBenchmarkCell(nodes: nodes)
         }
         .prefetchWindow(ahead: 10, behind: 3)
+        .padding(.horizontal, 8)
     }
 }
 

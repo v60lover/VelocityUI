@@ -62,23 +62,24 @@ final class StreamDatasetTests: XCTestCase {
             "no image/rule should be inserted before their anchor blocks have sealed")
     }
 
-    func testOddAnchorImagesAppearOnlyAfterTheirBlocksSealAndKeepStableUniqueIDs() {
+    func testNamedAnchorImagesAppearOnlyAfterTheirBlocksSealAndKeepStableUniqueIDs() {
+        // Named anchors are 3 and 16 (see `imageAfterBlockIndices`) — build enough sealed blocks
+        // to cross the first one but not the second.
         var parser = IncrementalMarkdownParser()
-        parser.append("Block 0\n\nBlock 1")
-        XCTAssertEqual(parser.frontier, 1, "precondition: odd block 1 must still be hot")
+        parser.append("Block 0\n\nBlock 1\n\nBlock 2\n\nBlock 3")
+        XCTAssertEqual(parser.frontier, 3, "precondition: anchor block 3 must still be hot")
         XCTAssertFalse(
             StreamDataset.interleavedRenderNodes(textNodes: parser.renderNodes, frontier: parser.frontier)
                 .contains { $0 is RenderIDModifierNode },
-            "an image may not appear before its odd anchor seals")
+            "an image may not appear before its named anchor seals")
 
-        parser.append("\n\nBlock 2\n\nBlock 3\n\nHot")
+        parser.append("\n\nBlock 4")
         XCTAssertEqual(parser.frontier, 4, "precondition: blocks 0...3 must be sealed and block 4 hot")
 
         let nodes = StreamDataset.interleavedRenderNodes(textNodes: parser.renderNodes, frontier: parser.frontier)
         let imageIDs = nodes.compactMap { ($0 as? RenderIDModifierNode)?.blockID.rawValue as? String }
             .filter { $0.hasPrefix("stream-image-after-") }
-        XCTAssertEqual(imageIDs.count, 2, "only odd sealed anchors 1 and 3 may emit images")
-        XCTAssertEqual(Set(imageIDs).count, imageIDs.count, "each generated image must have a unique stable render identity")
+        XCTAssertEqual(imageIDs, ["stream-image-after-3"], "only the named anchor at block 3 may emit an image here")
 
         parser.append("more text")
         let nodesAfter = StreamDataset.interleavedRenderNodes(textNodes: parser.renderNodes, frontier: parser.frontier)
@@ -92,16 +93,15 @@ final class StreamDatasetTests: XCTestCase {
     /// a caller deriving `textNodes` from a cached `StreamingMarkdownController` still gets
     /// correct interleaving.
     func testInterleavedRenderNodesWorksFromHandBuiltNodesWithNoParserInvolved() {
-        // Indices 0...3 are excluded from image insertion by design (see the `![0, 1, 2, 3]`
-        // guard in interleavedRenderNodes), so this fixture goes to index 5 to land on an
-        // eligible odd sealed anchor.
+        // Named anchor 3 (see `imageAfterBlockIndices`) is sealed by frontier 6; anchor 16 is
+        // out of range for a 6-node fixture, so exactly one image is expected.
         let handBuiltNodes: [any RenderNode] = (0...5).map { i in
             TextNode("block \(i)", blockID: BlockID(i), blockLifecycle: .sealed)
         }
         let nodes = StreamDataset.interleavedRenderNodes(textNodes: handBuiltNodes, frontier: 6)
         let imageIDs = nodes.compactMap { ($0 as? RenderIDModifierNode)?.blockID.rawValue as? String }
             .filter { $0.hasPrefix("stream-image-after-") }
-        XCTAssertEqual(imageIDs.count, 1, "odd sealed anchor 5 (with frontier 6) must emit exactly one image")
+        XCTAssertEqual(imageIDs.count, 1, "named anchor 3 (with frontier 6) must emit exactly one image")
     }
 
     // MARK: - includeInterleavedBlocks: false (--stream-text-only)

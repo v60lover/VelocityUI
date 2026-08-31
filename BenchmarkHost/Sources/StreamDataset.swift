@@ -9,46 +9,54 @@ import VelocityUI
 /// byte-for-byte reproducible.
 enum StreamDataset {
 
-    /// First (0-based) odd markdown block index after which an image is interleaved.
-    static let imageAfterBlockIndex = 1
+    /// 0-based block indices (in the `tokens()` stream) where splicing in an `AsyncImageNode`
+    /// actually matches what the prose right above it is describing, instead of a blind parity
+    /// rule that would scatter images across unrelated paragraphs. Block 3 is the "here's a
+    /// diagram of the eviction order" paragraph; block 16 is the "here's the shape of one
+    /// `get(_:)` call" paragraph — see `tokens()`. Both must be recounted if blocks are added or
+    /// removed above them in `tokens()`.
+    static let imageAfterBlockIndices: Set<Int> = [3, 16]
     /// Index after which the interleaved "rule" divider (`SpacerNode` — the DSL has no dedicated
     /// divider node; a fixed-height spacer stands in for one) is spliced in — right after the
-    /// fenced code block closes and seals.
-    static let ruleAfterBlockIndex = 3
+    /// first large fenced code block closes and seals (block 7 in `tokens()`).
+    static let ruleAfterBlockIndex = 7
 
     // picsum.photos has been down (503s) — pulled straight from Unsplash's CDN instead.
     static let imageURL = URL(string: "https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=800&h=450&fit=crop&q=80")!
 
     /// Ordered append chunks a `StreamDriver` feeds into `IncrementalMarkdownParser.append(_:)`
-    /// one at a time. Reads like a real chat answer, not a word-salad stress load: a setext
-    /// title, several `##`-headed sections of real prose, an inline-styled paragraph plus a
-    /// list and a rule, and one LARGE fenced code block (the wj8x worst case — an unclosed
-    /// fence that stays hot for `codeLineCount` appends before it finally closes).
+    /// one at a time. Reads like an actual LLM chat answer to a real question ("how would you
+    /// implement an LRU cache in Swift, and when would you reach for something else instead"),
+    /// not a word-salad stress load: a setext title, several `##`-headed sections of real prose,
+    /// an inline-styled paragraph plus a list and a rule, a diagram image, and one LARGE fenced
+    /// code block (the wj8x worst case — an unclosed fence that stays hot for `codeLineCount`
+    /// appends before it finally closes).
     static func tokens(seed: UInt64 = 0, codeLineCount: Int = 220) -> [String] {
         var rng = LCG(state: seed)
         var chunks: [String] = []
         // Setext heading (`===` underline) — kept as the opening block for index stability
         // (imageAfterBlockIndex/ruleAfterBlockIndex below count blocks from here). ATX (`#`)
         // headings are also recognized now (VelocityUI-fzvf.1).
-        chunks += literal("Streaming benchmark response\n")
+        chunks += literal("Implementing an LRU cache in Swift\n")
         chunks += literal("===\n")
         chunks += literal("\n")
-        chunks += literal("## Why token-by-token rendering doesn't jank\n\n")
-        chunks += codeFence(lineCount: 20, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 5, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += codeFence(lineCount: 40, rng: &rng)
+        chunks += literal("## How an LRU cache works\n\n")
         chunks += literal("\n\n")
         chunks += prose(sentenceCount: 10, rng: &rng)
         chunks += literal("\n\n")
+        chunks += literal("Here's a diagram of the eviction order — the tail is always the least recently used entry:\n\n")
+        chunks += literal("\n\n")
+        chunks += prose(sentenceCount: 10, rng: &rng)
+        chunks += literal("\n\n")
+        chunks += literal("## The implementation\n\n")
+        chunks += literal("A dictionary alone gets you O(1) lookups but no ordering, and a linked list alone gets you ordering but O(n) lookups. Combining the two — a hash map from key to node, plus a doubly linked list threading the nodes in recency order — gets O(1) for both:\n\n")
         chunks += codeFence(lineCount: codeLineCount, rng: &rng)
         chunks += literal("\n\n")
         chunks += markdownFeatureShowcase()
         chunks += prose(sentenceCount: 15, rng: &rng)
         chunks += literal("\n")
-        chunks += literal("## A single append, traced\n\n")
-        chunks += literal("Here's the shape of one `append(_:)` call while a fence is still open — a line streams in, the fence stays hot, and nothing before it moves:\n\n")
+        chunks += literal("## Walking through a `get`, step by step\n\n")
+        chunks += literal("Here's the shape of one `get(_:)` call — the node is found, unlinked from wherever it sits, and relinked at the front:\n\n")
         chunks += literal("\n")
         chunks += prose(sentenceCount: 20, rng: &rng)
         chunks += literal("\n\n")
@@ -59,7 +67,7 @@ enum StreamDataset {
         chunks += literal("\n\n")
         chunks += prose(sentenceCount: 10, rng: &rng)
         chunks += literal("\n\n")
-        chunks += literal("## What this means while scrolling\n\n")
+        chunks += literal("## When you'd reach for something else\n\n")
         chunks += prose(sentenceCount: 15, rng: &rng)
         chunks += literal("\n\n")
         chunks += prose(sentenceCount: 20, rng: &rng)
@@ -86,27 +94,29 @@ enum StreamDataset {
     /// answer end to end.
     private static func markdownFeatureShowcase() -> [String] {
         var chunks: [String] = []
-        chunks += literal("## Key implementation details lalalalala alalalalal a alalalalal alalaalall \n\n")
-        chunks += literal("A few invariants make this possible: the *working range* is a **ring buffer**, never a `[Int: ResolvedLayout]` dictionary — a plain dictionary can't answer 'give me the next visible cell' without scanning every key. ~~A flat array indexed by position~~ almost works, but it can't grow from one end while shrinking from the other the way a ring buffer can. See the [architecture notes](https://example.com) for the rest of the invariants.\n\n")
-        chunks += literal("What happens on every appended token, in order:\n\n")
-        chunks += literal("1. A token lands in the parser's buffer.\n2. Only the still-open blocks are re-tokenized; sealed blocks are left untouched.\n  3. Runs that actually changed are re-styled — bold, italic, code, and link spans included.\n4. The block seals the moment its closing delimiter appears, and its bitmap is cached from then on.\n\n")
+        chunks += literal("## A few implementation details worth calling out\n\n")
+        chunks += literal("A couple of invariants make this correct: the *node-to-key map* is a **plain dictionary**, never a linear scan over the list — a linked list alone can't answer 'is this key already cached' without walking every node. ~~A sorted array keyed by last-access time~~ almost works, but insertion and removal in the middle both cost O(n). See the [Swift collections docs](https://example.com) for more on `Dictionary`'s amortized guarantees.\n\n")
+        chunks += literal("What happens on every `set(_:forKey:)` call, in order:\n\n")
+        chunks += literal("1. If the key already exists, its node is unlinked and its value updated.\n2. A new node is linked at the front of the list — the most-recently-used position.\n  3. The dictionary entry for the key is pointed at that node.\n4. If the cache is now over capacity, the tail node is unlinked and its key removed from the dictionary.\n\n")
         chunks += literal("---\n\n")
-        chunks += literal("```swift\nlet frontier = parser.frontier // sealed block count\n```\n\n")
+        chunks += literal("```swift\nlet evicted = list.tail // about to be removed once count > capacity\n```\n\n")
         return chunks
     }
 
     /// Builds one cell's full child-node array: the caller's already-derived `textNodes` (all
     /// `TextNode`, one per sealed/hot block — VelocityUI-zuot) with a static `AsyncImageNode`
-    /// spliced in after every odd sealed block and a `SpacerNode` "rule" divider spliced in after
-    /// `ruleAfterBlockIndex` seals — exercising the C3 bind site's per-block diff and pooling
-    /// against real non-text fragments, not just one growing text block.
+    /// spliced in after each block index in `imageAfterBlockIndices` and a `SpacerNode` "rule"
+    /// divider spliced in after `ruleAfterBlockIndex` seals — exercising the C3 bind site's
+    /// per-block diff and pooling against real non-text fragments, not just one growing text
+    /// block.
     ///
     /// Takes `textNodes`/`frontier` rather than an `IncrementalMarkdownParser` (VelocityUI-8g6l):
     /// the caller derives `textNodes` from a `StreamingMarkdownController` so sealed blocks stay
     /// cached; calling `parser.renderNodes` in here would re-derive everything uncached on every
     /// read and defeat that caching.
     ///
-    /// Each insertion is gated on `frontier`: only sealed blocks are stable anchors. The first
+    /// Each insertion is gated on `index < frontier`: only sealed blocks are stable anchors, so
+    /// an image/rule never appears above text that's still hot and could still reflow. The first
     /// frame that inserts an image may use one full-layout fallback; its stable render ID lets
     /// later hot-text updates return to the identity-aware in-place path.
     ///
@@ -117,16 +127,17 @@ enum StreamDataset {
     static func interleavedRenderNodes(textNodes: [any RenderNode], frontier: Int, includeInterleavedBlocks: Bool = true) -> [any RenderNode] {
         guard includeInterleavedBlocks else { return textNodes }
         var result: [any RenderNode] = []
-        result.reserveCapacity(textNodes.count + (frontier / 2) + 1)
+        result.reserveCapacity(textNodes.count + imageAfterBlockIndices.count + 1)
         for (index, node) in textNodes.enumerated() {
             result.append(node)
-            if index >= imageAfterBlockIndex, index > 10, index % 2 == 0 {
+            guard index < frontier else { continue }
+            if imageAfterBlockIndices.contains(index) {
                 result.append(
                     AsyncImageNode(url: imageURL, aspectRatio: 16.0 / 9.0, contentMode: .fill)
                         .renderID("stream-image-after-\(index)")
                 )
             }
-            if index == ruleAfterBlockIndex, index > 10, index % 2 == 1 {
+            if index == ruleAfterBlockIndex {
                 result.append(SpacerNode(minLength: 12).renderID("stream-rule-after-\(index)"))
             }
         }
@@ -137,49 +148,49 @@ enum StreamDataset {
 
     private static func literal(_ s: String) -> [String] { [s] }
 
-    /// A real explanation of how VelocityUI's incremental streaming renderer stays smooth,
-    /// broken into standalone sentences (no trailing period — `prose` appends it) so `prose`
-    /// can pick and stream them individually while keeping the whole thing readable regardless
-    /// of which subset a given seed lands on.
+    /// A real explanation of how an LRU cache works and why you'd build one this way, broken
+    /// into standalone sentences (no trailing period — `prose` appends it) so `prose` can pick
+    /// and stream them individually while keeping the whole thing readable regardless of which
+    /// subset a given seed lands on.
     private static let sentences: [String] = [
-        "When a chat response streams in token by token, the renderer's job is to keep every frame's cost flat, no matter how long the message has already grown",
-        "Each markdown block moves through a small lifecycle: open, hot, and finally sealed once nothing can change its content anymore",
-        "A block seals the moment the parser sees whatever closes it — a blank line after a paragraph, or the closing fence of a code block",
-        "Only the hot tail, the handful of blocks still receiving new tokens, gets re-measured and re-rasterized on every append",
-        "Everything before the frontier is frozen — its bitmap is cached, and the renderer just reuses that bitmap frame after frame",
-        "That is what keeps the per-token cost flat instead of letting it grow with the length of the whole message",
-        "The scroll path itself never awaits anything, so no async call ever sits between a gesture and the next frame",
-        "All of the async work, decoding an image, measuring text, preparing a GIF or a video, happens off that path entirely",
-        "Text never goes through a live text layer, instead the layout manager lays out each fragment once, rasterizes it to a bitmap, and hands that bitmap straight to a plain layer",
-        "That sidesteps a whole category of per-frame text costs: glyph composition, ligature substitution, and emoji seam handling all happen once, at rasterization time",
-        "Rounding corners works the same way, nothing gets rounded by the layer itself, rounding happens once, at decode time, by clipping the drawing context",
-        "A block's identity is tracked by a stable id, so a hot paragraph that gains a few more words this frame is still recognized as the same block it was last frame",
-        "That identity is what keeps the diff cheap: only blocks whose content actually changed get re-styled, everything else is served straight from the cache",
-        "Under load, the hardest block to keep smooth is usually a fenced code block, because it can stay open and growing for hundreds of lines before it finally closes",
-        "While a fence is still open, every appended line means one more re-measure of the whole block, so that path gets the most attention during benchmarking",
-        "The moment the fence closes, the block seals, its bitmap freezes, and every later frame skips straight past it",
-        "None of this changes how the message looks on screen, it only changes how much work the renderer repeats to keep drawing it",
-        "A naive implementation would re-measure and re-draw the entire message on every single token, and the cost would grow without bound as the reply gets longer",
-        "The incremental approach instead keeps a working range of only the blocks near the visible viewport, so cost stays bounded by what is actually on screen",
-        "That working range behaves like a ring buffer rather than a plain dictionary, because a ring buffer can grow and shrink from either end without touching the middle",
-        "Every image or video that streams in alongside the text gets the same treatment, it waits for its anchor block to seal before it is inserted, so nothing shifts underneath text that has not settled yet",
-        "Once inserted, a piece of media keeps a stable identity of its own, so later text growth never causes it to be recreated or to flicker",
-        "None of the actors doing this work share state through a global singleton, each long-lived collaborator is owned by one environment object, created once per feed",
-        "That separation is also what makes the whole pipeline testable in isolation, a fake image loader can stand in for the real one without touching anything else",
-        "On a real device the effect shows up as a flat frame time graph instead of a sawtooth, because no frame pays for more than the tokens that just arrived",
-        "Allocation counts follow the same shape, a few small allocations per append, not a spike that scales with how much of the message has streamed in so far",
-        "The eviction budget exists for the opposite case, when a message finally scrolls off screen and its cached bitmaps are no longer worth keeping around",
-        "Cache eviction runs off the scroll path too, so freeing memory for an old message never competes with rendering the one currently on screen",
-        "None of this is free to build, getting a stable per-token cost took careful separation between what must run synchronously and what can run anywhere else",
-        "The trade-off is a bit more bookkeeping up front, one identity and one lifecycle state per block, in exchange for a render loop that never has to guess what changed",
-        "A simpler design that re-derived everything from scratch on every read would have been far less code but would not have scaled past a short reply",
-        "In practice, most chat messages are short enough that either approach looks fine, the difference shows up once a reply runs long or arrives quickly",
-        "That is exactly the scenario this benchmark is built to stress, a long reply, streamed fast, with an oversized code block in the middle to keep the hot path hot",
-        "Scrolling while a message is still streaming is the harder case, because the visible cells keep changing at the same time the content underneath them keeps growing",
-        "Handling both at once is why the scroll path stays synchronous, it can react to a gesture immediately, using whatever was already measured, without waiting on the stream",
-        "If scrolling ever had to await a measurement, a fast flick during a long reply would visibly stutter, which is precisely the failure mode this design avoids",
-        "The same discipline extends to layer boundaries, nothing above layer one ever holds a reference to a node type from a layer below it",
-        "That boundary is what lets each layer be reasoned about, and tested, without pulling in the rest of the pipeline just to check one piece of it"
+        "An LRU cache is a fixed-size store that, once full, throws away whatever entry hasn't been touched in the longest time to make room for a new one",
+        "The two operations that matter are get, which looks up a value and marks it as freshly used, and set, which inserts or updates a value and may trigger an eviction",
+        "The whole design hinges on doing both of those in constant time, no matter how many entries the cache is holding",
+        "A plain dictionary alone gives you constant-time lookups, but it has no idea which entry was used most recently, so it can't tell you what to evict",
+        "A plain linked list alone gives you a clear recency order, but finding a given key means walking the list from the front, which is linear time",
+        "Putting the two together is what makes the whole thing work: the dictionary maps a key straight to its node, and the list orders those same nodes by recency",
+        "Every time a key is read or written, its node gets unlinked from wherever it currently sits in the list and relinked at the front",
+        "The front of the list is always the most recently used entry, and the tail is always the least recently used one, which is exactly the entry to evict",
+        "Because the dictionary holds a direct reference to each node, unlinking and relinking never requires searching the list, so the whole operation stays O(1)",
+        "Eviction, when the cache is over capacity, just means removing the tail node and deleting its key from the dictionary, both constant-time operations",
+        "A doubly linked list is what makes the unlink step cheap, since a node with both a previous and next pointer can remove itself without a search",
+        "A singly linked list would still work but removal would need the previous node, which means either extra bookkeeping or walking from the head",
+        "Some implementations skip the linked list entirely and use a queue keyed by a logical clock instead, trading a bit of memory for simpler code",
+        "That clock-based version still needs a way to skip stale entries during eviction, so it usually ends up doing more work per eviction on average",
+        "Language runtimes rarely leave this to you from scratch, Python's functools has an lru_cache decorator and Java's LinkedHashMap has a built-in access-order mode",
+        "Swift doesn't ship one in the standard library, which is exactly why implementing it by hand is a common interview and systems-design exercise",
+        "Thread safety is a separate concern from the core data structure, a cache used from multiple threads needs its own lock or actor isolation around both operations",
+        "Wrapping the whole thing in an actor is the natural Swift answer, since it serializes access without the caller ever managing a lock directly",
+        "Capacity planning matters more than people expect, too small and the hit rate collapses, too large and you're holding memory for entries nobody re-reads",
+        "A common mismatch is using an LRU cache for data with no locality of reference, in that case recency isn't a useful eviction signal at all",
+        "Cache size is usually tuned empirically, watching the actual hit rate against a real workload rather than guessing a number up front",
+        "A related structure is an LFU cache, which evicts based on how often an entry is used rather than how recently, useful when frequency matters more than recency",
+        "LFU costs more to maintain because every access needs to update a frequency count, and eviction has to scan for the true minimum unless you keep a frequency-bucketed structure",
+        "For most application-level caches, recency turns out to be a better proxy for future use than raw frequency, which is why LRU shows up so much more often in practice",
+        "A cache without any eviction policy at all is really just a memory leak with a lookup table attached to it",
+        "The eviction policy is the entire reason the structure exists, without it you'd just use a dictionary and let it grow forever",
+        "One subtlety worth catching in review: updating an existing key should still move it to the front, since a set is itself a use of that key",
+        "Getting that wrong is a classic bug — the entry looks fresh because it was just written, but the cache still treats it as the oldest and evicts it first",
+        "Testing this kind of structure well means covering the eviction boundary specifically: capacity minus one, exactly at capacity, and one over",
+        "It's also worth testing that a get on a missing key doesn't insert anything and doesn't disturb the existing ordering",
+        "None of this is free to build correctly, most of the subtlety is in the pointer bookkeeping around unlinking and relinking nodes, not the dictionary part",
+        "The trade-off is a bit more code up front, two data structures kept in sync instead of one, in exchange for both operations staying O(1) regardless of cache size",
+        "A simpler version that just tracked a timestamp per entry and scanned for the minimum on eviction would be far less code but would cost O(n) per eviction",
+        "In practice, that simpler version is fine for small caches, the difference only shows up once the cache holds enough entries that a linear scan gets expensive",
+        "That's exactly the kind of workload this example is meant to illustrate, real code, not pseudocode, with the eviction path spelled out end to end",
+        "Once you've built one LRU cache by hand, recognizing where a system could use one becomes a lot easier: rate limiters, connection pools, and view caches all show up with the same shape",
+        "The version below keeps the node's key alongside its value specifically so eviction can remove the matching dictionary entry without a reverse lookup",
+        "That's a small detail that's easy to miss the first time through, and it's the kind of thing worth calling out explicitly in code review"
     ]
 
     /// Streams `sentenceCount` sentences word by word (each chunk is one token append) so the
@@ -221,77 +232,84 @@ enum StreamDataset {
         return chunks
     }
 
-    /// A real, working Swift source excerpt (`AsyncSemaphore`, trimmed of its `#if canImport`
-    /// wrapper) used as the fenced-code-block content in `tokens()`. Streamed and cycled line by
-    /// line by `codeFence` so the "hot fence" benchmark scenario highlights real keyword/type/
-    /// comment token shapes instead of one repeated synthetic arithmetic statement.
+    /// A real, working Swift LRU cache implementation used as the fenced-code-block content in
+    /// `tokens()` — a dictionary of nodes plus a doubly linked list threading them in recency
+    /// order, exactly what the surrounding prose walks through. Streamed and cycled line by line
+    /// by `codeFence` so the "hot fence" benchmark scenario highlights real keyword/type/comment
+    /// token shapes instead of one repeated synthetic arithmetic statement.
     private static let realCodeLines: [String] = """
-    /// Priority-lane bounded semaphore for Swift concurrency. `wait()` acquires a slot,
-    /// `signal()` releases one.
-    ///
-    /// Contended waiters queue into a per-`DecodePriority` FIFO tier; `signal()` wakes the
-    /// highest-priority (lowest `rawValue`) non-empty tier, FIFO within that tier — tiers only
-    /// affect admission order, a held slot is never preempted. Cancellation-safe: `wait()` throws
-    /// `CancellationError` if cancelled while blocked, without consuming a slot.
-    public actor AsyncSemaphore {
-        private var count: Int
-        var waiterTiers: [[(id: UUID, cont: CheckedContinuation<Void, any Error>)]] =
-            Array(repeating: [], count: DecodePriority.allCases.count)
-        private var totalWaiterCount = 0
+    /// Fixed-capacity cache that evicts the least-recently-used entry once it's full.
+    /// `get` and `set` are both O(1): a dictionary maps each key straight to its node, and a
+    /// doubly linked list keeps those same nodes ordered from most- to least-recently used.
+    final class LRUCache<Key: Hashable, Value> {
+        private final class Node {
+            let key: Key
+            var value: Value
+            var prev: Node?
+            var next: Node?
 
-        public init(value: Int) {
-            precondition(value >= 0, "AsyncSemaphore value must be non-negative")
-            self.count = value
-        }
-
-        public func wait(id: UUID? = nil, priority: DecodePriority = .visible) async throws {
-            try Task.checkCancellation()
-            if count > 0 { count -= 1; return }
-
-            let waiterID = id ?? UUID()
-            try await withTaskCancellationHandler {
-                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in
-                    if Task.isCancelled {
-                        cont.resume(throwing: CancellationError())
-                    } else {
-                        waiterTiers[priority.rawValue].append((id: waiterID, cont: cont))
-                        totalWaiterCount += 1
-                    }
-                }
-            } onCancel: {
-                Task { [waiterID] in await self.cancelWaiter(id: waiterID) }
+            init(key: Key, value: Value) {
+                self.key = key
+                self.value = value
             }
         }
 
-        public func signal() {
-            guard totalWaiterCount > 0 else { count += 1; return }
-            for tier in waiterTiers.indices {
-                guard let waiter = waiterTiers[tier].first else { continue }
-                waiterTiers[tier].removeFirst()
-                totalWaiterCount -= 1
-                waiter.cont.resume()
+        private let capacity: Int
+        private var nodes: [Key: Node] = [:]
+        private var head: Node?   // most recently used
+        private var tail: Node?   // least recently used
+
+        init(capacity: Int) {
+            precondition(capacity > 0, "LRUCache capacity must be positive")
+            self.capacity = capacity
+        }
+
+        func get(_ key: Key) -> Value? {
+            guard let node = nodes[key] else { return nil }
+            moveToFront(node)
+            return node.value
+        }
+
+        func set(_ key: Key, value: Value) {
+            if let existing = nodes[key] {
+                existing.value = value
+                moveToFront(existing)
                 return
             }
-        }
 
-        public func elevate(id: UUID, to newPriority: DecodePriority) {
-            for tier in waiterTiers.indices where tier > newPriority.rawValue {
-                guard let idx = waiterTiers[tier].firstIndex(where: { $0.id == id }) else { continue }
-                let waiter = waiterTiers[tier].remove(at: idx)
-                waiterTiers[newPriority.rawValue].append(waiter)
-                return
+            let node = Node(key: key, value: value)
+            nodes[key] = node
+            linkAtFront(node)
+
+            if nodes.count > capacity, let lru = tail {
+                unlink(lru)
+                nodes.removeValue(forKey: lru.key)
             }
         }
 
-        // MARK: - Private
+        // MARK: - Linked-list bookkeeping
 
-        private func cancelWaiter(id: UUID) {
-            for tier in waiterTiers.indices {
-                guard let idx = waiterTiers[tier].firstIndex(where: { $0.id == id }) else { continue }
-                waiterTiers[tier].remove(at: idx).cont.resume(throwing: CancellationError())
-                totalWaiterCount -= 1
-                return
-            }
+        private func moveToFront(_ node: Node) {
+            guard head !== node else { return }
+            unlink(node)
+            linkAtFront(node)
+        }
+
+        private func linkAtFront(_ node: Node) {
+            node.prev = nil
+            node.next = head
+            head?.prev = node
+            head = node
+            if tail == nil { tail = node }
+        }
+
+        private func unlink(_ node: Node) {
+            node.prev?.next = node.next
+            node.next?.prev = node.prev
+            if head === node { head = node.next }
+            if tail === node { tail = node.prev }
+            node.prev = nil
+            node.next = nil
         }
     }
     """.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
