@@ -371,12 +371,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
 
     // MARK: - Code body horizontal scroll
 
-    /// The cell + code-body identity a `HorizontalCodePanRecognizer` drag is currently scrolling.
-    /// Set on `.began`, cleared on `.ended`/`.cancelled`/`.failed`.
-    private var codePanTarget: (cell: RenderCell, identity: RenderCell.LayerIdentity)?
-
     /// Strong owner of `codePan.delegate` (`UIGestureRecognizer.delegate` is `weak`).
     private let codePanDirectionDelegate = HorizontalCodePanDirectionDelegate()
+
+    /// Drives momentum/edge-spring for the code body a `HorizontalCodePanRecognizer` drag is
+    /// currently scrolling. Per-feed state, same lifetime category as `cellPool`/`mediaDispatcher`.
+    let codeBodyScrollAnimator = CodeBodyScrollAnimator()
 
     /// Finds the resident code body (if any) under `contentPoint` (content-space, matching
     /// `handleTap`'s convention). Cell-local conversion mirrors `Fragment.frame`'s coordinate
@@ -396,20 +396,26 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     @objc private func handleCodePan(_ gesture: HorizontalCodePanRecognizer) {
         switch gesture.state {
         case .began:
-            codePanTarget = resolveCodeBodyTarget(at: gesture.location(in: self))
-            applyCodePanDelta(gesture)
+            if let target = resolveCodeBodyTarget(at: gesture.location(in: self)),
+               let itemID = target.cell.currentItemID {
+                codeBodyScrollAnimator.beginDrag(cell: target.cell, identity: target.identity, itemID: itemID)
+            }
+            applyCodePanTranslation(gesture)
         case .changed:
-            applyCodePanDelta(gesture)
+            applyCodePanTranslation(gesture)
+        case .ended:
+            codeBodyScrollAnimator.endDrag(gestureVelocity: gesture.velocity(in: self).x)
+        case .cancelled:
+            codeBodyScrollAnimator.cancelDrag()
         default:
-            codePanTarget = nil
+            break
         }
     }
 
-    private func applyCodePanDelta(_ gesture: HorizontalCodePanRecognizer) {
-        guard let target = codePanTarget else { return }
+    private func applyCodePanTranslation(_ gesture: HorizontalCodePanRecognizer) {
         let dx = gesture.translation(in: self).x
         gesture.setTranslation(.zero, in: self)
-        target.cell.scrollCodeBody(identity: target.identity, by: dx)
+        codeBodyScrollAnimator.dragBy(dx: dx)
     }
 
     // MARK: - Teardown
@@ -418,6 +424,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// prefetch task. Safe to call before the view is removed from its parent.
     public func cancelInFlightWork() {
         for cell in visibleCells.values { cell.cancelPendingMedia() }
+        codeBodyScrollAnimator.cancelInFlightWork()
         let pipeline = self.pipeline
         Task { await pipeline.markInvalidated() }
     }

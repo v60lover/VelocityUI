@@ -341,7 +341,9 @@ public final class RenderCell {
                         width: delivery?.tailSize.width ?? 0,
                         height: delivery?.tailSize.height ?? 0
                     )
-                    codeBodyContentWidth[identity] = delivery?.totalSize.width ?? 0
+                    let contentWidth = delivery?.totalSize.width ?? 0
+                    codeBodyContentWidth[identity] = contentWidth
+                    reclampCodeBodyOffset(identity: identity, clip: clip, contentWidth: contentWidth)
                     // `sub` is not painted for a code body -- the chunk layers carry the pixels --
                     // but it stays in `sublayers` so the generic prune/reconcile bookkeeping every
                     // fragment goes through keeps working unmodified.
@@ -583,6 +585,7 @@ public final class RenderCell {
         tail.contents = content.tailImage
         tail.frame = CGRect(origin: CGPoint(x: 0, y: content.sealedSize.height), size: content.tailSize)
         codeBodyContentWidth[identity] = content.totalSize.width
+        reclampCodeBodyOffset(identity: identity, clip: clip, contentWidth: content.totalSize.width)
         CATransaction.commit()
         return true
     }
@@ -602,20 +605,54 @@ public final class RenderCell {
         return nil
     }
 
-    /// Applies a horizontal scroll delta to one code body's clip layer, clamped to
-    /// `[0, max(0, contentWidth - viewportWidth)]`. Pure `bounds.origin.x` write -- no
-    /// allocation, no await; the entire hot path for a horizontal code-body drag.
-    @discardableResult
-    func scrollCodeBody(identity: LayerIdentity, by dx: CGFloat) -> CGFloat? {
+    /// Snapshot of one code body's current horizontal scroll metrics, read by
+    /// `CodeBodyScrollAnimator` once per gesture-begin and once per animation tick.
+    struct ScrollBoundaryInfo: Equatable {
+        let offset: CGFloat
+        let contentWidth: CGFloat
+        let viewportWidth: CGFloat
+    }
+
+    /// Current offset/content/viewport metrics for one resident code body, or `nil` if `identity`
+    /// no longer names a mounted code body in this cell (fragment pruned, recycled away, or never
+    /// a code body). The animator treats `nil` as "target invalidated, stop."
+    func scrollBoundaryInfo(for identity: LayerIdentity) -> ScrollBoundaryInfo? {
         guard let clip = codeBodyClipLayer[identity] else { return nil }
         let contentWidth = codeBodyContentWidth[identity] ?? clip.bounds.width
-        let maxOffset = max(0, contentWidth - clip.bounds.width)
-        let newX = min(max(clip.bounds.origin.x - dx, 0), maxOffset)
+        return ScrollBoundaryInfo(offset: clip.bounds.origin.x, contentWidth: contentWidth, viewportWidth: clip.bounds.width)
+    }
+
+    /// Writes an absolute presented offset for `identity`'s clip layer. Pure `bounds.origin.x`
+    /// write under a disabled-action transaction -- no allocation, no await; the entire hot path
+    /// for a code-body drag/momentum/spring tick.
+    ///
+    /// Rejects (returns `false`, no write) when `itemID` no longer matches `currentItemID` --
+    /// the same privacy-guard shape as `applyContent`'s cross-item check, so a stale animator
+    /// tick racing a recycle can never move a different item's code body -- or when `identity`
+    /// no longer names a mounted code body (fragment pruned or recycled away).
+    @discardableResult
+    func setCodeBodyOffset(_ offset: CGFloat, identity: LayerIdentity, itemID: AnyHashable) -> Bool {
+        if let currentID = currentItemID, currentID != itemID {
+            RenderCell._privacyGuardFiredCount += 1
+            return false
+        }
+        guard let clip = codeBodyClipLayer[identity] else { return false }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        clip.bounds.origin.x = newX
+        clip.bounds.origin.x = offset
         CATransaction.commit()
-        return newX
+        return true
+    }
+
+    /// Re-clamps a code body's stored scroll offset to `[0, max(0, contentWidth - viewportWidth)]`
+    /// after either shrinks (a re-tokenize shortening the widest line, or a viewport resize) --
+    /// otherwise the offset could keep pointing past the new content edge. Call inside an
+    /// already-open disabled-action transaction; this performs no transaction of its own.
+    private func reclampCodeBodyOffset(identity: LayerIdentity, clip: CALayer, contentWidth: CGFloat) {
+        let maxOffset = max(0, contentWidth - clip.bounds.width)
+        if clip.bounds.origin.x > maxOffset {
+            clip.bounds.origin.x = maxOffset
+        }
     }
 
     // MARK: - Media Handles
