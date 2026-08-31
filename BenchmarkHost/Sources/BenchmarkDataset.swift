@@ -13,10 +13,12 @@ enum BenchmarkDataset {
             let cornerRadius = cornerRadii[Int(rng.next() % UInt64(cornerRadii.count))]
 
             // 800px wide covers full-width display up to 2× retina on most iPhones.
-            // Picsum serves deterministic photos by seed.
+            // picsum.photos has been down (503s, VelocityUI benchmark outage) — pull a fixed
+            // photo straight from Unsplash's CDN instead, sized/cropped via imgix query params.
             let pxWidth = 800
             let pxHeight = max(1, Int(Double(pxWidth) / aspectRatio))
-            let url = URL(string: "https://picsum.photos/seed/\(i)/\(pxWidth)/\(pxHeight)")!
+            let photoID = BenchmarkPhotoIDs.table[i % BenchmarkPhotoIDs.table.count]
+            let url = URL(string: "https://images.unsplash.com/photo-\(photoID)?w=\(pxWidth)&h=\(pxHeight)&fit=crop&q=80")!
 
             return BenchmarkItem(
                 id: i,
