@@ -21,11 +21,19 @@ final class CodeBodyScrollAnimator {
         let itemID: AnyHashable
     }
 
+    /// Which side of the legal range a spring is homing toward. Stored instead of a fixed
+    /// `CGFloat` target so the destination tracks a *moving* bound — a code body's content width
+    /// (and so `range.upperBound`) keeps growing while text is still streaming in, and a spring
+    /// that had already launched toward the right edge needs to keep chasing that edge outward,
+    /// not homing in on wherever it happened to be the tick the spring started. `range.lowerBound`
+    /// is always `0` and never moves, which is why this asymmetry only ever shows up on the right.
+    private enum Edge { case lower, upper }
+
     private enum State {
         case idle
         case dragging(rawOffset: CGFloat)
         case decelerating(offset: CGFloat, velocity: CGFloat)
-        case springing(offset: CGFloat, velocity: CGFloat, target: CGFloat)
+        case springing(offset: CGFloat, velocity: CGFloat, edge: Edge)
     }
 
     private let parameters: CodeBodyScrollPhysics.Parameters
@@ -90,9 +98,10 @@ final class CodeBodyScrollAnimator {
         let contentVelocity = -gestureVelocity
 
         if raw < range.lowerBound || raw > range.upperBound {
-            let bound = raw < range.lowerBound ? range.lowerBound : range.upperBound
+            let edge: Edge = raw < range.lowerBound ? .lower : .upper
             let presented = CodeBodyScrollPhysics.resistedOffset(rawOffset: raw, range: range, maxOverdrag: parameters.maxOverdrag)
-            startSpring(offset: presented, velocity: contentVelocity, target: bound)
+            let presentedVelocity = CodeBodyScrollPhysics.resistedVelocity(rawVelocity: contentVelocity, rawOffset: raw, range: range, maxOverdrag: parameters.maxOverdrag)
+            startSpring(offset: presented, velocity: presentedVelocity, edge: edge)
         } else if abs(contentVelocity) >= parameters.minimumLaunchVelocity {
             startDeceleration(offset: raw, velocity: contentVelocity)
         } else {
@@ -109,8 +118,9 @@ final class CodeBodyScrollAnimator {
         let range = CodeBodyScrollPhysics.legalRange(contentWidth: info.contentWidth, viewportWidth: info.viewportWidth)
         let clamped = min(max(raw, range.lowerBound), range.upperBound)
         if clamped != raw {
+            let edge: Edge = raw < range.lowerBound ? .lower : .upper
             let presented = CodeBodyScrollPhysics.resistedOffset(rawOffset: raw, range: range, maxOverdrag: parameters.maxOverdrag)
-            startSpring(offset: presented, velocity: 0, target: clamped)
+            startSpring(offset: presented, velocity: 0, edge: edge)
         } else {
             _ = cell.setCodeBodyOffset(clamped, identity: target.identity, itemID: target.itemID)
             settle()
@@ -142,8 +152,8 @@ final class CodeBodyScrollAnimator {
         startDisplayLink()
     }
 
-    private func startSpring(offset: CGFloat, velocity: CGFloat, target: CGFloat) {
-        state = .springing(offset: offset, velocity: velocity, target: target)
+    private func startSpring(offset: CGFloat, velocity: CGFloat, edge: Edge) {
+        state = .springing(offset: offset, velocity: velocity, edge: edge)
         startDisplayLink()
     }
 
@@ -152,6 +162,10 @@ final class CodeBodyScrollAnimator {
         lastTimestamp = nil
         let proxy = CodeBodyScrollDisplayLinkProxy(animator: self)
         let link = CADisplayLink(target: proxy, selector: #selector(CodeBodyScrollDisplayLinkProxy.tick(_:)))
+        // Without this, ProMotion devices can run the spring/momentum tick at a lower cadence
+        // than the native 120Hz scroll happening alongside it, which reads as the animation
+        // lagging the finger even though the physics itself is correct.
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
         link.add(to: .main, forMode: .common)
         displayLink = link
     }
@@ -184,13 +198,21 @@ final class CodeBodyScrollAnimator {
         case .idle, .dragging:
             settle()
 
-        case .decelerating(let offset, let velocity):
+        case .decelerating(_, let velocity):
+            // Read the offset back from the layer rather than trusting the value this enum case
+            // stored last tick: `applyLayout`/`applyCodeBodyTile` may have re-clamped
+            // `clip.bounds.origin.x` in between ticks (a content/viewport width change mid-
+            // momentum) via `reclampCodeBodyOffset`. Stepping from the stale stored value would
+            // silently overwrite that clamp on this tick.
+            let offset = info.offset
             let stepped = CodeBodyScrollPhysics.decelerationStep(offset: offset, velocity: velocity, dt: dt, parameters: parameters)
             if stepped.offset < range.lowerBound || stepped.offset > range.upperBound {
                 let bound = stepped.offset < range.lowerBound ? range.lowerBound : range.upperBound
                 let presented = CodeBodyScrollPhysics.resistedOffset(rawOffset: stepped.offset, range: range, maxOverdrag: parameters.maxOverdrag)
+                let presentedVelocity = CodeBodyScrollPhysics.resistedVelocity(rawVelocity: stepped.velocity, rawOffset: stepped.offset, range: range, maxOverdrag: parameters.maxOverdrag)
                 guard cell.setCodeBodyOffset(presented, identity: target.identity, itemID: target.itemID) else { settle(); return }
-                state = .springing(offset: presented, velocity: stepped.velocity, target: bound)
+                let edge: Edge = bound == range.lowerBound ? .lower : .upper
+                state = .springing(offset: presented, velocity: presentedVelocity, edge: edge)
             } else if CodeBodyScrollPhysics.isDecelerationSettled(velocity: stepped.velocity, parameters: parameters) {
                 _ = cell.setCodeBodyOffset(stepped.offset, identity: target.identity, itemID: target.itemID)
                 settle()
@@ -199,14 +221,21 @@ final class CodeBodyScrollAnimator {
                 state = .decelerating(offset: stepped.offset, velocity: stepped.velocity)
             }
 
-        case .springing(let offset, let velocity, let springTarget):
-            let stepped = CodeBodyScrollPhysics.springStep(offset: offset, velocity: velocity, target: springTarget, dt: dt, parameters: parameters)
-            if CodeBodyScrollPhysics.isSpringSettled(distance: stepped.offset - springTarget, velocity: stepped.velocity, parameters: parameters) {
-                _ = cell.setCodeBodyOffset(springTarget, identity: target.identity, itemID: target.itemID)
+        case .springing(_, let velocity, let edge):
+            // Same ground-truth resync as the decelerating case. The target is re-derived from
+            // the current `range` every tick (not carried over as a stored number) so a spring
+            // homing on the right edge keeps tracking `range.upperBound` outward while a code
+            // block is still streaming in content -- otherwise it homes in on wherever the edge
+            // happened to be the tick the spring launched and visibly falls behind on that side.
+            let offset = info.offset
+            let currentTarget = edge == .lower ? range.lowerBound : range.upperBound
+            let stepped = CodeBodyScrollPhysics.springStep(offset: offset, velocity: velocity, target: currentTarget, dt: dt, parameters: parameters)
+            if CodeBodyScrollPhysics.isSpringSettled(distance: stepped.offset - currentTarget, velocity: stepped.velocity, parameters: parameters) {
+                _ = cell.setCodeBodyOffset(currentTarget, identity: target.identity, itemID: target.itemID)
                 settle()
             } else {
                 guard cell.setCodeBodyOffset(stepped.offset, identity: target.identity, itemID: target.itemID) else { settle(); return }
-                state = .springing(offset: stepped.offset, velocity: stepped.velocity, target: springTarget)
+                state = .springing(offset: stepped.offset, velocity: stepped.velocity, edge: edge)
             }
         }
     }

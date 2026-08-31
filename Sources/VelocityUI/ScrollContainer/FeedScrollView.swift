@@ -273,6 +273,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
             if let contentSizeCategoryObserver {
                 notificationCenter.removeObserver(contentSizeCategoryObserver)
             }
+            // Otherwise a running momentum/spring animation keeps its CADisplayLink scheduled on
+            // the run loop past this view's lifetime — the proxy is the only thing it retains
+            // (see CodeBodyScrollDisplayLinkProxy), but the run loop itself keeps ticking.
+            codeBodyScrollAnimator.cancelInFlightWork()
         }
     }
 

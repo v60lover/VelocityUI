@@ -60,6 +60,43 @@ final class CodeBodyScrollPhysicsTests: XCTestCase {
         }
     }
 
+    // MARK: - Momentum -> edge spring transition
+
+    /// Reproduces the scenario the animator hits every time deceleration crosses the legal range
+    /// mid-flight: `decelerationStep` returns a raw (unresisted) offset/velocity pair, the offset
+    /// gets compressed into `[bound, bound + maxOverdrag]` by `resistedOffset`, and the velocity
+    /// must be compressed by the matching `resistedVelocity` factor before feeding both into
+    /// `springStep` -- otherwise the spring starts from a small compressed position but a huge
+    /// raw-scale velocity and overshoots past the visual overdrag cap the position was just
+    /// clamped into.
+    func testMomentumToEdgeSpringTransitionNeverExceedsMaxOverdragEvenWithHighVelocity() {
+        let range: ClosedRange<CGFloat> = 0...300
+        let bound = range.upperBound
+        let cap = bound + params.maxOverdrag
+
+        // A fast fling landing just past the edge in one 60Hz tick -- large enough that feeding
+        // its raw velocity straight into the spring (the pre-fix behavior) overshoots `cap`.
+        let rawOffset: CGFloat = 340
+        let rawVelocity: CGFloat = 2600
+
+        let presented = CodeBodyScrollPhysics.resistedOffset(rawOffset: rawOffset, range: range, maxOverdrag: params.maxOverdrag)
+        let presentedVelocity = CodeBodyScrollPhysics.resistedVelocity(rawVelocity: rawVelocity, rawOffset: rawOffset, range: range, maxOverdrag: params.maxOverdrag)
+        XCTAssertLessThan(presentedVelocity, rawVelocity, "compressed-position velocity must shrink relative to the raw fling velocity")
+
+        var offset = presented
+        var velocity = presentedVelocity
+        var maxObservedOffset = offset
+        for _ in 0..<180 {
+            let stepped = CodeBodyScrollPhysics.springStep(offset: offset, velocity: velocity, target: bound, dt: 1.0 / 60.0, parameters: params)
+            offset = stepped.offset
+            velocity = stepped.velocity
+            maxObservedOffset = max(maxObservedOffset, offset)
+            if CodeBodyScrollPhysics.isSpringSettled(distance: offset - bound, velocity: velocity, parameters: params) { break }
+        }
+
+        XCTAssertLessThanOrEqual(maxObservedOffset, cap + 0.01, "spring must never carry the code body past the resisted overdrag cap")
+    }
+
     // MARK: - Spring settlement
 
     func testSpringStepConvergesToTargetWithZeroVelocity() {

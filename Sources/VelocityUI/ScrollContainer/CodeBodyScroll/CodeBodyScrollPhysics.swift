@@ -26,7 +26,9 @@ struct CodeBodyScrollPhysics: Sendable {
         /// Spring settled once |offset - target| is under this, in points.
         var settleDistanceEpsilon: CGFloat = 0.25
         /// Largest dt (s) a single tick may consume — caps the jump after a main-thread stall.
-        var maxStepDuration: CGFloat = 1.0 / 20.0
+        /// Kept above 1/10s so the "exact for a stalled 1/10s" claim above actually holds; only
+        /// stalls longer than that (e.g. a resumed-from-background frame) get truncated.
+        var maxStepDuration: CGFloat = 0.15
 
         static let `default` = Parameters()
     }
@@ -63,6 +65,27 @@ struct CodeBodyScrollPhysics: Sendable {
     private static func resistedExcess(_ excess: CGFloat, limit: CGFloat) -> CGFloat {
         guard limit > 0, excess > 0 else { return 0 }
         return limit * (1 - 1 / (excess / limit + 1))
+    }
+
+    /// Scales a raw velocity to match the position compression `resistedOffset` already applied
+    /// at `rawOffset`. `resistedOffset` maps a potentially huge raw excess into the small
+    /// `[0, maxOverdrag]` on-screen band; a velocity computed in raw-offset units is now too large
+    /// for that compressed band — feeding it unscaled into a spring starting from the compressed
+    /// position lets the spring overshoot past `maxOverdrag` before it turns back. This returns
+    /// `rawVelocity * f'(excess)`, the analytic derivative of `resistedExcess`, so offset and
+    /// velocity enter the spring in the same (compressed) coordinate space.
+    static func resistedVelocity(rawVelocity: CGFloat, rawOffset: CGFloat, range: ClosedRange<CGFloat>, maxOverdrag: CGFloat) -> CGFloat {
+        let excess: CGFloat
+        if rawOffset < range.lowerBound {
+            excess = range.lowerBound - rawOffset
+        } else if rawOffset > range.upperBound {
+            excess = rawOffset - range.upperBound
+        } else {
+            return rawVelocity
+        }
+        guard maxOverdrag > 0, excess > 0 else { return rawVelocity }
+        let denom = excess / maxOverdrag + 1
+        return rawVelocity / (denom * denom)
     }
 
     /// One frame of exponential momentum decay. `v(t) = v0 * 2^(-t/halfLife)`; the returned
