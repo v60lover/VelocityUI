@@ -105,9 +105,18 @@ private func measureContent(
             let size = ctx.measure(bodyDescriptor, width: .greatestFiniteMagnitude)
             return ResolvedLayout(totalFrame: CGRect(origin: .zero, size: size), nodeIndex: nodeIndex, renderPart: .codeBody)
         }
-        let total = CGRect(x: 0, y: 0, width: max(width, body.totalFrame.width), height: header.totalFrame.height + body.totalFrame.height)
+        // Card/background/body frame width is pinned to the proposed container `width`
+        // unconditionally -- a long line must never expand the card or its parent bubble past
+        // the feed width. The raster itself stays as wide as its longest line (measured above
+        // at `.greatestFiniteMagnitude`); true content width for horizontal scroll comes from
+        // `CodeBodyLayerContent.totalSize.width` in RenderCell, independent of this frame.
+        let total = CGRect(x: 0, y: 0, width: width, height: header.totalFrame.height + body.totalFrame.height)
         let background = ResolvedLayout(totalFrame: total, nodeIndex: nodeIndex, renderPart: .codeBackground)
-        return ResolvedLayout(totalFrame: total, children: [background, header, body.offsetBy(dy: header.totalFrame.height)], nodeIndex: nodeIndex)
+        let clampedBody = ResolvedLayout(
+            totalFrame: CGRect(x: 0, y: 0, width: width, height: body.totalFrame.height),
+            nodeIndex: nodeIndex, renderPart: .codeBody
+        )
+        return ResolvedLayout(totalFrame: total, children: [background, header, clampedBody.offsetBy(dy: header.totalFrame.height)], nodeIndex: nodeIndex)
 
     case .image(let d):
         let h = d.aspectRatio.map { width / $0 } ?? width

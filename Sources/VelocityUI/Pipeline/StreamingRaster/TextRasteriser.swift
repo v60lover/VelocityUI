@@ -212,6 +212,7 @@ public nonisolated func rasterizeText(
     scale: CGFloat = 1,
     inkGuard: CGFloat = 2
 ) -> CGImage? {
+    TextRasterizeDebugCounter.increment()
     guard outputSize.width > 0, outputSize.height > 0, layoutWidth > 0 else { return nil }
 
     let storage = NSTextContentStorage()

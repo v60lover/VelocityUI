@@ -12,13 +12,13 @@ extension RenderCell {
     /// still-growing hot chunk (and any newly-frozen chunk) actually update on a given call. This
     /// keeps the per-line-seal MainActor cost bounded by the chunks that changed, not by
     /// `chunks.count`.
-    func reconcileChunkLayers(identity: LayerIdentity, chunks: [CodeBodyChunk], origin: CGPoint) {
+    func reconcileChunkLayers(identity: LayerIdentity, chunks: [CodeBodyChunk], into container: CALayer, origin: CGPoint) {
         var layers = codeChunkSublayers[identity] ?? []
         while layers.count < chunks.count {
             let l = CALayer()
             l.masksToBounds = false
             l.cornerRadius = 0
-            contentLayer.addSublayer(l)
+            container.addSublayer(l)
             layers.append(l)
         }
         while layers.count > chunks.count {

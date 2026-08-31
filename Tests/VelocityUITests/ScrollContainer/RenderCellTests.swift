@@ -1053,15 +1053,20 @@ final class RenderCellTests: XCTestCase {
 
         cell.applyLayout([fragment], synchronousContent: [:], codeBodyContent: [fragment.id: content])
 
-        guard let layers = contentLayer(of: cell)?.sublayers else {
-            return XCTFail("Expected code-body layers")
+        // Chunk/tail layers live one level deeper now -- sublayers of the code body's clip
+        // container (itself a sublayer of contentLayer), at LOCAL coordinates. `convert(_:to:)`
+        // recovers the absolute contentLayer-space frame regardless of nesting.
+        guard let contentLayer = contentLayer(of: cell),
+              let clip = contentLayer.sublayers?.first(where: { $0.masksToBounds }),
+              let painted = clip.sublayers?.filter({ $0.contents != nil })
+        else {
+            return XCTFail("Expected code-body clip layer with chunk/tail sublayers")
         }
-        let painted = layers.filter { $0.contents != nil }
         XCTAssertEqual(painted.count, 2, "one chunk layer + one tail layer")
         XCTAssertTrue((painted[0].contents as! CGImage) === sealed)
         XCTAssertTrue((painted[1].contents as! CGImage) === tail)
-        XCTAssertEqual(painted[0].frame, CGRect(x: 4, y: 20, width: 120, height: 20))
-        XCTAssertEqual(painted[1].frame, CGRect(x: 4, y: 40, width: 80, height: 20))
+        XCTAssertEqual(clip.convert(painted[0].frame, to: contentLayer), CGRect(x: 4, y: 20, width: 120, height: 20))
+        XCTAssertEqual(clip.convert(painted[1].frame, to: contentLayer), CGRect(x: 4, y: 40, width: 80, height: 20))
     }
 
     func testCodeBodyTailSurvivesViewportExitAndReentry() {
@@ -1098,13 +1103,16 @@ final class RenderCellTests: XCTestCase {
                 codeBodyContent: [:]
             )
 
-            guard let layers = contentLayer(of: cell)?.sublayers else {
-                return XCTFail("Expected re-entered code-body layers")
+            guard let clip = contentLayer(of: cell)?.sublayers?.first(where: { $0.masksToBounds }),
+                  let layers = clip.sublayers
+            else {
+                return XCTFail("Expected re-entered code-body clip layer")
             }
             guard let tailLayer = layers.first(where: { $0.contents != nil && ($0.contents as! CGImage) === tail }) else {
                 return XCTFail("expected the tail layer to survive re-entry")
             }
-            XCTAssertEqual(tailLayer.frame.origin.y, 20 + (sealed == nil ? 0 : 20))
+            // Tail layer position is LOCAL to the clip container now (origin x=0), not absolute.
+            XCTAssertEqual(tailLayer.frame.origin.y, sealed == nil ? 0 : 20)
         }
     }
 }

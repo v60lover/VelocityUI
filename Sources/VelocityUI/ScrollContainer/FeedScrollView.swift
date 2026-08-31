@@ -236,6 +236,14 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
         addGestureRecognizer(tap)
 
+        let codePan = HorizontalCodePanRecognizer(target: self, action: #selector(handleCodePan(_:)))
+        codePan.hitTest = { [weak self] point in self?.resolveCodeBodyTarget(at: point) != nil }
+        codePan.delegate = codePanDirectionDelegate
+        addGestureRecognizer(codePan)
+        // The feed's own vertical pan always waits for ours to fail or succeed first -- the
+        // standard nested-scroll-direction technique.
+        panGestureRecognizer.require(toFail: codePan)
+
         contentSizeCategory = VContentSizeCategory(traitCollection.preferredContentSizeCategory)
         // queue: nil — the OS always posts this on main, keeping delivery synchronous and
         // consistent with "scroll path never awaits".
@@ -359,6 +367,49 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
                 return
             }
         }
+    }
+
+    // MARK: - Code body horizontal scroll
+
+    /// The cell + code-body identity a `HorizontalCodePanRecognizer` drag is currently scrolling.
+    /// Set on `.began`, cleared on `.ended`/`.cancelled`/`.failed`.
+    private var codePanTarget: (cell: RenderCell, identity: RenderCell.LayerIdentity)?
+
+    /// Strong owner of `codePan.delegate` (`UIGestureRecognizer.delegate` is `weak`).
+    private let codePanDirectionDelegate = HorizontalCodePanDirectionDelegate()
+
+    /// Finds the resident code body (if any) under `contentPoint` (content-space, matching
+    /// `handleTap`'s convention). Cell-local conversion mirrors `Fragment.frame`'s coordinate
+    /// space, which is what `RenderCell.codeBodyIdentity(at:)` expects.
+    private func resolveCodeBodyTarget(at contentPoint: CGPoint) -> (cell: RenderCell, identity: RenderCell.LayerIdentity)? {
+        for (index, cell) in visibleCells {
+            guard index < resolvedFrames.count else { continue }
+            let frame = resolvedFrames[index]
+            guard frame.contains(contentPoint) else { continue }
+            let local = CGPoint(x: contentPoint.x - frame.minX, y: contentPoint.y - frame.minY)
+            guard let identity = cell.codeBodyIdentity(at: local) else { return nil }
+            return (cell, identity)
+        }
+        return nil
+    }
+
+    @objc private func handleCodePan(_ gesture: HorizontalCodePanRecognizer) {
+        switch gesture.state {
+        case .began:
+            codePanTarget = resolveCodeBodyTarget(at: gesture.location(in: self))
+            applyCodePanDelta(gesture)
+        case .changed:
+            applyCodePanDelta(gesture)
+        default:
+            codePanTarget = nil
+        }
+    }
+
+    private func applyCodePanDelta(_ gesture: HorizontalCodePanRecognizer) {
+        guard let target = codePanTarget else { return }
+        let dx = gesture.translation(in: self).x
+        gesture.setTranslation(.zero, in: self)
+        target.cell.scrollCodeBody(identity: target.identity, by: dx)
     }
 
     // MARK: - Teardown

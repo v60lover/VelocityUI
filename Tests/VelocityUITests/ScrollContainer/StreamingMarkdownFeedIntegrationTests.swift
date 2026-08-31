@@ -354,10 +354,15 @@ final class StreamingMarkdownFeedIntegrationTests: XCTestCase {
             return XCTFail("expected a code body fragment while the fence is still open")
         }
 
-        XCTAssertGreaterThan(
+        // The body fragment frame is pinned to the container width (VelocityUI-oz5q.6's
+        // containment fix) -- neither collapsed below it (the original bug this test guarded)
+        // nor expanded past it by a wide unsealed tail (the newer bug the pin now prevents).
+        // The tail's real width still flows through `CodeBodyLayerContent.totalSize`,
+        // independent of this frame -- that's what RenderCell's horizontal scroll reads.
+        XCTAssertEqual(
             bodyFragment.frame.width, 375,
-            "an unterminated wide first line (zero sealed lines yet) must not collapse the code "
-            + "body frame width -- it must reflect the tail's real width instead"
+            "an unterminated wide first line must not collapse OR expand the code body frame "
+            + "width -- it must stay pinned to the container width"
         )
 
         await drainFeedWork(feed)

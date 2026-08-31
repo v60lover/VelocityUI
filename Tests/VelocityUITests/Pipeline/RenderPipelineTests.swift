@@ -155,9 +155,13 @@ final class RenderPipelineTests: XCTestCase {
             guard case .text(let d) = fragment.content, case .body = d.codeBlockRole else { return false }
             return true
         })
-        XCTAssertGreaterThan(
+        // The card/body frame is pinned to the proposed container width -- a long line must
+        // never expand the card past the feed width (VelocityUI-oz5q.6's containment fix).
+        // The raster itself stays wide (asserted on `bitmap.width` below); horizontal scroll
+        // reads true content width from `CodeBodyLayerContent.totalSize`, independent of this frame.
+        XCTAssertEqual(
             bodyFragment.frame.width, 100,
-            "body fragment must be measured wider than the 100pt container -- the generic clipped path never exceeds it"
+            "body fragment frame must be pinned to the container width, not the wide raster width"
         )
 
         let bodyBlockID = try XCTUnwrap(bodyFragment.blockID)

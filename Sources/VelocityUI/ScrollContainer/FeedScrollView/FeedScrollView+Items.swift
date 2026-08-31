@@ -793,9 +793,13 @@ extension FeedScrollView {
                     descriptor.headerText, layoutWidth: width, outputSize: headerSize, scale: scale
                 )
                 let headerWidth = cachedHeaderSize?.width ?? headerBitmap.map { CGFloat($0.width) / scale } ?? headerSize.width
-                let bodyFrame = localFrame.offsetBy(dx: 0, dy: cursor + headerSize.height)
+                // Card/background/body frame width is pinned to `width` unconditionally -- a
+                // long line (localFrame.width can be the wide raster/chunk-content width) must
+                // never expand the card past the feed width. True content width for horizontal
+                // scroll comes from `CodeBodyLayerContent.totalSize.width` in RenderCell.
+                let bodyFrame = CGRect(x: 0, y: cursor + headerSize.height, width: width, height: localFrame.height)
                 let total = CGRect(
-                    x: 0, y: cursor, width: max(width, bodyFrame.width),
+                    x: 0, y: cursor, width: width,
                     height: headerSize.height + localFrame.height
                 )
                 let materialized = materializeCodeBlockFragments(

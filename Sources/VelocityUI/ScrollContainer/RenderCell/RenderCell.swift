@@ -58,6 +58,15 @@ public final class RenderCell {
     /// see `RenderCell+CodeChunks.swift`. Mounted whenever any part of the code card is resident
     /// (no sub-block viewport residency yet).
     var codeChunkSublayers: [LayerIdentity: [CALayer]] = [:]
+    /// One clip container per code body -- `masksToBounds = true, cornerRadius = 0` (a plain
+    /// rectangular clip, not corner rounding, so no offscreen render pass). Chunk/tail layers are
+    /// sublayers of this at LOCAL coordinates (origin x=0); horizontal scroll is a single write to
+    /// `bounds.origin.x`, which survives `.frame` reassignment (CALayer never touches
+    /// `bounds.origin` when `.frame` is set) so vertical relayout never resets horizontal scroll.
+    var codeBodyClipLayer: [LayerIdentity: CALayer] = [:]
+    /// Full unclipped content width per code body, from `CodeBodyLayerContent.totalSize.width` --
+    /// the clamp bound for horizontal scroll (`clip.bounds.size.width` is the viewport width).
+    private var codeBodyContentWidth: [LayerIdentity: CGFloat] = [:]
     private var codeBodyContentByFragmentID: [Int: CodeBodyLayerContent] = [:]
     var layerIdentityByFragmentID: [Int: LayerIdentity] = [:]
     private var codeBackgroundByIdentity: [LayerIdentity: CodeBlockBackgroundDescriptor] = [:]
@@ -142,6 +151,9 @@ public final class RenderCell {
             }
             for sub in codeTailSublayers.values { sub.contents = nil }
             for layers in codeChunkSublayers.values { layers.forEach { $0.contents = nil } }
+            // A recycled cell must not inherit a different item's horizontal scroll position --
+            // the clip layer instance survives recycle (like the sublayers above), only its offset resets.
+            for clip in codeBodyClipLayer.values { clip.bounds.origin = .zero }
             mediaFragmentIDs.removeAll(keepingCapacity: true)
             placeholderPaintedFragmentIDs.removeAll(keepingCapacity: true)
             blockFragments.removeAll(keepingCapacity: true)
@@ -201,6 +213,8 @@ public final class RenderCell {
                 sublayers.removeValue(forKey: identity)
                 codeTailSublayers.removeValue(forKey: identity)?.removeFromSuperlayer()
                 codeChunkSublayers.removeValue(forKey: identity)?.forEach { $0.removeFromSuperlayer() }
+                codeBodyClipLayer.removeValue(forKey: identity)?.removeFromSuperlayer()
+                codeBodyContentWidth.removeValue(forKey: identity)
                 codeBackgroundByIdentity.removeValue(forKey: identity)
                 let removedIDs = layerIdentityByFragmentID.keys.filter { layerIdentityByFragmentID[$0] == identity }
                 for id in removedIDs {
@@ -238,6 +252,8 @@ public final class RenderCell {
             if case .image(let descriptor) = fragment.content {
                 codeTailSublayers.removeValue(forKey: identity)?.removeFromSuperlayer()
                 codeChunkSublayers.removeValue(forKey: identity)?.forEach { $0.removeFromSuperlayer() }
+                codeBodyClipLayer.removeValue(forKey: identity)?.removeFromSuperlayer()
+                codeBodyContentWidth.removeValue(forKey: identity)
                 codeBodyContentByFragmentID.removeValue(forKey: fragment.id)
                 if let image = synchronousContent[fragment.id] {
                     // Sync paint: image is already decoded — set contents inline.
@@ -261,6 +277,8 @@ public final class RenderCell {
             } else if case .codeBlockBackground(let descriptor) = fragment.content {
                 codeTailSublayers.removeValue(forKey: identity)?.removeFromSuperlayer()
                 codeChunkSublayers.removeValue(forKey: identity)?.forEach { $0.removeFromSuperlayer() }
+                codeBodyClipLayer.removeValue(forKey: identity)?.removeFromSuperlayer()
+                codeBodyContentWidth.removeValue(forKey: identity)
                 codeBodyContentByFragmentID.removeValue(forKey: fragment.id)
                 if codeBackgroundByIdentity[identity] != descriptor || sub.contents == nil {
                     sub.contents = rasterizeCodeBlockBackground(cornerRadius: descriptor.cornerRadius, color: descriptor.color)
@@ -277,11 +295,33 @@ public final class RenderCell {
                     }
                     let delivery = codeBodyContentByFragmentID[fragment.id]
                     let chunks = delivery?.chunks ?? []
-                    // Reconcile the chunk layers before creating the tail layer so a fresh mount's
-                    // sublayer insertion order stacks chunk(s) then tail -- matches the visual
-                    // top-to-bottom order and keeps layer position stable for anyone inspecting
-                    // `contentLayer.sublayers`.
-                    reconcileChunkLayers(identity: identity, chunks: chunks, origin: fragment.frame.origin)
+
+                    // One clip container per code body, framed to the (now card-width-pinned)
+                    // body fragment frame. `masksToBounds = true` here is a plain rectangular
+                    // clip (cornerRadius stays 0) -- not corner rounding, so no offscreen render
+                    // pass; the "no masksToBounds" invariant is about rounding, not this.
+                    let clip: CALayer
+                    if let existing = codeBodyClipLayer[identity] {
+                        clip = existing
+                    } else {
+                        let l = CALayer()
+                        l.masksToBounds = true
+                        l.cornerRadius = 0
+                        contentLayer.addSublayer(l)
+                        codeBodyClipLayer[identity] = l
+                        clip = l
+                    }
+                    // Setting `.frame` writes `bounds.size`/`position`, never `bounds.origin` --
+                    // any horizontal scroll offset already on this layer survives this write.
+                    if clip.frame != fragment.frame {
+                        clip.frame = fragment.frame
+                    }
+
+                    // Chunk/tail layers are sublayers of `clip` at LOCAL coordinates (origin
+                    // x=0) -- their own natural (possibly wide) size, never touched by scroll.
+                    // Reconcile the chunk layers before creating the tail layer so a fresh
+                    // mount's sublayer insertion order stacks chunk(s) then tail.
+                    reconcileChunkLayers(identity: identity, chunks: chunks, into: clip, origin: .zero)
                     let tail: CALayer
                     if let existing = codeTailSublayers[identity] {
                         tail = existing
@@ -289,18 +329,19 @@ public final class RenderCell {
                         let layer = CALayer()
                         layer.masksToBounds = false
                         layer.cornerRadius = 0
-                        contentLayer.addSublayer(layer)
+                        clip.addSublayer(layer)
                         codeTailSublayers[identity] = layer
                         tail = layer
                     }
                     let sealedHeight = delivery?.sealedSize.height ?? 0
                     tail.contents = delivery?.tailImage
                     tail.frame = CGRect(
-                        x: fragment.frame.minX,
-                        y: fragment.frame.minY + sealedHeight,
+                        x: 0,
+                        y: sealedHeight,
                         width: delivery?.tailSize.width ?? 0,
                         height: delivery?.tailSize.height ?? 0
                     )
+                    codeBodyContentWidth[identity] = delivery?.totalSize.width ?? 0
                     // `sub` is not painted for a code body -- the chunk layers carry the pixels --
                     // but it stays in `sublayers` so the generic prune/reconcile bookkeeping every
                     // fragment goes through keeps working unmodified.
@@ -319,6 +360,8 @@ public final class RenderCell {
                 }
                 codeTailSublayers.removeValue(forKey: identity)?.removeFromSuperlayer()
                 codeChunkSublayers.removeValue(forKey: identity)?.forEach { $0.removeFromSuperlayer() }
+                codeBodyClipLayer.removeValue(forKey: identity)?.removeFromSuperlayer()
+                codeBodyContentWidth.removeValue(forKey: identity)
                 codeBodyContentByFragmentID.removeValue(forKey: fragment.id)
                 // Text has no async delivery path — set unconditionally so a cache miss can't
                 // retain a previous fragment's pixels after reclassification at the same id.
@@ -334,6 +377,8 @@ public final class RenderCell {
             } else {
                 codeTailSublayers.removeValue(forKey: identity)?.removeFromSuperlayer()
                 codeChunkSublayers.removeValue(forKey: identity)?.forEach { $0.removeFromSuperlayer() }
+                codeBodyClipLayer.removeValue(forKey: identity)?.removeFromSuperlayer()
+                codeBodyContentWidth.removeValue(forKey: identity)
                 codeBodyContentByFragmentID.removeValue(forKey: fragment.id)
                 sub.backgroundColor = nil
                 sub.contents = nil  // image→geometry reclassification must not leave stale image visible
@@ -525,22 +570,52 @@ public final class RenderCell {
             RenderCell._privacyGuardFiredCount += 1
             return false
         }
-        guard let identity = layerIdentityByFragmentID[id], let sub = sublayers[identity],
+        guard let identity = layerIdentityByFragmentID[id], let clip = codeBodyClipLayer[identity],
               let tail = codeTailSublayers[identity]
         else { return false }
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         codeBodyContentByFragmentID[id] = content
-        let origin = sub.frame.origin
-        reconcileChunkLayers(identity: identity, chunks: content.chunks, origin: origin)
+        // Chunk/tail layers live at LOCAL coordinates inside `clip` -- see the code-body branch
+        // of `applyLayout`. `clip.bounds.origin.x` (the horizontal scroll offset) is untouched.
+        reconcileChunkLayers(identity: identity, chunks: content.chunks, into: clip, origin: .zero)
         tail.contents = content.tailImage
-        tail.frame = CGRect(
-            origin: CGPoint(x: origin.x, y: origin.y + content.sealedSize.height),
-            size: content.tailSize
-        )
+        tail.frame = CGRect(origin: CGPoint(x: 0, y: content.sealedSize.height), size: content.tailSize)
+        codeBodyContentWidth[identity] = content.totalSize.width
         CATransaction.commit()
         return true
+    }
+
+    // MARK: - Code Body Horizontal Scroll (hot path -- never awaits)
+
+    /// Locates a scrollable code body's clip layer under `point` (cell-local coordinates,
+    /// matching `Fragment.frame`'s space). Skips bodies whose content already fits the viewport
+    /// -- nothing to scroll, so the touch falls through to vertical scroll instead. O(resident
+    /// code bodies in this cell), no allocation.
+    func codeBodyIdentity(at point: CGPoint) -> LayerIdentity? {
+        for (identity, clip) in codeBodyClipLayer where clip.frame.contains(point) {
+            let contentWidth = codeBodyContentWidth[identity] ?? clip.bounds.width
+            guard contentWidth > clip.bounds.width + 0.5 else { continue }
+            return identity
+        }
+        return nil
+    }
+
+    /// Applies a horizontal scroll delta to one code body's clip layer, clamped to
+    /// `[0, max(0, contentWidth - viewportWidth)]`. Pure `bounds.origin.x` write -- no
+    /// allocation, no await; the entire hot path for a horizontal code-body drag.
+    @discardableResult
+    func scrollCodeBody(identity: LayerIdentity, by dx: CGFloat) -> CGFloat? {
+        guard let clip = codeBodyClipLayer[identity] else { return nil }
+        let contentWidth = codeBodyContentWidth[identity] ?? clip.bounds.width
+        let maxOffset = max(0, contentWidth - clip.bounds.width)
+        let newX = min(max(clip.bounds.origin.x - dx, 0), maxOffset)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        clip.bounds.origin.x = newX
+        CATransaction.commit()
+        return newX
     }
 
     // MARK: - Media Handles

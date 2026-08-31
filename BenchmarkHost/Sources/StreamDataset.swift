@@ -16,7 +16,8 @@ enum StreamDataset {
     /// fenced code block closes and seals.
     static let ruleAfterBlockIndex = 3
 
-    static let imageURL = URL(string: "https://picsum.photos/seed/velocityui-stream-benchmark/800/450")!
+    // picsum.photos has been down (503s) — pulled straight from Unsplash's CDN instead.
+    static let imageURL = URL(string: "https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=800&h=450&fit=crop&q=80")!
 
     /// Ordered append chunks a `StreamDriver` feeds into `IncrementalMarkdownParser.append(_:)`
     /// one at a time. Reads like a real chat answer, not a word-salad stress load: a setext
