@@ -108,7 +108,9 @@ private nonisolated func collectFragments(
         appendLeaf(.image(d))
     case .text(let d):
         appendLeaf(.text(d))
-    case .spacer, .hosting, .gif, .video, .customLayer:
+    // Table rasterization/mounting (VelocityUI-8ge8.6) isn't wired in yet — same frame-only
+    // placeholder as the other not-yet-rendered kinds.
+    case .spacer, .hosting, .gif, .video, .customLayer, .table:
         appendLeaf(.geometry)
     case .vstack, .hstack, .zstack:
         // A framed container narrows the clip to its own slot; an unframed one

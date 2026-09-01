@@ -35,9 +35,10 @@ extension IncrementalMarkdownParser {
         _renderNodes(theme: theme)
     }
 
-    /// One block's DSL node — a `CodeBlockNode` for a fenced code block, a `TextNode`
-    /// otherwise. Shared by `_renderNodes` and `StreamingMarkdownController.renderNodes` so
-    /// the live and cached paths can't drift on which blocks get code presentation.
+    /// One block's DSL node — a `CodeBlockNode` for a fenced code block, a `MarkdownTableNode`
+    /// for a grouped table block, a `TextNode` otherwise. Shared by `_renderNodes` and
+    /// `StreamingMarkdownController.renderNodes` so the live and cached paths can't drift on
+    /// which blocks get code/table presentation.
     /// `isPendingTableHeader` must only be true for the last block in the full sealed+hot
     /// sequence — see `isPendingTableCandidate`. A non-trailing block matching that text shape
     /// has already been resolved as a plain paragraph by whatever followed it.
@@ -47,6 +48,12 @@ extension IncrementalMarkdownParser {
         if case .codeFence(let language) = block.parsed.kind {
             return CodeBlockNode(
                 language: language, rawCode: styled.content, font: theme.code,
+                blockID: block.blockID, blockLifecycle: lifecycle
+            )
+        }
+        if case .table(let alignments) = block.parsed.kind {
+            return MarkdownTableNode(
+                tableRows: block.parsed.tableRows, alignments: alignments, font: theme.body,
                 blockID: block.blockID, blockLifecycle: lifecycle
             )
         }

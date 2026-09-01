@@ -22,6 +22,9 @@ public extension NodeTable {
             let generation = Block.hash(d.layoutHash, d.appearanceHash)
             return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: .measured, presentation: .geometry, geometryHash: d.layoutHash, appearanceHash: d.appearanceHash, contentRequest: d.url.map { _ in BlockContentRequest(key: key, generation: generation, kind: .video(d)) })
         case .customLayer(let size): return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: .fixed(size), presentation: .geometry, geometryHash: Block.hash(size.width, size.height), appearanceHash: 0)
+        // Rasterization/mounting (VelocityUI-8ge8.6) isn't wired in yet — same geometry-only
+        // placeholder presentation as .gif/.video before their content pipelines land.
+        case .table(let d): return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: .measured, presentation: .geometry, geometryHash: d.layoutHash, appearanceHash: d.appearanceHash)
         case .vstack, .hstack, .zstack: return nil
         }
     }
@@ -29,7 +32,7 @@ public extension NodeTable {
     func isBlockLeaf(at index: Int) -> Bool {
         guard index >= 0, index < nodes.count else { return false }
         switch nodes[index] {
-        case .text, .codeBlock, .image, .spacer, .hosting, .gif, .video, .customLayer: return true
+        case .text, .codeBlock, .image, .spacer, .hosting, .gif, .video, .customLayer, .table: return true
         case .vstack, .hstack, .zstack: return false
         }
     }

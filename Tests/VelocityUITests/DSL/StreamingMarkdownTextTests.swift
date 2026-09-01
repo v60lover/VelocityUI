@@ -58,6 +58,13 @@ final class StreamingMarkdownTextTests: XCTestCase {
                 XCTAssertEqual(codeNode.rawCode, "let x = 1")
                 continue
             }
+            // A grouped table block gets a dedicated MarkdownTableNode (VelocityUI-8ge8.5),
+            // same carve-out as the code fence above — blockList's separate legacy path still
+            // renders the table as plain .text, so the two representations are expected to
+            // diverge for this block kind too.
+            if node is MarkdownTableNode {
+                continue
+            }
             guard let textNode = node as? TextNode else {
                 return XCTFail("every non-code renderNodes entry must be a TextNode")
             }

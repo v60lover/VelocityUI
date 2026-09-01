@@ -68,6 +68,19 @@ public func flatten<ID: Hashable & Sendable>(
             return
         }
 
+        if let table = node as? MarkdownTableNode {
+            assert(!spec.isSpecified && blockID == nil,
+                "MarkdownTableNode does not support .frame()/.renderID() — use its own blockID: parameter")
+            let myIndex = nodes.count
+            let descriptor = table.descriptor
+            parentIndices.append(parent)
+            nodes.append(.table(descriptor))
+            if let id = descriptor.blockID { blockIDByIndex[myIndex] = id }
+            if descriptor.lifecycle != .positional { blockLifecycleByIndex[myIndex] = descriptor.lifecycle }
+            sawText = true
+            return
+        }
+
         let myIndex = nodes.count
         parentIndices.append(parent)
         if spec.isSpecified { frameByIndex[myIndex] = spec }

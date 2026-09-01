@@ -130,6 +130,12 @@ private func measureContent(
 
     case .gif, .video, .customLayer:
         return ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: width, height: 44), nodeIndex: nodeIndex)
+
+    // Real column-width solving + cell layout (VelocityUI-8ge8.2/.3) isn't wired into the
+    // measure pass yet — that lands with mounting (VelocityUI-8ge8.6). Same placeholder
+    // shape as .gif/.video/.customLayer until then.
+    case .table:
+        return ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: width, height: 44), nodeIndex: nodeIndex)
     }
 }
 

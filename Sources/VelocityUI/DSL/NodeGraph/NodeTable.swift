@@ -292,6 +292,35 @@ public struct CodeBlockDescriptor: Sendable {
     }
 }
 
+/// One grouped GFM table at the Layer 1 → Layer 2 boundary. `cells[0]` is the header row
+/// (already styled bold by `makeTableCellDescriptors`), `cells[1...]` are body rows — the same
+/// row-0-is-header convention `ParsedMDBlock.tableRows` uses. Column-width solving and cell
+/// layout (VelocityUI-8ge8.2/.3) run downstream, off this descriptor's `cells`/`alignments`.
+public struct MarkdownTableDescriptor: Sendable {
+    public let cells: [[TextDescriptor]]
+    public let alignments: [TableColumnAlignment]
+    let blockID: BlockID?
+    let lifecycle: BlockLifecycle
+    public let layoutHash: Int
+    public let appearanceHash: Int
+
+    public init(
+        cells: [[TextDescriptor]],
+        alignments: [TableColumnAlignment],
+        blockID: BlockID?,
+        lifecycle: BlockLifecycle,
+        layoutHash: Int,
+        appearanceHash: Int
+    ) {
+        self.cells = cells
+        self.alignments = alignments
+        self.blockID = blockID
+        self.lifecycle = lifecycle
+        self.layoutHash = layoutHash
+        self.appearanceHash = appearanceHash
+    }
+}
+
 public struct ImageDescriptor: Sendable {
     public let url: URL?
     public let aspectRatio: CGFloat?
@@ -369,6 +398,7 @@ public enum NodeKind: Sendable {
     case spacer(CGFloat)
     case text(TextDescriptor)
     case codeBlock(CodeBlockDescriptor)
+    case table(MarkdownTableDescriptor)
     case image(ImageDescriptor)
     case gif(GIFDescriptor)
     case video(VideoDescriptor)
