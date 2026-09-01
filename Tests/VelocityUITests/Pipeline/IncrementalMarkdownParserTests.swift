@@ -72,6 +72,59 @@ final class IncrementalMarkdownParserTests: XCTestCase {
         }
     }
 
+    // MARK: - VelocityUI-wmss.3: suppress raw pipe flash before the delimiter row resolves
+
+    /// Before the delimiter row arrives, the still-open header-candidate line must render as
+    /// empty text — never the literal "| a | b |" pipe source — so no frame paints raw pipes.
+    func testWmss3_HeaderLineBeforeDelimiter_RendersEmptyNotRawPipes() {
+        var parser = IncrementalMarkdownParser()
+
+        parser.append("| a | b |\n")
+        let blocks = parser.blockList(itemID: "msg", width: 300)
+        guard case .text(let descriptor) = blocks.last?.fragment.content else {
+            return XCTFail("expected a text fragment for the pending header line")
+        }
+        XCTAssertFalse(descriptor.content.contains("|"), "must never paint the raw pipe source while the row is still ambiguous")
+        XCTAssertEqual(descriptor.content, "", "pending header line renders as empty text until the delimiter resolves it")
+    }
+
+    /// Once the delimiter row arrives, suppression lifts and the joined table row renders its
+    /// real content again (not stuck permanently blank).
+    func testWmss3_HeaderLineThenDelimiter_SuppressionLiftsAndTableRenders() {
+        var parser = IncrementalMarkdownParser()
+
+        parser.append("| a | b |\n")
+        parser.append("|---|---|\n")
+        guard case .tableRow(let isHeader) = parser.hotBlocksState.last?.kind else {
+            return XCTFail("the paragraph + delimiter row must join into a table row")
+        }
+        XCTAssertTrue(isHeader)
+        let blocks = parser.blockList(itemID: "msg", width: 300)
+        guard case .text(let descriptor) = blocks.last?.fragment.content else {
+            return XCTFail("expected a text fragment for the joined table row")
+        }
+        XCTAssertFalse(descriptor.content.isEmpty, "the joined table row must render its real cell content, not stay suppressed")
+        XCTAssertTrue(descriptor.content.contains("a"), "the header cell text must actually paint")
+    }
+
+    /// A line with pipes that turns out NOT to be a table (a plain line follows instead of a
+    /// delimiter row) must still render as a normal paragraph with literal pipes — suppression
+    /// only withholds rendering while genuinely ambiguous, never permanently.
+    func testWmss3_PipeLineNotFollowedByDelimiter_RendersLiteralPipesAsPlainParagraph() {
+        var parser = IncrementalMarkdownParser()
+
+        parser.append("a | b | c\n")
+        parser.append("not a table\n")
+        guard case .paragraph = parser.hotBlocksState.last?.kind else {
+            return XCTFail("no delimiter row followed — this must stay a plain paragraph")
+        }
+        let blocks = parser.blockList(itemID: "msg", width: 300)
+        guard case .text(let descriptor) = blocks.last?.fragment.content else {
+            return XCTFail("expected a text fragment for the resolved paragraph")
+        }
+        XCTAssertTrue(descriptor.content.contains("a | b | c"), "once resolved as non-table, the original pipe line must render literally")
+    }
+
     // MARK: - Hazard C: fenced code block, blank line inside must NOT seal
 
     func testHazardC_BlankLineInsideOpenFence_NeverSealsPartialCodeBlock() {

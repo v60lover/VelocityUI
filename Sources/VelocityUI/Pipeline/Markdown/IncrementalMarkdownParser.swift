@@ -202,20 +202,37 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
     ) -> [Block] {
         var blocks: [Block] = []
         blocks.reserveCapacity(sealedBlocks.count + hotBlocksState.count)
-        for (index, pair) in zip(sealedBlocks + hotBlocksState, sealedBlockIDs + hotBlockIDs).enumerated() {
+        let combined = sealedBlocks + hotBlocksState
+        let lastIndex = combined.count - 1
+        for (index, pair) in zip(combined, sealedBlockIDs + hotBlockIDs).enumerated() {
             let lifecycle: BlockLifecycle = index < sealedBlocks.count ? .sealed : .hot
-            blocks.append(Self.makeBlock(pair.0, itemID: itemID, index: index, blockID: pair.1, width: width, lifecycle: lifecycle, theme: theme))
+            // Only the still-open trailing block can retroactively promote paragraph -> tableRow
+            // (see parseTail's paragraph->tableRow join). Any earlier single-line "|" paragraph
+            // was already finalized as a plain paragraph by something else arriving after it, so
+            // it is not ambiguous and must render its pipes literally.
+            let isPendingTableHeader = index == lastIndex && lifecycle == .hot && Self.isPendingTableCandidate(pair.0)
+            blocks.append(Self.makeBlock(pair.0, itemID: itemID, index: index, blockID: pair.1, width: width, lifecycle: lifecycle, theme: theme, isPendingTableHeader: isPendingTableHeader))
         }
         return blocks
+    }
+
+    /// True for a hot, one-line, unfinalized paragraph whose only line contains `|` — the window
+    /// where `parseTail` cannot yet tell whether the next line will be a table delimiter row
+    /// (-> promote to `.tableRow`) or ordinary text (-> stays `.paragraph`, pipes literal).
+    /// Painting this line's raw pipes would flash `|a|b|` for one or more frames before the
+    /// table lays out; see VelocityUI-wmss.3.
+    static func isPendingTableCandidate(_ parsed: ParsedMDBlock) -> Bool {
+        guard case .paragraph = parsed.kind else { return false }
+        return parsed.text.contains("|") && !parsed.text.contains("\n")
     }
 
     // MARK: - Block construction
 
     private static func makeBlock<ID: Hashable & Sendable>(
         _ parsed: ParsedMDBlock, itemID: ID, index: Int, blockID: BlockID, width: CGFloat,
-        lifecycle: BlockLifecycle, theme: MarkdownTheme
+        lifecycle: BlockLifecycle, theme: MarkdownTheme, isPendingTableHeader: Bool = false
     ) -> Block {
-        let descriptor = makeDescriptor(parsed, theme: theme)
+        let descriptor = makeDescriptor(parsed, theme: theme, isPendingTableHeader: isPendingTableHeader)
         let frame = CGRect(x: 0, y: 0, width: width, height: 0)
         let fragment = Fragment(id: index, blockID: blockID, content: .text(descriptor), frame: frame)
         return Block(
@@ -247,7 +264,14 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         var runs: [TextRun] = []
     }
 
-    static func style(_ parsed: ParsedMDBlock, theme: MarkdownTheme = .default) -> StyledText {
+    /// `isPendingTableHeader` is true only for the still-open trailing paragraph whose single
+    /// line contains `|` with no `\n` yet — see `isPendingTableCandidate`. Rendered as empty
+    /// text rather than the raw pipe source, so a header row never flashes literal `|`
+    /// characters before the delimiter row confirms (or denies) the table.
+    static func style(_ parsed: ParsedMDBlock, theme: MarkdownTheme = .default, isPendingTableHeader: Bool = false) -> StyledText {
+        if isPendingTableHeader {
+            return StyledText(content: "", font: theme.body, runs: [])
+        }
         let font: VFontDescriptor
         var content = parsed.text
         var prefix = ""
@@ -361,8 +385,8 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         )
     }
 
-    private static func makeDescriptor(_ parsed: ParsedMDBlock, theme: MarkdownTheme) -> TextDescriptor {
-        let styled = style(parsed, theme: theme)
+    private static func makeDescriptor(_ parsed: ParsedMDBlock, theme: MarkdownTheme, isPendingTableHeader: Bool = false) -> TextDescriptor {
+        let styled = style(parsed, theme: theme, isPendingTableHeader: isPendingTableHeader)
 
         // `styled.runs` must fold into the hash: two blocks with identical rendered content but
         // different inline styling (e.g. plain "bold" vs "**bold**", both rendering to the

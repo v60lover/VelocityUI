@@ -38,8 +38,11 @@ extension IncrementalMarkdownParser {
     /// One block's DSL node — a `CodeBlockNode` for a fenced code block, a `TextNode`
     /// otherwise. Shared by `_renderNodes` and `StreamingMarkdownController.renderNodes` so
     /// the live and cached paths can't drift on which blocks get code presentation.
-    static func renderNode(for block: RenderableBlock, theme: MarkdownTheme) -> any RenderNode {
-        let styled = Self.style(block.parsed, theme: theme)
+    /// `isPendingTableHeader` must only be true for the last block in the full sealed+hot
+    /// sequence — see `isPendingTableCandidate`. A non-trailing block matching that text shape
+    /// has already been resolved as a plain paragraph by whatever followed it.
+    static func renderNode(for block: RenderableBlock, theme: MarkdownTheme, isPendingTableHeader: Bool = false) -> any RenderNode {
+        let styled = Self.style(block.parsed, theme: theme, isPendingTableHeader: isPendingTableHeader)
         let lifecycle: BlockLifecycle = block.isSealed ? .sealed : .hot
         if case .codeFence(let language) = block.parsed.kind {
             return CodeBlockNode(
@@ -54,7 +57,12 @@ extension IncrementalMarkdownParser {
     }
 
     private func _renderNodes(theme: MarkdownTheme) -> [any RenderNode] {
-        renderableBlocks.map { Self.renderNode(for: $0, theme: theme) }
+        let blocks = renderableBlocks
+        let lastIndex = blocks.count - 1
+        return blocks.enumerated().map { index, block in
+            let isPending = index == lastIndex && !block.isSealed && IncrementalMarkdownParser.isPendingTableCandidate(block.parsed)
+            return Self.renderNode(for: block, theme: theme, isPendingTableHeader: isPending)
+        }
     }
 }
 
@@ -96,12 +104,15 @@ public final class StreamingMarkdownController {
     /// Same shape/order as `IncrementalMarkdownParser.renderNodes`. Sealed + cached -> returned
     /// as-is. Everything else is built via `style(_:)` and, if sealed, cached.
     public var renderNodes: [any RenderNode] {
-        parser.renderableBlocks.map { block in
+        let blocks = parser.renderableBlocks
+        let lastIndex = blocks.count - 1
+        return blocks.enumerated().map { index, block in
             if block.isSealed, let cached = sealedNodes[block.blockID] {
                 return cached
             }
             _testHooks.styleCount += 1
-            let node = IncrementalMarkdownParser.renderNode(for: block, theme: theme)
+            let isPending = index == lastIndex && !block.isSealed && IncrementalMarkdownParser.isPendingTableCandidate(block.parsed)
+            let node = IncrementalMarkdownParser.renderNode(for: block, theme: theme, isPendingTableHeader: isPending)
             if block.isSealed {
                 sealedNodes[block.blockID] = node
             }
