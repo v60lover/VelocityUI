@@ -1,0 +1,23 @@
+VelocityUI
+Copyright 2026 VelocityUI authors
+
+This product is licensed under the Apache License, Version 2.0 (the "License");
+you may not use this software except in compliance with the License. A copy of
+the License is distributed with this software in the file LICENSE, and is also
+available at:
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+This product bundles or depends on third-party software under permissive
+licenses. Full attributions and any local patches are recorded in
+THIRD_PARTY_NOTICES.md. Summary:
+
+  - SwaTex (MIT) — pure-Swift LaTeX math engine, vendored under
+    Sources/SwaTex and Sources/SwaTexRender. Derives from RaTeX (MIT) and
+    KaTeX (MIT). Bundled KaTeX fonts are licensed under the SIL Open Font
+    License 1.1.
+
+  - tree-sitter and its grammars (MIT / Apache-2.0) — syntax highlighting.
+
+  - swift-markdown (Apache-2.0) — used only as a test-time parse oracle; it is
+    NOT part of the shipped VelocityUI library.
