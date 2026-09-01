@@ -53,11 +53,46 @@ let package = Package(
                 .product(name: "TreeSitterJavaScript", package: "tree-sitter-javascript"),
                 .product(name: "TreeSitterPython", package: "tree-sitter-python"),
                 .product(name: "TreeSitterBash", package: "tree-sitter-bash"),
-                .product(name: "TreeSitterSwift", package: "tree-sitter-swift")
+                .product(name: "TreeSitterSwift", package: "tree-sitter-swift"),
+                "SwaTex",
+                "SwaTexRender"
             ],
             path: "Sources/VelocityUI",
             swiftSettings: [
                 .swiftLanguageMode(.v6)
+            ]
+        ),
+        // VelocityUI-gojy.6: forked from PhraseHQ/SwaTex (MIT) — pure-Swift LaTeX engine
+        // (lexer -> parser -> layout -> display list). Replaces SwiftMath (gojy.1's original
+        // pick), whose only render surface is a UIView (MTMathUILabel) — an architecture
+        // violation once wired into the render pipeline (gojy.3). No platform dependencies.
+        // See THIRD_PARTY_NOTICES.md for the local patches applied at vendor time.
+        .target(
+            name: "SwaTex",
+            path: "Sources/SwaTex",
+            exclude: ["LICENSE"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6)
+            ]
+        ),
+        // CoreGraphics/CoreText rendering backend for SwaTex: draws a display list straight
+        // into a CGContext/CGImage (DisplayListRenderer, ImageRenderer) — no UIView anywhere
+        // in the path. Upstream's SwaTexView/MathView (UIKit/SwiftUI wrappers) are
+        // intentionally not vendored; VelocityUI is CALayer-only.
+        .target(
+            name: "SwaTexRender",
+            dependencies: ["SwaTex"],
+            path: "Sources/SwaTexRender",
+            resources: [
+                .copy("Resources/Fonts")
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6)
+            ],
+            linkerSettings: [
+                // libz for FastPNGEncoder's level-1 deflate (stable C ABI, present on every
+                // Apple platform).
+                .linkedLibrary("z")
             ]
         ),
         .testTarget(
@@ -68,6 +103,29 @@ let package = Package(
                 .product(name: "TreeSitterJSON", package: "tree-sitter-json")
             ],
             path: "Tests/VelocityUITests",
+            swiftSettings: [
+                .swiftLanguageMode(.v6)
+            ]
+        ),
+        // VelocityUI-gojy.6: a curated subset of upstream PhraseHQ/SwaTex's own
+        // test suite, vendored alongside the source. Excludes every file that
+        // exercises SwaTexView/MathView (UIKit/SwiftUI wrappers we don't vendor)
+        // — see THIRD_PARTY_NOTICES.md for the full exclusion list.
+        .testTarget(
+            name: "SwaTexTests",
+            dependencies: ["SwaTex"],
+            path: "Tests/SwaTexTests",
+            resources: [
+                .copy("Resources/golden")
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6)
+            ]
+        ),
+        .testTarget(
+            name: "SwaTexRenderTests",
+            dependencies: ["SwaTex", "SwaTexRender"],
+            path: "Tests/SwaTexRenderTests",
             swiftSettings: [
                 .swiftLanguageMode(.v6)
             ]

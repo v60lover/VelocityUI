@@ -3,6 +3,7 @@
 #if canImport(UIKit)
 import CoreGraphics
 import Foundation
+import SwaTex
 
 /// Composition root for all long-lived VelocityUI collaborators.
 ///
@@ -81,6 +82,11 @@ public final class RenderEnvironment: Sendable {
     /// No shared-identity contract with another collaborator, so it defaults freely in both inits.
     public let highlightRegistry: HighlightRegistry
 
+    /// Parsed + laid-out LaTeX formula cache (VelocityUI-gojy.6), consumed by gojy.3's math
+    /// rasterizer via `SwaTexEngine.displayList(for:cache:)`. No shared-identity contract with
+    /// another collaborator, so it defaults freely in both inits — mirrors `highlightRegistry`.
+    public let formulaCache: FormulaCache
+
     /// Designated init — all collaborators supplied by the caller. `nonisolated`, callable from any
     /// context — tests substituting a fake `ImageActor`/`VideoController` must use this instead of
     /// the `@MainActor` convenience init.
@@ -113,7 +119,8 @@ public final class RenderEnvironment: Sendable {
         pipelineTaskSpawnObserver: (@Sendable () -> Void)? = nil,
         codeBodyRetokenizeObserver: (@Sendable () -> Void)? = nil,
         codeStreamObserver: (@Sendable (CodeStreamEventKind) -> Void)? = nil,
-        highlightRegistry: HighlightRegistry = .init()
+        highlightRegistry: HighlightRegistry = .init(),
+        formulaCache: FormulaCache = .init()
     ) {
         precondition(
             imageActor.dimensionCache === dimensionCache,
@@ -141,6 +148,7 @@ public final class RenderEnvironment: Sendable {
         self.codeBodyRetokenizeObserver = codeBodyRetokenizeObserver
         self.codeStreamObserver = codeStreamObserver
         self.highlightRegistry = highlightRegistry
+        self.formulaCache = formulaCache
     }
 
     /// Convenience init for app use. `@MainActor` because `VideoController.init` is `@MainActor`
@@ -169,7 +177,8 @@ public final class RenderEnvironment: Sendable {
         pipelineTaskSpawnObserver: (@Sendable () -> Void)? = nil,
         codeBodyRetokenizeObserver: (@Sendable () -> Void)? = nil,
         codeStreamObserver: (@Sendable (CodeStreamEventKind) -> Void)? = nil,
-        highlightRegistry: HighlightRegistry = .init()
+        highlightRegistry: HighlightRegistry = .init(),
+        formulaCache: FormulaCache = .init()
     ) {
         let dc = DimensionCache(session: session)
         let videoPrep = VideoPreparationActor()
@@ -191,7 +200,8 @@ public final class RenderEnvironment: Sendable {
             pipelineTaskSpawnObserver: pipelineTaskSpawnObserver,
             codeBodyRetokenizeObserver: codeBodyRetokenizeObserver,
             codeStreamObserver: codeStreamObserver,
-            highlightRegistry: highlightRegistry
+            highlightRegistry: highlightRegistry,
+            formulaCache: formulaCache
         )
     }
 }

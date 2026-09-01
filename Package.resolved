@@ -1,5 +1,5 @@
 {
-  "originHash" : "a9a56163868e49cba528418a0ad717455626652d9b264f7cbe8df9911fc3f1cd",
+  "originHash" : "7fd45d9ea441887ce9d6c3c3449188b55470f9bf93db54dbd33bed5c989ba49f",
   "pins" : [
     {
       "identity" : "swift-tree-sitter",
