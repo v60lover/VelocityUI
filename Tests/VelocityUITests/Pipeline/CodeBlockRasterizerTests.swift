@@ -81,14 +81,60 @@ final class CodeBlockRasterizerTests: XCTestCase {
         let (image, size) = await rasterizeCodeBlock(
             lines: lines[...], colorRuns: colorRuns, font: font, theme: theme, textPool: pool, scale: 1
         )
-        XCTAssertNotNil(image)
+        guard let image else { return XCTFail("expected a non-nil raster") }
 
-        // The longest line measured on its own (also unbounded width) must match the block's
-        // raster width -- proves the raster is sized to the longest line, not wrapped/clamped.
         let soloDescriptor = makeCodeTextDescriptor(lines: [longLine][...], colorRuns: [LineColorRuns(runs: [])], font: font, theme: theme)
         let soloSize = TextMeasurementContext().measure(soloDescriptor, width: .greatestFiniteMagnitude)
 
-        XCTAssertEqual(size.width, soloSize.width, accuracy: 1, "raster width must equal the longest line's intrinsic width")
+        XCTAssertEqual(size.width, CGFloat(image.width), accuracy: 0.01,
+                       "reported width must match the actual bitmap width")
+        XCTAssertGreaterThan(size.width, soloSize.width,
+                             "the bitmap must contain the longest line plus its container padding and ink guard")
+        XCTAssertEqual(size.height, soloSize.height * 2, accuracy: 1,
+                       "two source lines must remain two non-wrapping layout fragments")
+    }
+
+    func testRasterizeCodeBlock_preservesFinalGlyphAgainstTightRelayout() async {
+        let line = String(repeating: "m", count: 48) + "W"
+        let descriptor = makeCodeTextDescriptor(
+            lines: [line][...], colorRuns: [LineColorRuns(runs: [])], font: font, theme: theme
+        )
+        let measuredSize = TextMeasurementContext().measure(descriptor, width: .greatestFiniteMagnitude)
+        let scale: CGFloat = 2
+
+        // This is the regression oracle: the old wrapper re-laid out at measuredSize.width,
+        // making NSTextContainer's 5pt side padding clip the last glyph before drawing.
+        let tightImage = rasterizeText(
+            descriptor, layoutWidth: measuredSize.width, outputSize: measuredSize, scale: scale, inkGuard: 0
+        )
+        let expectedImage = rasterizeText(
+            descriptor, layoutWidth: .greatestFiniteMagnitude, outputSize: measuredSize,
+            scale: scale, inkGuard: codeInkRightGuard
+        )
+        guard let tightImage, let expectedImage else {
+            return XCTFail("expected both tight and unbounded reference rasters")
+        }
+        let expectedRight = rightmostInkPixel(in: expectedImage)
+        XCTAssertGreaterThan(
+            expectedRight - rightmostInkPixel(in: tightImage), Int(scale.rounded()),
+            "the fixture must expose the 5pt side-padding clipping regression"
+        )
+
+        let (image, size) = await rasterizeCodeBlock(
+            lines: [line][...], colorRuns: [LineColorRuns(runs: [])], font: font,
+            theme: theme, textPool: TextMeasurementPool(), scale: scale
+        )
+        guard let image else { return XCTFail("expected a sealed code raster") }
+
+        XCTAssertEqual(image.width, expectedImage.width, "sealed raster must use the unbounded line layout")
+        XCTAssertEqual(size.width, CGFloat(image.width) / scale, accuracy: 0.01,
+                       "returned sealed width must match the actual bitmap width")
+        XCTAssertGreaterThanOrEqual(
+            rightmostInkPixel(in: image), expectedRight - 1,
+            "the final glyph's ink must remain reachable at the right edge"
+        )
+        XCTAssertEqual(size.height, font.uiFont.lineHeight, accuracy: 1,
+                       "a single code line must remain one non-wrapping fragment")
     }
 
     func testRasterizeCodeBlock_twoColorRunProducesTwoDistinctColors() async {
@@ -193,11 +239,44 @@ final class CodeBlockRasterizerTests: XCTestCase {
             lines: lines[...], colorRuns: colorRuns, font: font, theme: theme, scale: 1,
             measure: { d, w in TextMeasurementContext().measure(d, width: w) }
         )
-        XCTAssertNotNil(image)
+        guard let image else { return XCTFail("expected a non-nil raster") }
 
         let soloDescriptor = makeCodeTextDescriptor(lines: [longLine][...], colorRuns: [LineColorRuns(runs: [])], font: font, theme: theme)
         let soloSize = TextMeasurementContext().measure(soloDescriptor, width: .greatestFiniteMagnitude)
-        XCTAssertEqual(size.width, soloSize.width, accuracy: 1)
+        XCTAssertEqual(size.width, CGFloat(image.width), accuracy: 0.01)
+        XCTAssertGreaterThan(size.width, soloSize.width)
+        XCTAssertEqual(size.height, soloSize.height * 2, accuracy: 1)
+    }
+
+    func testRasterizeCodeBlockSync_preservesFinalGlyphAgainstTightRelayout() {
+        let line = String(repeating: "m", count: 48) + "W"
+        let descriptor = makeCodeTextDescriptor(
+            lines: [line][...], colorRuns: [LineColorRuns(runs: [])], font: font, theme: theme
+        )
+        let measuredSize = TextMeasurementContext().measure(descriptor, width: .greatestFiniteMagnitude)
+        let scale: CGFloat = 2
+        let expectedImage = rasterizeText(
+            descriptor, layoutWidth: .greatestFiniteMagnitude, outputSize: measuredSize,
+            scale: scale, inkGuard: codeInkRightGuard
+        )
+        guard let expectedImage else { return XCTFail("expected an unbounded reference raster") }
+
+        let (image, size) = rasterizeCodeBlockSync(
+            lines: [line][...], colorRuns: [LineColorRuns(runs: [])], font: font,
+            theme: theme, scale: scale,
+            measure: { descriptor, width in TextMeasurementContext().measure(descriptor, width: width) }
+        )
+        guard let image else { return XCTFail("expected a sealed code raster") }
+
+        XCTAssertEqual(image.width, expectedImage.width, "sync sealed raster must use the unbounded line layout")
+        XCTAssertEqual(size.width, CGFloat(image.width) / scale, accuracy: 0.01,
+                       "sync returned width must match the actual bitmap width")
+        XCTAssertGreaterThanOrEqual(
+            rightmostInkPixel(in: image), rightmostInkPixel(in: expectedImage) - 1,
+            "the sync path must preserve the final glyph's ink"
+        )
+        XCTAssertEqual(size.height, font.uiFont.lineHeight, accuracy: 1,
+                       "the sync code layout must remain one non-wrapping fragment")
     }
 
     func testRasterizeCodeBlockSync_degenerateEmptyContentReturnsNilImageNotCrash() {
@@ -322,6 +401,26 @@ final class CodeBlockRasterizerTests: XCTestCase {
             }
         }
         return best
+    }
+
+    private func rightmostInkPixel(in image: CGImage, alphaThreshold: UInt8 = 8) -> Int {
+        let width = image.width, height = image.height
+        guard width > 0, height > 0,
+              let ctx = CGContext(
+                data: nil, width: width, height: height,
+                bitsPerComponent: 8, bytesPerRow: width * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else { return -1 }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let data = ctx.data else { return -1 }
+        let bytes = data.bindMemory(to: UInt8.self, capacity: width * height * 4)
+        for column in stride(from: width - 1, through: 0, by: -1) {
+            for row in 0..<height where bytes[(row * width + column) * 4 + 3] >= alphaThreshold {
+                return column
+            }
+        }
+        return -1
     }
 }
 #endif
