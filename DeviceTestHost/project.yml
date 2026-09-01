@@ -31,6 +31,12 @@ packages:
   TreeSitterJSON:
     url: https://github.com/tree-sitter/tree-sitter-json
     from: "0.24.0"
+  # VelocityUI-snu1: MarkdownOracle.swift's differential parse oracle needs swift-markdown's
+  # `Markdown` product. Same gap as the tree-sitter packages above -- the VelocityUITests
+  # target globs sources but doesn't inherit the SPM test target's package dependencies.
+  swift-markdown:
+    url: https://github.com/swiftlang/swift-markdown
+    revision: "3c6f9523da3a1ec2fd829673e472d95b8097a3b8"
 
 targets:
   DeviceTestHost:
@@ -75,6 +81,8 @@ targets:
         product: SwiftTreeSitter
       - package: TreeSitterJSON
         product: TreeSitterJSON
+      - package: swift-markdown
+        product: Markdown
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.velocityui.VelocityUITests
