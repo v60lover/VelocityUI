@@ -15,7 +15,7 @@ struct RawTableShape: Equatable {
 }
 
 /// Projects our parser's raw table block text (header line, delimiter line, body lines joined
-/// by "\n" — see `IncrementalMarkdownParser.swift`'s `.tableRow(isHeader:)` join) into a
+/// by "\n" — see `IncrementalMarkdownParser.swift`'s `.table(alignments:)` join) into a
 /// `RawTableShape`. Trims each cell: our raw split keeps surrounding whitespace that cmark's
 /// cell model never carries, so trimming is the normalization step that makes the two sides
 /// comparable.
@@ -91,10 +91,10 @@ func compareTable(source: String) -> (matches: Bool, diff: String?) {
     parser.append(source)
     let combined = parser.sealedBlocks + parser.hotBlocksState
     guard let tableBlock = combined.first(where: {
-        if case .tableRow = $0.kind { return true }
+        if case .table = $0.kind { return true }
         return false
     }) else {
-        return (false, "our parser produced no .tableRow block for source: \(source)")
+        return (false, "our parser produced no .table block for source: \(source)")
     }
     guard let ours = ourTableShape(fromRawBlockText: tableBlock.text) else {
         return (false, "could not project our raw table block text into a RawTableShape: \(tableBlock.text)")

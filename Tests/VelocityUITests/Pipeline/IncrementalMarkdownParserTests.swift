@@ -59,17 +59,56 @@ final class IncrementalMarkdownParserTests: XCTestCase {
 
         parser.append("|---|---|\n")
         XCTAssertEqual(parser.frontier, 0, "the table conversion happens while still hot")
-        guard case .tableRow(let isHeader) = parser.hotBlocksState.first?.kind else {
+        guard case .table(let alignments) = parser.hotBlocksState.first?.kind else {
             return XCTFail("the paragraph + delimiter row must join into ONE table block while hot")
         }
-        XCTAssertTrue(isHeader)
+        XCTAssertEqual(alignments, [.none, .none])
         XCTAssertEqual(parser.hotBlocksState.count, 1, "must stay ONE block, not two separate ones")
 
         parser.append("\n")
         XCTAssertEqual(parser.frontier, 1, "the trailing blank line seals the joined table block")
-        guard case .tableRow = parser.sealedBlocks[0].kind else {
-            return XCTFail("the sealed block must be the table row — never a stale bare paragraph")
+        guard case .table = parser.sealedBlocks[0].kind else {
+            return XCTFail("the sealed block must be the table — never a stale bare paragraph")
         }
+    }
+
+    // MARK: - VelocityUI-8ge8.1: grouped table cell grid, column count, per-column alignment
+
+    func testGroupedTable_ParsesToOneBlockWithCellGridColumnCountAndAlignment() {
+        var parser = IncrementalMarkdownParser()
+        parser.append("| Name | Role |\n|:---|---:|\n| Ann | Lead |\n| Bo | Eng |\n\n")
+
+        XCTAssertEqual(parser.frontier, 1, "the whole table must seal as one block")
+        guard case .table(let alignments) = parser.sealedBlocks[0].kind else {
+            return XCTFail("expected a .table block")
+        }
+        XCTAssertEqual(alignments, [.left, .right], "delimiter markers :--- and ---: must parse to left/right")
+
+        let rows = parser.sealedBlocks[0].tableRows
+        XCTAssertEqual(rows.count, 3, "header + 2 body rows")
+        XCTAssertTrue(rows.allSatisfy { $0.count == 2 }, "every row must have exactly one cell per column")
+        XCTAssertEqual(rows[0].map(\.text), ["Name", "Role"], "row 0 is the header")
+        XCTAssertEqual(rows[1].map(\.text), ["Ann", "Lead"])
+        XCTAssertEqual(rows[2].map(\.text), ["Bo", "Eng"])
+    }
+
+    func testGroupedTable_StreamingAppendsRowsWithoutRestylingAlreadySealedTable() {
+        var parser = IncrementalMarkdownParser()
+        parser.append("| a | b |\n|---|---|\n| 1 | 2 |\n")
+        XCTAssertEqual(parser.frontier, 0, "still hot — no blank line yet")
+        XCTAssertEqual(parser.hotBlocksState.last?.tableRows.count, 2, "header + 1 body row so far")
+
+        parser.append("| 3 | 4 |\n")
+        XCTAssertEqual(parser.hotBlocksState.last?.tableRows.count, 3, "a new body row appends while still hot")
+
+        parser.append("\n")
+        XCTAssertEqual(parser.frontier, 1, "the trailing blank line seals the table")
+        let sealedRowsAtSealTime = parser.sealedBlocks[0].tableRows
+        XCTAssertEqual(sealedRowsAtSealTime.count, 3)
+
+        parser.append("An unrelated paragraph typed after the table.\n\n")
+        XCTAssertEqual(parser.sealedBlocks[0].tableRows, sealedRowsAtSealTime,
+            "content streamed in after the table must never restyle or mutate its already-sealed rows")
     }
 
     // MARK: - VelocityUI-wmss.3: suppress raw pipe flash before the delimiter row resolves
@@ -95,10 +134,9 @@ final class IncrementalMarkdownParserTests: XCTestCase {
 
         parser.append("| a | b |\n")
         parser.append("|---|---|\n")
-        guard case .tableRow(let isHeader) = parser.hotBlocksState.last?.kind else {
-            return XCTFail("the paragraph + delimiter row must join into a table row")
+        guard case .table = parser.hotBlocksState.last?.kind else {
+            return XCTFail("the paragraph + delimiter row must join into a table block")
         }
-        XCTAssertTrue(isHeader)
         let blocks = parser.blockList(itemID: "msg", width: 300)
         guard case .text(let descriptor) = blocks.last?.fragment.content else {
             return XCTFail("expected a text fragment for the joined table row")

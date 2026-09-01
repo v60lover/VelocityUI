@@ -5,6 +5,12 @@ import CoreGraphics
 
 // MARK: - MarkdownBlockKind
 
+/// Per-column GFM table alignment, parsed from the delimiter row's leading/trailing `:`
+/// (`:---` left, `:--:` center, `---:` right, `---` no alignment specified).
+public enum TableColumnAlignment: Sendable, Equatable, Hashable {
+    case left, center, right, none
+}
+
 /// The markdown block shapes this parser recognizes. Drives which `TextDescriptor` style
 /// `IncrementalMarkdownParser.blocks(itemID:width:)` picks — there is no dedicated
 /// `FragmentContent` case per kind; everything renders as styled text (`Block` only wraps
@@ -17,9 +23,12 @@ public enum MarkdownBlockKind: Sendable, Equatable, Hashable {
     /// `ordered` is false. `depth` is the nesting level inferred from leading indentation.
     case listItem(ordered: Bool, number: Int, depth: Int)
     case blockquote
-    /// GFM table row — `isHeader` is true only for the row retroactively joined with its
-    /// delimiter row. Body rows that follow append with `false`.
-    case tableRow(isHeader: Bool)
+    /// A GFM table, grouped into ONE block from a header row + delimiter row + zero or more
+    /// body rows. `alignments` (one per column, from the delimiter row) lives here because
+    /// render styling switches on it independent of cell text; the actual grid — header row
+    /// plus body rows, each cell tokenized via `inlineRuns(_:)` — lives in
+    /// `ParsedMDBlock.tableRows`, not in this case.
+    case table(alignments: [TableColumnAlignment])
     /// A `---`/`***`/`___` rule line.
     case thematicBreak
 }
@@ -143,6 +152,13 @@ nonisolated func inlineRuns(_ text: String) -> [InlineRun] {
     return runs
 }
 
+/// One cell of a `.table` block: its raw text plus tokenized inline emphasis spans
+/// (`inlineRuns(_:)`), so table rendering never has to re-tokenize per cell.
+struct TableCell: Equatable {
+    var text: String
+    var runs: [InlineRun]
+}
+
 /// One markdown block the incremental parser has classified: a kind plus its raw source text
 /// (lines joined by `\n`, marker/underline syntax stripped where it isn't part of the rendered
 /// content — e.g. a setext `===` underline or a table delimiter row) plus its tokenized inline
@@ -151,6 +167,9 @@ struct ParsedMDBlock: Equatable {
     var kind: MarkdownBlockKind
     var text: String
     var runs: [InlineRun] = []
+    /// Populated only when `kind` is `.table`: `tableRows[0]` is the header row, `tableRows[1...]`
+    /// are body rows, each cell already tokenized. Empty for every other kind.
+    var tableRows: [[TableCell]] = []
 }
 
 // MARK: - IncrementalMarkdownParser
@@ -213,8 +232,8 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         let lastIndex = combined.count - 1
         for (index, pair) in zip(combined, sealedBlockIDs + hotBlockIDs).enumerated() {
             let lifecycle: BlockLifecycle = index < sealedBlocks.count ? .sealed : .hot
-            // Only the still-open trailing block can retroactively promote paragraph -> tableRow
-            // (see parseTail's paragraph->tableRow join). Any earlier single-line "|" paragraph
+            // Only the still-open trailing block can retroactively promote paragraph -> table
+            // (see parseTail's paragraph->table join). Any earlier single-line "|" paragraph
             // was already finalized as a plain paragraph by something else arriving after it, so
             // it is not ambiguous and must render its pipes literally.
             let isPendingTableHeader = index == lastIndex && lifecycle == .hot && Self.isPendingTableCandidate(pair.0)
@@ -225,7 +244,7 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
 
     /// True for a hot, one-line, unfinalized paragraph whose only line contains `|` — the window
     /// where `parseTail` cannot yet tell whether the next line will be a table delimiter row
-    /// (-> promote to `.tableRow`) or ordinary text (-> stays `.paragraph`, pipes literal).
+    /// (-> promote to `.table`) or ordinary text (-> stays `.paragraph`, pipes literal).
     /// Painting this line's raw pipes would flash `|a|b|` for one or more frames before the
     /// table lays out; see VelocityUI-wmss.3.
     static func isPendingTableCandidate(_ parsed: ParsedMDBlock) -> Bool {
@@ -262,7 +281,7 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
     /// A block's rendered text plus its font — shared by `makeDescriptor` and `renderNodes`
     /// so the two representations can't silently diverge. Color/line-break are each
     /// caller's own separate default. `runs` is empty for kinds `tokenizableRuns` never
-    /// tokenizes (codeFence/tableRow/thematicBreak) or when `parsed.runs` itself is empty —
+    /// tokenizes (codeFence/table/thematicBreak) or when `parsed.runs` itself is empty —
     /// both `makeDescriptor` and `renderNodes` pass it straight through to their respective
     /// `TextDescriptor`/`TextNode`.
     struct StyledText {
@@ -298,7 +317,7 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
                 lines.removeLast()
             }
             content = lines.joined(separator: "\n")
-        case .tableRow:
+        case .table:
             font = theme.body
         case .listItem(let ordered, let number, let depth):
             font = theme.body
@@ -321,7 +340,7 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
 
     /// Folds `parsed.runs` (the tokenized inline spans) into the block's final rendered content
     /// and matching `TextRun`s. `fallbackContent` — already fence-stripped/marker-stripped by
-    /// `style()` — is used verbatim when `parsed.runs` is empty (codeFence/tableRow/thematicBreak,
+    /// `style()` — is used verbatim when `parsed.runs` is empty (codeFence/table/thematicBreak,
     /// or a tokenizable block whose text tokenized to nothing): those kinds render as single-style
     /// text, same as before this bead. `prefix` (a listItem's indent + bullet/number) always
     /// renders in the base style ahead of the tokenized spans, so it never picks up the first
@@ -425,15 +444,16 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
     }
 
     /// listItem tokenizes the same marker-stripped text `style()` renders, via the same
-    /// `stripListMarker` helper, so runs never disagree with what's painted. codeFence/tableRow/
-    /// thematicBreak never render as free-form styled text, so they get no runs.
+    /// `stripListMarker` helper, so runs never disagree with what's painted. codeFence/table/
+    /// thematicBreak never render as free-form styled text, so they get no runs — a `.table`
+    /// block's cells are tokenized separately, per cell, into `ParsedMDBlock.tableRows`.
     private static func tokenizableRuns(for kind: MarkdownBlockKind, text: String) -> [InlineRun] {
         switch kind {
         case .paragraph, .heading, .blockquote:
             return inlineRuns(text)
         case .listItem:
             return inlineRuns(Self.stripListMarker(text))
-        case .codeFence, .tableRow, .thematicBreak:
+        case .codeFence, .table, .thematicBreak:
             return []
         }
     }
@@ -487,8 +507,7 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
 
         func finalizeOpenBlock() {
             guard let kind = openKind, !openLines.isEmpty else { return }
-            let text = openLines.map(String.init).joined(separator: "\n")
-            blocks.append(ParsedMDBlock(kind: kind, text: text, runs: Self.tokenizableRuns(for: kind, text: text)))
+            blocks.append(Self.makeParsedBlock(kind: kind, lines: openLines))
             openKind = nil
             openLines = []
         }
@@ -590,17 +609,28 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             guard leadingSpaces(line) <= 3 else { return false }
             return line.drop { $0 == " " }.first == ">"
         }
-        func isTableDelimiterRow(_ line: Substring) -> Bool {
+        // Validates a delimiter row AND parses its per-column alignment in the same pass —
+        // one source of truth for "is this a delimiter row" and "what does it say", so the
+        // promotion check and the alignment it commits to a `.table` block can never disagree.
+        func tableDelimiterAlignments(_ line: Substring) -> [TableColumnAlignment]? {
             let t = line.trimmingCharacters(in: .whitespaces)
-            guard !t.isEmpty else { return false }
+            guard !t.isEmpty else { return nil }
             let cells = t.split(separator: "|", omittingEmptySubsequences: true)
-            guard !cells.isEmpty else { return false }
+            guard !cells.isEmpty else { return nil }
+            var alignments: [TableColumnAlignment] = []
+            alignments.reserveCapacity(cells.count)
             for cell in cells {
                 let c = cell.trimmingCharacters(in: .whitespaces)
-                guard !c.isEmpty, c.contains("-") else { return false }
-                for ch in c where ch != "-" && ch != ":" { return false }
+                guard !c.isEmpty, c.contains("-") else { return nil }
+                for ch in c where ch != "-" && ch != ":" { return nil }
+                switch (c.hasPrefix(":"), c.hasSuffix(":")) {
+                case (true, true): alignments.append(.center)
+                case (true, false): alignments.append(.left)
+                case (false, true): alignments.append(.right)
+                case (false, false): alignments.append(.none)
+                }
             }
-            return true
+            return alignments
         }
         func isSetextUnderline(_ line: Substring) -> Int? {
             let t = line.trimmingCharacters(in: .whitespaces)
@@ -671,12 +701,13 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
                 continue
             }
 
-            if case .paragraph = openKind, openLines.count == 1, openLines[0].contains("|"), isTableDelimiterRow(line) {
-                openKind = .tableRow(isHeader: true)
+            if case .paragraph = openKind, openLines.count == 1, openLines[0].contains("|"),
+               let alignments = tableDelimiterAlignments(line) {
+                openKind = .table(alignments: alignments)
                 openLines.append(line)
                 continue
             }
-            if case .tableRow = openKind, line.contains("|") {
+            if case .table = openKind, line.contains("|") {
                 openLines.append(line)
                 continue
             }
@@ -732,9 +763,76 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         let sealed = Array(blocks[0..<sealedCount])
         var hot = Array(blocks[sealedCount...])
         if let kind = openKind, !openLines.isEmpty {
-            let text = openLines.map(String.init).joined(separator: "\n")
-            hot.append(ParsedMDBlock(kind: kind, text: text, runs: Self.tokenizableRuns(for: kind, text: text)))
+            hot.append(Self.makeParsedBlock(kind: kind, lines: openLines))
         }
         return TailParseResult(sealed: sealed, hot: hot, cutIndex: pendingSealCut)
+    }
+
+    /// Builds one `ParsedMDBlock` from an open/closing run of lines — the single construction
+    /// site `finalizeOpenBlock()` and the tail's trailing hot block both call, so they can't
+    /// drift on how `.table` blocks get their `tableRows` populated.
+    private static func makeParsedBlock(kind: MarkdownBlockKind, lines: [Substring]) -> ParsedMDBlock {
+        let text = lines.map(String.init).joined(separator: "\n")
+        var block = ParsedMDBlock(kind: kind, text: text, runs: Self.tokenizableRuns(for: kind, text: text))
+        if case .table(let alignments) = kind {
+            block.tableRows = Self.parseTableRows(lines: lines, columnCount: alignments.count)
+        }
+        return block
+    }
+
+    /// Builds `[[TableCell]]` from a `.table` block's raw lines: `lines[0]` is the header,
+    /// `lines[1]` is the delimiter row (skipped — it carries alignment, not cell content),
+    /// `lines[2...]` are body rows. Every row is split and tokenized through the same
+    /// `splitTableRowCells`/`inlineRuns` path so header and body cells can't disagree on shape.
+    private static func parseTableRows(lines: [Substring], columnCount: Int) -> [[TableCell]] {
+        guard columnCount > 0, lines.count >= 2 else { return [] }
+        var rows: [[TableCell]] = []
+        rows.reserveCapacity(lines.count - 1)
+        for (index, line) in lines.enumerated() where index != 1 {
+            let cells = Self.splitTableRowCells(line, columnCount: columnCount)
+            rows.append(cells.map { TableCell(text: $0, runs: inlineRuns($0)) })
+        }
+        return rows
+    }
+
+    /// Splits one raw table row line into cells per GFM rules: a leading/trailing `|` is
+    /// optional and stripped, `\|` is a literal pipe (never a column separator), and the
+    /// result is padded with empty cells or truncated to `columnCount` — ragged rows are
+    /// legal GFM (short rows padded, long rows truncated to the header's column count).
+    private static func splitTableRowCells(_ line: Substring, columnCount: Int) -> [String] {
+        var trimmed = Substring(line.trimmingCharacters(in: .whitespaces))
+        if trimmed.first == "|" { trimmed = trimmed.dropFirst() }
+        if let last = trimmed.last, last == "|" {
+            let beforeLast = trimmed.index(before: trimmed.endIndex)
+            let isEscaped = beforeLast > trimmed.startIndex && trimmed[trimmed.index(before: beforeLast)] == "\\"
+            if !isEscaped { trimmed = trimmed.dropLast() }
+        }
+
+        var cells: [String] = []
+        var current = ""
+        var chars = trimmed
+        while let ch = chars.first {
+            if ch == "\\", chars.dropFirst().first == "|" {
+                current.append("|")
+                chars = chars.dropFirst(2)
+                continue
+            }
+            if ch == "|" {
+                cells.append(current.trimmingCharacters(in: .whitespaces))
+                current = ""
+                chars = chars.dropFirst()
+                continue
+            }
+            current.append(ch)
+            chars = chars.dropFirst()
+        }
+        cells.append(current.trimmingCharacters(in: .whitespaces))
+
+        if cells.count < columnCount {
+            cells.append(contentsOf: repeatElement("", count: columnCount - cells.count))
+        } else if cells.count > columnCount {
+            cells = Array(cells.prefix(columnCount))
+        }
+        return cells
     }
 }
