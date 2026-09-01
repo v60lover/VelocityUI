@@ -758,5 +758,58 @@ final class HotCodeStreamStoreTests: XCTestCase {
         )
         XCTAssertGreaterThan(result.content.tailSize.width, 0, "the tail 'x' must have non-zero width at scale 2")
     }
+
+    // MARK: - ink guard: the rasterized bitmap (and therefore the scrollable content width) is
+    // wider than the bare typographic measure, so the last glyph's ink isn't shaved by a canvas
+    // that stops exactly at the layout advance.
+
+    func testAppend_SealedLineWidth_IncludesInkRightGuard_NotJustTypographicMeasure() {
+        let store = HotCodeStreamStore()
+        let key = BlockKey(itemID: "msg", index: 0)
+        let line = "let bold = \"text\""
+
+        let descriptor = makeCodeTextDescriptor(
+            lines: [line][...], colorRuns: [LineColorRuns(runs: [])], font: font, theme: theme
+        )
+        let typographicWidth = measure(descriptor, .greatestFiniteMagnitude).width
+
+        let result = store.append(
+            key, rawCode: line + "\n", font: font, theme: theme, themeGeneration: 0,
+            languageID: .swift, highlightRegistry: registry, scale: 1,
+            measure: measure, eventObserver: nil, onRecolor: { _ in }
+        )
+
+        XCTAssertGreaterThanOrEqual(
+            result.content.sealedSize.width, typographicWidth + codeInkRightGuard - 0.5,
+            "the sealed tile's width must include the ink guard, not stop exactly at the typographic advance"
+        )
+    }
+
+    /// The scroll-boundary width (`CodeBodyLayerContent.totalSize.width`) must match the widest
+    /// tile's guarded width -- otherwise the guard pixels exist in the bitmap but horizontal
+    /// scroll can never reach far enough to reveal them.
+    func testAppend_TotalSizeWidth_MatchesGuardedTileWidth_ScrollCanReachIt() {
+        let store = HotCodeStreamStore()
+        let key = BlockKey(itemID: "msg", index: 0)
+        let line = "let aVeryLongLineNeedingTheInkGuardToRevealItsLastCharacter = 1"
+
+        let result = store.append(
+            key, rawCode: line + "\n", font: font, theme: theme, themeGeneration: 0,
+            languageID: .swift, highlightRegistry: registry, scale: 1,
+            measure: measure, eventObserver: nil, onRecolor: { _ in }
+        )
+
+        XCTAssertEqual(
+            result.content.totalSize.width, result.content.sealedSize.width,
+            "with no tail content, the scrollable content width must equal the sealed (guarded) tile width"
+        )
+        guard let chunkImage = result.content.chunks.last?.image else {
+            return XCTFail("expected a rasterized chunk image")
+        }
+        XCTAssertEqual(
+            CGFloat(chunkImage.width), result.content.totalSize.width, accuracy: 0.5,
+            "the composited chunk's own pixel width must match the content width the scroll boundary uses"
+        )
+    }
 }
 #endif

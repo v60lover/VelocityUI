@@ -53,7 +53,7 @@ final class StreamDatasetHeadingDiagnosticTests: XCTestCase {
         let feed = makeFeed(controller: controller)
 
         publish(controller, to: feed)
-        controller.append("Streaming benchmark response\n")
+        controller.append("Implementing an LRU cache in Swift\n")
         publish(controller, to: feed)
         try? await Task.sleep(for: .milliseconds(50))
         controller.append("===\n")
@@ -62,7 +62,7 @@ final class StreamDatasetHeadingDiagnosticTests: XCTestCase {
         controller.append("\n")
         publish(controller, to: feed)
         try? await Task.sleep(for: .milliseconds(50))
-        controller.append("## Why token-by-token rendering doesn't jank\n\n")
+        controller.append("## How an LRU cache works\n\n")
         publish(controller, to: feed)
 
         await waitForHeadingCount(2, in: feed)
@@ -109,7 +109,7 @@ final class StreamDatasetHeadingDiagnosticTests: XCTestCase {
             feed.contentOffset.y = max(0, feed.contentSize.height - feed.bounds.height)
             feed.layoutSubviews()
             try? await Task.sleep(for: .milliseconds(50))
-            if token == "## A single append, traced\n\n" { break }
+            if token == "## Trade-offs\n\n" { break }
         }
 
         let deadline = ContinuousClock.now.advanced(by: .seconds(10))
@@ -118,7 +118,7 @@ final class StreamDatasetHeadingDiagnosticTests: XCTestCase {
             feed.layoutSubviews()
             target = feed._debugExtractFragmentsFromWorkingRange(at: 0)?.first { fragment in
                 guard case .text(let descriptor) = fragment.content else { return false }
-                return descriptor.content == "A single append, traced"
+                return descriptor.content == "Trade-offs"
             }
             if target != nil { break }
             try? await Task.sleep(for: .milliseconds(10))

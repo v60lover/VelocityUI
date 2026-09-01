@@ -39,7 +39,14 @@ extension HotCodeStreamStore {
         guard size.width > 0, size.height > 0 else {
             return (nil, CGSize(width: 0, height: font.uiFont.lineHeight))
         }
-        return (rasterizeText(descriptor, size: size, scale: scale), size)
+        guard let image = rasterizeText(
+            descriptor, layoutWidth: size.width, outputSize: size, scale: scale, inkGuard: codeInkRightGuard
+        ) else { return (nil, size) }
+        // Image-derived width (not the typographic measure) so `state.maxWidth` -- fed from this
+        // return value at every call site -- already includes the ink guard, keeping the
+        // recomposite canvas and the scrollable content width consistent with the bitmap.
+        let width = CGFloat(image.width) / scale
+        return (image, CGSize(width: width, height: size.height))
     }
 
     /// Composites `tiles` (stacked top-to-bottom by `tileHeights`) plus `tailImage` into one

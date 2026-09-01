@@ -3,6 +3,13 @@
 #if canImport(UIKit)
 import UIKit
 
+/// Right-side ink guard for every code-body raster path (whole-block and per-line). A
+/// `layoutFragmentFrame`'s width is the typographic advance, which can end a hair inside the
+/// last glyph's actual ink (e.g. bold/italic right-side bearing); a canvas exactly that wide
+/// shaves the glyph's tail. Shared by `rasterizeCodeBlock`, `rasterizeCodeBlockSync`, and
+/// `HotCodeStreamStore.rasterizeLine` so all three stay in agreement.
+let codeInkRightGuard: CGFloat = 2
+
 /// Builds the `TextDescriptor` for a fully-known code block: per-line color runs (from a
 /// `SyntaxHighlighter`) laid end-to-end over the joined source, gaps filled with `theme`'s
 /// plain color so the run list is always a complete, gapless, ordered partition of `content` --
@@ -164,7 +171,14 @@ func rasterizeCodeBlock(
     // true intrinsic longest-line width instead of whatever column width the DSL assigned.
     let size = await textPool.withContext { ctx in ctx.measure(descriptor, width: .greatestFiniteMagnitude) }
     guard size.width > 0, size.height > 0 else { return (nil, size) }
-    return (rasterizeText(descriptor, size: size, scale: scale), size)
+    guard let image = rasterizeText(
+        descriptor, layoutWidth: size.width, outputSize: size, scale: scale, inkGuard: codeInkRightGuard
+    ) else { return (nil, size) }
+    // The bitmap's own width (not the typographic measure) feeds every downstream content-width
+    // calculation, so the ink guard baked into the pixels is also reflected in the scrollable
+    // content width -- otherwise the guarded pixels exist but can never be scrolled into view.
+    let width = CGFloat(image.width) / scale
+    return (image, CGSize(width: width, height: size.height))
 }
 
 /// Sync sibling of `rasterizeCodeBlock`, for call sites that can't `await` -- the scroll-adjacent
@@ -183,6 +197,10 @@ func rasterizeCodeBlockSync(
     let descriptor = makeCodeTextDescriptor(lines: lines, colorRuns: colorRuns, font: font, theme: theme)
     let size = measure(descriptor, .greatestFiniteMagnitude)
     guard size.width > 0, size.height > 0 else { return (nil, size) }
-    return (rasterizeText(descriptor, size: size, scale: scale), size)
+    guard let image = rasterizeText(
+        descriptor, layoutWidth: size.width, outputSize: size, scale: scale, inkGuard: codeInkRightGuard
+    ) else { return (nil, size) }
+    let width = CGFloat(image.width) / scale
+    return (image, CGSize(width: width, height: size.height))
 }
 #endif

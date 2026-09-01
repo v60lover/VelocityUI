@@ -61,12 +61,18 @@ final class CodeBodyScrollAnimator {
     /// was mid-overdrag so the drag resumes tracking the finger exactly, not the compressed view.
     func beginDrag(cell: RenderCell, identity: RenderCell.LayerIdentity, itemID: AnyHashable) {
         invalidateDisplayLink()
+        // A new touch interrupting a previous target's still-running animation: clear its
+        // "animating" flag now, since `settle()` won't run before `target` is overwritten below.
+        if let previous = target {
+            previous.cell?.setCodeBodyAnimating(false, identity: previous.identity)
+        }
         guard let info = cell.scrollBoundaryInfo(for: identity) else {
             target = nil
             state = .idle
             return
         }
         target = Target(cell: cell, identity: identity, itemID: itemID)
+        cell.setCodeBodyAnimating(true, identity: identity)
         let range = CodeBodyScrollPhysics.legalRange(contentWidth: info.contentWidth, viewportWidth: info.viewportWidth)
         state = .dragging(rawOffset: rawOffset(fromPresented: info.offset, range: range))
     }
@@ -176,8 +182,15 @@ final class CodeBodyScrollAnimator {
         lastTimestamp = nil
     }
 
+    /// Single choke point for stopping an animation. Clears the "animating" flag on the outgoing
+    /// target's cell (if it's still alive) before dropping `target` -- every exit path (drag end,
+    /// cancel, deceleration/spring settling, a stale target failing re-validation) funnels through
+    /// here, so `RenderCell.reclampCodeBodyOffset` is never left permanently suppressed.
     private func settle() {
         invalidateDisplayLink()
+        if let target {
+            target.cell?.setCodeBodyAnimating(false, identity: target.identity)
+        }
         target = nil
         state = .idle
     }

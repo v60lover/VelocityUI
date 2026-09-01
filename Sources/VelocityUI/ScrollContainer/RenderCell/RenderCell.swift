@@ -67,6 +67,12 @@ public final class RenderCell {
     /// Full unclipped content width per code body, from `CodeBodyLayerContent.totalSize.width` --
     /// the clamp bound for horizontal scroll (`clip.bounds.size.width` is the viewport width).
     private var codeBodyContentWidth: [LayerIdentity: CGFloat] = [:]
+    /// Identities `CodeBodyScrollAnimator` currently drives (drag/momentum/edge-spring in
+    /// progress). While set, `reclampCodeBodyOffset` must not touch that identity's offset -- the
+    /// animator is the ground-truth authority mid-animation (e.g. an intentional right-edge
+    /// overdrag), and a layout/recolor pass clamping it back would yank the offset out from under
+    /// the running spring. Set on `beginDrag`, cleared on `settle` -- see `setCodeBodyAnimating`.
+    private var animatingCodeBodyIdentities: Set<LayerIdentity> = []
     private var codeBodyContentByFragmentID: [Int: CodeBodyLayerContent] = [:]
     var layerIdentityByFragmentID: [Int: LayerIdentity] = [:]
     private var codeBackgroundByIdentity: [LayerIdentity: CodeBlockBackgroundDescriptor] = [:]
@@ -162,6 +168,10 @@ public final class RenderCell {
             activeBlockFragmentIDs.removeAll(keepingCapacity: true)
             codeBackgroundByIdentity.removeAll(keepingCapacity: true)
             codeBodyContentByFragmentID.removeAll(keepingCapacity: true)
+            // Belt-and-suspenders: `returnToPool` already stops any animator targeting this cell
+            // (via `cancelInFlightWork` -> `settle`) before it's dequeued for a new item, but a
+            // stale flag here would silently disable reclamp for the new item's code body forever.
+            animatingCodeBodyIdentities.removeAll(keepingCapacity: true)
             placeholderLayer.opacity = 1
             contentLayer.opacity = 0
             CATransaction.commit()
@@ -644,11 +654,28 @@ public final class RenderCell {
         return true
     }
 
+    /// Marks whether `CodeBodyScrollAnimator` currently owns `identity`'s offset -- called from
+    /// `beginDrag`/`settle`. `reclampCodeBodyOffset` reads this to stay out of the animator's way.
+    func setCodeBodyAnimating(_ animating: Bool, identity: LayerIdentity) {
+        if animating {
+            animatingCodeBodyIdentities.insert(identity)
+        } else {
+            animatingCodeBodyIdentities.remove(identity)
+        }
+    }
+
     /// Re-clamps a code body's stored scroll offset to `[0, max(0, contentWidth - viewportWidth)]`
     /// after either shrinks (a re-tokenize shortening the widest line, or a viewport resize) --
     /// otherwise the offset could keep pointing past the new content edge. Call inside an
     /// already-open disabled-action transaction; this performs no transaction of its own.
+    ///
+    /// Skipped while `CodeBodyScrollAnimator` is driving this identity (see
+    /// `animatingCodeBodyIdentities`) -- an active right-edge overdrag/spring is legitimately
+    /// past `maxOffset`, and clamping it here mid-animation would yank the offset out from under
+    /// the animator's next tick. The animator's own settle writes an in-range offset, so nothing
+    /// is missed once it's done.
     private func reclampCodeBodyOffset(identity: LayerIdentity, clip: CALayer, contentWidth: CGFloat) {
+        guard !animatingCodeBodyIdentities.contains(identity) else { return }
         let maxOffset = max(0, contentWidth - clip.bounds.width)
         if clip.bounds.origin.x > maxOffset {
             clip.bounds.origin.x = maxOffset

@@ -219,5 +219,53 @@ final class RenderCellScrollBoundaryTests: XCTestCase {
         XCTAssertEqual(info?.viewportWidth, 550)
         XCTAssertEqual(info?.offset, 50, "offset must be re-clamped to the new, smaller legal max after the viewport grows")
     }
+
+    // MARK: - Reclamp suppression while CodeBodyScrollAnimator owns the offset
+
+    /// Regression for the right-edge bounce stutter: `reclampCodeBodyOffset` (fired by every
+    /// layout/recolor pass) used to hard-snap an in-flight overdrag back to `maxOffset`,
+    /// stomping on `CodeBodyScrollAnimator`'s ground-truth offset mid-spring. Left-edge overdrag
+    /// (offset < 0) was never affected since reclamp only ever clamped the upper bound.
+    func testReclamp_SkippedWhileAnimatorIsDrivingOffset_ThenResumesAfterAnimatorSettles() {
+        let cell = makeCell()
+        let (fragment, identity) = mountWideCodeBody(on: cell, id: 9, itemID: "item-1", contentWidth: 600)
+        // Legal max is 600 - 300 = 300.
+        let animator = CodeBodyScrollAnimator()
+        animator.beginDrag(cell: cell, identity: identity, itemID: "item-1")
+
+        // Simulate an intentional right-edge overdrag the animator is mid-spring on.
+        _ = cell.setCodeBodyOffset(400, identity: identity, itemID: "item-1")
+        XCTAssertEqual(cell.scrollBoundaryInfo(for: identity)?.offset, 400)
+
+        // A layout/recolor pass lands mid-animation (e.g. a late tree-sitter delivery) -- the
+        // exact `applyLayout` path that calls `reclampCodeBodyOffset` on every pass.
+        let sealed = makeCGImage(width: 600, height: 20)
+        let content = CodeBodyLayerContent(
+            chunks: [CodeBodyChunk(image: sealed, size: CGSize(width: 600, height: 20))],
+            tailImage: nil, tailSize: .zero
+        )
+        _ = cell.updateBlockViewport(
+            fragments: [fragment], viewportInCell: fragment.frame,
+            synchronousContent: [:], codeBodyContent: [fragment.id: content]
+        )
+
+        XCTAssertEqual(
+            cell.scrollBoundaryInfo(for: identity)?.offset, 400,
+            "reclamp must not yank the offset back to maxOffset while the animator is actively driving an overdrag"
+        )
+
+        // Animator finishes (mirrors the recycle path's `cancelInFlightWork` -> `settle`) --
+        // reclamp is live again on the very next layout/recolor pass.
+        animator.cancelInFlightWork()
+        _ = cell.updateBlockViewport(
+            fragments: [fragment], viewportInCell: fragment.frame,
+            synchronousContent: [:], codeBodyContent: [fragment.id: content]
+        )
+
+        XCTAssertEqual(
+            cell.scrollBoundaryInfo(for: identity)?.offset, 300,
+            "once the animator has settled, reclamp must resume and pull the overdragged offset back in range"
+        )
+    }
 }
 #endif

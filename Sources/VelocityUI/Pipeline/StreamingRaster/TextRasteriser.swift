@@ -233,9 +233,10 @@ public nonisolated func rasterizeText(
     // Canvas width = widest laid-out line + `inkGuard`. A fragment's layoutFragmentFrame width
     // is the typographic advance, which can sit a hair inside the glyph ink (bold right-side
     // bearing); a canvas exactly that wide clips the last glyph's tail — the horizontal twin of
-    // the vertical clip the layout/output split already fixes. `inkGuard` is 0 via the
-    // compat wrapper for non-wrapping callers (code bodies, hot compositing) that need an exact
-    // fit. Round up to a whole device pixel so CoreGraphics can't shave a hair rounding down.
+    // the vertical clip the layout/output split already fixes. `inkGuard` is 0 via the compat
+    // wrapper for the hot-block (wrapping) text path, which redraws only a tail fragment against
+    // a retained image and can't tolerate the canvas growing out from under it. Round up to a
+    // whole device pixel so CoreGraphics can't shave a hair rounding down.
     var widestLine: CGFloat = 0
     lm.enumerateTextLayoutFragments(from: lm.documentRange.location, options: [.ensuresLayout]) { fragment in
         widestLine = max(widestLine, fragment.layoutFragmentFrame.maxX)
