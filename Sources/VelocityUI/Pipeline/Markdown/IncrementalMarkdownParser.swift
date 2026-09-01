@@ -374,7 +374,11 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
     /// `baseColor`. Bold becomes a heavier weight — `VFontTraits` only defines `.italic`
     /// (NodeTable.swift:37), so bold is never a symbolic trait. Flags combine freely: a code
     /// span nested inside bold gets both the heavier weight AND the mono family + pill.
-    private static func textRun(for run: InlineRun, baseFont: VFontDescriptor, baseColor: VColorDescriptor) -> TextRun {
+    ///
+    /// Internal (not private): `TableCellLayout.swift` reuses this so table-cell emphasis
+    /// mapping never drifts from paragraph/heading emphasis mapping (Section 3 cross-site
+    /// consistency) — one formula, two call sites.
+    static func textRun(for run: InlineRun, baseFont: VFontDescriptor, baseColor: VColorDescriptor) -> TextRun {
         var weight = baseFont.weight
         var traits = baseFont.traits
         var family = baseFont.family
