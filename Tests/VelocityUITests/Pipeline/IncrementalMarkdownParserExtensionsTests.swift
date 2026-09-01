@@ -260,6 +260,30 @@ final class IncrementalMarkdownParserExtensionsTests: XCTestCase {
         XCTAssertEqual(runs, [InlineRun(text: "[still typing", style: [], url: nil)])
     }
 
+    /// VelocityUI-wmss.2: token-by-token appends of a `**bold**` source must never render an
+    /// italic frame while the closing `**` is still in flight. Checks every prefix of the
+    /// source, one character at a time — the hot tail re-scans from scratch on each append, so
+    /// this exercises every possible token-boundary split.
+    func testInlineRuns_TokenByTokenBoldStar_NeverProducesItalicTransient() {
+        assertNoItalicTransient(forEveryPrefixOf: "**bold**")
+    }
+
+    func testInlineRuns_TokenByTokenBoldUnderscore_NeverProducesItalicTransient() {
+        assertNoItalicTransient(forEveryPrefixOf: "__bold__")
+    }
+
+    private func assertNoItalicTransient(forEveryPrefixOf source: String, file: StaticString = #filePath, line: UInt = #line) {
+        for length in 1...source.count {
+            let prefix = String(source.prefix(length))
+            let runs = inlineRuns(prefix)
+            for run in runs {
+                XCTAssertFalse(run.style == .italic,
+                    "prefix \"\(prefix)\" rendered \"\(run.text)\" as italic-only — the trailing single marker must stay pending, not commit to italic",
+                    file: file, line: line)
+            }
+        }
+    }
+
     // MARK: - ParsedMDBlock.runs wiring: only text-bearing kinds tokenize
 
     func testParagraphBlock_CarriesTokenizedRuns() {

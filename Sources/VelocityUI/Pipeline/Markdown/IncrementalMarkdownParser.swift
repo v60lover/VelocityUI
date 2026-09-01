@@ -84,6 +84,13 @@ nonisolated func inlineRuns(_ text: String) -> [InlineRun] {
             continue
         }
         if let first = chars.first, first == "*" || first == "_" {
+            // A lone marker with nothing after it yet might still widen into "**"/"__" on the
+            // next append. Drop it as a pending marker instead of toggling italic, so a trailing
+            // '*' never commits to italic before we know whether its partner is coming.
+            if chars.dropFirst().isEmpty {
+                chars = chars.dropFirst()
+                continue
+            }
             flush()
             flags.formSymmetricDifference(.italic)
             chars = chars.dropFirst(1)
