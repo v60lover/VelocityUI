@@ -1195,5 +1195,85 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
 
         await drainFeedWork(feed)
     }
+
+    // MARK: - VelocityUI-8ge8.6: reused table must not collapse through the in-place fast path
+
+    struct TableChatItem: Identifiable, Sendable {
+        let id: Int
+        let trailingText: String
+    }
+
+    private func makeTableChatFeed() -> FeedScrollView<TableChatItem> {
+        // Wide enough (many long-header columns) that the raster naturally overflows the 375pt
+        // cell -- the exact condition `naturalContentSize.width > frame.width` that must survive
+        // the in-place reuse path for horizontal scroll to stay enabled.
+        let tableRows: [[TableCell]] = [
+            (0..<6).map { TableCell(text: "Column Header \($0) padded wide", runs: []) },
+            (0..<6).map { TableCell(text: "Row One Value \($0) also padded wide", runs: []) },
+        ]
+        let alignments: [TableColumnAlignment] = Array(repeating: .left, count: 6)
+        let feed = FeedScrollView<TableChatItem>(environment: makeEnvironment(), frame: CGRect(x: 0, y: 0, width: 375, height: 812))
+        feed.cellBuilder = { item in
+            VStackNode(spacing: 4) {
+                MarkdownTableNode(tableRows: tableRows, alignments: alignments)
+                TextNode(item.trailingText)
+            }
+        }
+        return feed
+    }
+
+    /// Regression test for the review finding on VelocityUI-8ge8.6: `applyInPlaceBlockDiff`'s
+    /// final fragment-assembly loop (`FeedScrollView+Items.swift`, the `d.reused`/`.moved`
+    /// non-text append site) used `block.fragment.content` unconditionally -- for a `.table`
+    /// block that is the contract-derived placeholder `TableRasterDescriptor(naturalContentSize:
+    /// .zero, ...)` from `blockRenderContract`, NEVER the real rasterized size. A sibling block
+    /// streaming below the table (the trailing text here) forces the whole flat vstack through
+    /// this in-place path; the table matches as reused/unchanged and used to get re-mounted with
+    /// `naturalContentSize == .zero` -- invisible, no horizontal scroll.
+    func testUnchangedWideTable_SurvivesSiblingStreamingUpdate_KeepsRealNaturalContentSize() async {
+        let feed = makeTableChatFeed()
+        feed.items = [TableChatItem(id: 0, trailingText: "seed")]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommitTable(feed, index: 0)
+
+        guard let tableBefore = feed._debugFragments(at: 0).first(where: {
+            if case .table = $0.content { return true }
+            return false
+        }), case .table(let descriptorBefore) = tableBefore.content else {
+            return XCTFail("Precondition: a .table fragment must be committed after the first layout")
+        }
+        XCTAssertGreaterThan(descriptorBefore.naturalContentSize.width, 375,
+            "Precondition: the fixture's wide table must actually overflow the 375pt cell")
+
+        // Sibling text below the table grows -- same item id, streaming update -- the exact shape
+        // that forces `applyInPlaceBlockDiff` to re-diff the whole flat vstack, matching the
+        // table block as reused/unchanged and routing it through the buggy append site.
+        feed.items = [TableChatItem(id: 0, trailingText: "seed grew a lot longer just now")]
+        feed.layoutSubviews()
+
+        guard let tableAfter = feed._debugFragments(at: 0).first(where: {
+            if case .table = $0.content { return true }
+            return false
+        }), case .table(let descriptorAfter) = tableAfter.content else {
+            return XCTFail("The .table fragment must still be present after the sibling's in-place update")
+        }
+        XCTAssertEqual(descriptorAfter.naturalContentSize, descriptorBefore.naturalContentSize,
+            "A reused/unchanged table must carry forward its REAL previous naturalContentSize through "
+            + "the in-place fast path, not collapse to the contract-derived .zero placeholder")
+        XCTAssertGreaterThan(descriptorAfter.naturalContentSize.width, 375,
+            "The table must still report an overflowing width after the sibling update, or horizontal "
+            + "scroll silently disables")
+
+        await drainFeedWork(feed)
+    }
+
+    private func waitForWorkingRangeCommitTable(_ feed: FeedScrollView<TableChatItem>, index: Int, seconds: Double = 10) async {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(seconds))
+        while ContinuousClock.now < deadline {
+            if feed._workingRangeMissCount(from: index, to: index + 1) == 0 { return }
+            await Task.yield()
+            feed.layoutSubviews()
+        }
+    }
 }
 #endif

@@ -89,4 +89,39 @@ nonisolated func rasterizeTextArtifacts(
     }
     return (artifacts, retokenizeCount)
 }
+
+/// Rasterizes every `.table` fragment into one BGRA8888 premultiplied `CGImage`, mirroring
+/// `rasterizeTextArtifacts`'s shape. Re-solves column widths and cell layout from the original
+/// `MarkdownTableDescriptor` (looked up back on `table.nodes[fragment.id]`, same as
+/// `materializeCodeBlockFragments`'s callers re-derive code text from `CodeBlockDescriptor`) --
+/// `extractFragments` only carries geometry forward, not the cell grid itself.
+///
+/// Always a full re-raster, never an incremental append -- a table's column widths are a
+/// function of every row, so a newly-arrived row can retroactively resize columns under
+/// already-rasterized rows. TABLE_RENDER_DESIGN.md "Streaming" describes exactly this: a hot
+/// table re-rasterizes whole, unlike a hot code body's independent per-line tiles.
+nonisolated func rasterizeTableArtifacts(
+    table: NodeTable,
+    fragments: [Fragment],
+    scale: CGFloat
+) -> [TextBitmapArtifact] {
+    let itemID = table.itemID
+    return fragments.enumerated().compactMap { position, fragment -> TextBitmapArtifact? in
+        guard case .table = fragment.content,
+              fragment.id >= 0, fragment.id < table.nodes.count,
+              case .table(let descriptor) = table.nodes[fragment.id]
+        else { return nil }
+        let key = BlockKey(boxedItemID: itemID, index: position, blockID: fragment.blockID)
+        let measure: TextMeasure = { d, w in TextMeasurementContext().measure(d, width: w) }
+        let solution = solveColumnWidths(cells: descriptor.cells, availableWidth: fragment.frame.width, measure: measure)
+        let resolved = layoutTableCells(
+            cells: descriptor.cells, columnWidths: solution.widths, alignments: descriptor.alignments, measure: measure
+        )
+        let raster = rasterizeTable(
+            layout: resolved, gridColor: .tableGridLine, backgroundColor: .codeBlockBackground, scale: scale
+        )
+        guard let image = raster.image else { return nil }
+        return TextBitmapArtifact(key: key, image: image, size: raster.size, codeBodyIdentity: nil)
+    }
+}
 #endif

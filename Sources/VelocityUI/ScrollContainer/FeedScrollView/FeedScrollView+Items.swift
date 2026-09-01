@@ -821,10 +821,18 @@ extension FeedScrollView {
                 continue
             }
             let frame = localFrame.offsetBy(dx: 0, dy: cursor)
+            // The contract-derived `.table` content always carries `naturalContentSize: .zero`
+            // (real size is unknown until rasterization) -- a reused/unchanged table must fall
+            // back to the previous fragment's real content instead, or it mounts invisible.
+            var content = block.fragment.content
+            if case .table = content,
+               case .table = previousFragmentByID[block.fragment.id]?.content {
+                content = previousFragmentByID[block.fragment.id]!.content
+            }
             fragments.append(Fragment(
                 id: block.fragment.id,
                 blockID: block.blockID,
-                content: block.fragment.content,
+                content: content,
                 frame: frame
             ))
             cursor += heights[i]

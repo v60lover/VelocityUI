@@ -11,8 +11,29 @@ public enum FragmentContent: Sendable {
     /// A code block's container background — synthesized by `extractFragments`, not present in
     /// `NodeTable`. See `CodeBlockBackgroundDescriptor`.
     case codeBlockBackground(CodeBlockBackgroundDescriptor)
+    /// A rasterized GFM table (grid lines + cell text baked into one `CGImage`). See
+    /// `TableRasterDescriptor`.
+    case table(TableRasterDescriptor)
     /// Spacer, hosting, gif, video, customLayer — frame only, no renderable content in Phase 1.
     case geometry
+}
+
+/// Carries a rasterized table's identity/geometry through the Layer 1 → Layer 3 boundary. The
+/// pixels themselves arrive later via the same `synchronousContent[id]` channel `.image`/`.text`
+/// use — this descriptor only carries what `RenderCell` needs to mount them.
+public struct TableRasterDescriptor: Sendable {
+    /// The table's full unclipped raster size (`Σ column widths + gridlines`,
+    /// `TableRasterizer`'s reported size) — the clamp bound for horizontal scroll. Larger than
+    /// `Fragment.frame.size.width` only when the table overflowed its cell and needs scroll.
+    public let naturalContentSize: CGSize
+    public let layoutHash: Int
+    public let appearanceHash: Int
+
+    public init(naturalContentSize: CGSize, layoutHash: Int, appearanceHash: Int) {
+        self.naturalContentSize = naturalContentSize
+        self.layoutHash = layoutHash
+        self.appearanceHash = appearanceHash
+    }
 }
 
 /// A flat render instruction produced by extractFragments.
@@ -108,9 +129,19 @@ private nonisolated func collectFragments(
         appendLeaf(.image(d))
     case .text(let d):
         appendLeaf(.text(d))
-    // Table rasterization/mounting (VelocityUI-8ge8.6) isn't wired in yet — same frame-only
-    // placeholder as the other not-yet-rendered kinds.
-    case .spacer, .hosting, .gif, .video, .customLayer, .table:
+    case .table(let descriptor):
+        // `measureNode`'s `.table` case attaches the solved, possibly-overflowing natural
+        // content size as a `.tableBody` child (mirrors the code block's `.codeBody` child) --
+        // the outer `absoluteFrame` itself stays pinned to the cell width, same as a code card.
+        guard layout.renderPart == nil,
+              let body = layout.children.first(where: { $0.renderPart == .tableBody })
+        else { return }
+        appendLeaf(.table(TableRasterDescriptor(
+            naturalContentSize: body.totalFrame.size,
+            layoutHash: descriptor.layoutHash,
+            appearanceHash: descriptor.appearanceHash
+        )))
+    case .spacer, .hosting, .gif, .video, .customLayer:
         appendLeaf(.geometry)
     case .vstack, .hstack, .zstack:
         // A framed container narrows the clip to its own slot; an unframed one

@@ -82,6 +82,8 @@ extension VColorDescriptor {
     public static let white = VColorDescriptor(red: 1, green: 1, blue: 1, alpha: 1)
     /// Neutral light-gray tint — default fill for `CodeBlockNode`'s container background.
     public static let codeBlockBackground = VColorDescriptor(red: 0.95, green: 0.95, blue: 0.96, alpha: 1)
+    /// Default grid-line color for a rasterized `MarkdownTableNode`.
+    public static let tableGridLine = VColorDescriptor(red: 0.85, green: 0.85, blue: 0.87, alpha: 1)
 }
 
 // MARK: - VStackNode

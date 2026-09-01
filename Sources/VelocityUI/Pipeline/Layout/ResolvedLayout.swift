@@ -7,6 +7,9 @@ enum RenderPartKind: Sendable, Hashable {
     case codeBackground
     case codeHeader
     case codeBody
+    /// A table's solved, natural (possibly cell-overflowing) content size — attached by
+    /// `measureNode`'s `.table` case, mirroring `.codeBody`'s role for code cards.
+    case tableBody
 }
 
 /// The output of measureNode for a single node.

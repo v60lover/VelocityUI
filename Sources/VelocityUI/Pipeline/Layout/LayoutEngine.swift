@@ -131,11 +131,27 @@ private func measureContent(
     case .gif, .video, .customLayer:
         return ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: width, height: 44), nodeIndex: nodeIndex)
 
-    // Real column-width solving + cell layout (VelocityUI-8ge8.2/.3) isn't wired into the
-    // measure pass yet — that lands with mounting (VelocityUI-8ge8.6). Same placeholder
-    // shape as .gif/.video/.customLayer until then.
-    case .table:
-        return ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: width, height: 44), nodeIndex: nodeIndex)
+    case .table(let descriptor):
+        guard !descriptor.cells.isEmpty, !descriptor.cells[0].isEmpty else {
+            return ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: width, height: 0), nodeIndex: nodeIndex)
+        }
+        let tableLayout = await textPool.withContext { ctx -> ResolvedTableLayout in
+            let measure: TextMeasure = { d, w in ctx.measure(d, width: w) }
+            let solution = solveColumnWidths(cells: descriptor.cells, availableWidth: width, measure: measure)
+            return layoutTableCells(
+                cells: descriptor.cells, columnWidths: solution.widths,
+                alignments: descriptor.alignments, measure: measure
+            )
+        }
+        // Card frame is pinned to `width` unconditionally -- a wide table must never expand the
+        // cell past the feed width, same reasoning as the code card's background frame. The
+        // natural (possibly wider) content size travels separately via the `.tableBody` child,
+        // read back by `collectFragments` -- mirrors `.codeBlock`'s `.codeBody` child exactly.
+        let total = CGRect(x: 0, y: 0, width: width, height: tableLayout.size.height)
+        let body = ResolvedLayout(
+            totalFrame: CGRect(origin: .zero, size: tableLayout.size), nodeIndex: nodeIndex, renderPart: .tableBody
+        )
+        return ResolvedLayout(totalFrame: total, children: [body], nodeIndex: nodeIndex)
     }
 }
 

@@ -386,6 +386,59 @@ public final class RenderCell {
                 sub.backgroundColor = nil
                 mediaFragmentIDs.remove(fragment.id)
                 placeholderPaintedFragmentIDs.remove(fragment.id)
+            } else if case .table(let descriptor) = fragment.content {
+                codeChunkSublayers.removeValue(forKey: identity)?.forEach { $0.removeFromSuperlayer() }
+                codeBodyContentByFragmentID.removeValue(forKey: fragment.id)
+
+                // Same clip-layer-per-identity horizontal-scroll mechanism a code body's
+                // `.codeBody` fragment mounts into (Variant B) -- generalized to any scrollable
+                // content, not code-specific. A table has exactly one raster tile, so it reuses
+                // `codeTailSublayers[identity]` as that single content layer instead of the
+                // chunk-list machinery code bodies need for per-line streaming.
+                let clip: CALayer
+                if let existing = codeBodyClipLayer[identity] {
+                    clip = existing
+                } else {
+                    let l = CALayer()
+                    l.masksToBounds = true
+                    l.cornerRadius = 0
+                    contentLayer.addSublayer(l)
+                    codeBodyClipLayer[identity] = l
+                    clip = l
+                }
+                if clip.frame != fragment.frame {
+                    clip.frame = fragment.frame
+                }
+
+                let content: CALayer
+                if let existing = codeTailSublayers[identity] {
+                    content = existing
+                } else {
+                    let l = CALayer()
+                    l.masksToBounds = false
+                    l.cornerRadius = 0
+                    clip.addSublayer(l)
+                    codeTailSublayers[identity] = l
+                    content = l
+                }
+                content.frame = CGRect(origin: .zero, size: descriptor.naturalContentSize)
+                content.contents = synchronousContent[fragment.id]
+                content.backgroundColor = nil
+
+                let contentWidth = descriptor.naturalContentSize.width
+                codeBodyContentWidth[identity] = contentWidth
+                reclampCodeBodyOffset(identity: identity, clip: clip, contentWidth: contentWidth)
+
+                sub.contents = nil
+                sub.frame = CGRect(origin: fragment.frame.origin, size: .zero)
+                sub.backgroundColor = nil
+                mediaFragmentIDs.remove(fragment.id)
+                placeholderPaintedFragmentIDs.remove(fragment.id)
+                #if DEBUG
+                assertLayerInvariants(sub)
+                assertLayerInvariants(content)
+                #endif
+                continue
             } else {
                 codeTailSublayers.removeValue(forKey: identity)?.removeFromSuperlayer()
                 codeChunkSublayers.removeValue(forKey: identity)?.forEach { $0.removeFromSuperlayer() }
@@ -601,6 +654,13 @@ public final class RenderCell {
     }
 
     // MARK: - Code Body Horizontal Scroll (hot path -- never awaits)
+    //
+    // Despite the "code body" naming (kept to avoid an unrelated rename churning this file),
+    // every method/dictionary below is generic over `LayerIdentity` and is shared by a table's
+    // `.table` fragment (see the `applyLayout` branch above) -- Variant B (clip-layer
+    // `bounds.origin.x` shift) applies identically to both, per TABLE_RENDER_DESIGN.md
+    // "Horizontal scroll": tables reuse the code-body scroll machinery rather than forking a
+    // parallel one.
 
     /// Locates a scrollable code body's clip layer under `point` (cell-local coordinates,
     /// matching `Fragment.frame`'s space). Skips bodies whose content already fits the viewport

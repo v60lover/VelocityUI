@@ -22,9 +22,16 @@ public extension NodeTable {
             let generation = Block.hash(d.layoutHash, d.appearanceHash)
             return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: .measured, presentation: .geometry, geometryHash: d.layoutHash, appearanceHash: d.appearanceHash, contentRequest: d.url.map { _ in BlockContentRequest(key: key, generation: generation, kind: .video(d)) })
         case .customLayer(let size): return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: .fixed(size), presentation: .geometry, geometryHash: Block.hash(size.width, size.height), appearanceHash: 0)
-        // Rasterization/mounting (VelocityUI-8ge8.6) isn't wired in yet — same geometry-only
-        // placeholder presentation as .gif/.video before their content pipelines land.
-        case .table(let d): return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: .measured, presentation: .geometry, geometryHash: d.layoutHash, appearanceHash: d.appearanceHash)
+        // `naturalContentSize` is unknown at contract time (no measurement has run yet) --
+        // this synthesized Block's fragment is only ever consulted for diffing (contentHash,
+        // key), never painted directly. The real paint fragment always comes from
+        // `extractFragments`, which fills in the real solved size.
+        case .table(let d):
+            return BlockRenderContract(
+                key: key, lifecycle: lifecycle, geometry: .measured,
+                presentation: .table(TableRasterDescriptor(naturalContentSize: .zero, layoutHash: d.layoutHash, appearanceHash: d.appearanceHash)),
+                geometryHash: d.layoutHash, appearanceHash: d.appearanceHash
+            )
         case .vstack, .hstack, .zstack: return nil
         }
     }
@@ -53,6 +60,10 @@ func codeBlockRenderPartHash(_ descriptor: CodeBlockDescriptor, part: RenderPart
         hasher.combine(descriptor.rawCode)
         hasher.combine(descriptor.font)
         hasher.combine(descriptor.language)
+    case .tableBody:
+        // Unreachable: this function is only ever called with a `part` derived from
+        // `codePartID`, which never produces `.tableBody` — a table has no `CodeBlockDescriptor`.
+        break
     }
     return hasher.finalize()
 }

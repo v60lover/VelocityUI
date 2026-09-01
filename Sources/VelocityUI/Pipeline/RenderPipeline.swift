@@ -206,7 +206,10 @@ public actor RenderPipeline {
                                 themeSnapshot: themeSnapshot,
                                 reusableFrom: bitmapStore
                             )
-                            return (index, entry.layout, entry.fragments, artifacts, true, retokenizeCount)
+                            let tableArtifacts = rasterizeTableArtifacts(
+                                table: table, fragments: entry.fragments, scale: capturedScale
+                            )
+                            return (index, entry.layout, entry.fragments, artifacts + tableArtifacts, true, retokenizeCount)
                         }
                         // Guard before the expensive path — exits quickly on cancellation.
                         guard !Task.isCancelled else { return (index, .placeholder, [], [], false, 0) }
@@ -225,8 +228,9 @@ public actor RenderPipeline {
                             themeSnapshot: themeSnapshot,
                             reusableFrom: nil
                         )
+                        let tableArtifacts = rasterizeTableArtifacts(table: table, fragments: fragments, scale: capturedScale)
                         await cache.set(CellEntry(layout: layout, fragments: fragments), for: key)
-                        return (index, layout, fragments, artifacts, false, retokenizeCount)
+                        return (index, layout, fragments, artifacts + tableArtifacts, false, retokenizeCount)
                     }
                 }
                 // Consume results in completion order; spawn prefetch immediately per item.
