@@ -42,7 +42,12 @@ let package = Package(
         // `src/parser.c` (grammar.json needs `tree-sitter generate`, which the SPM build can't
         // run). "-with-generated-files" is alex-pinkus/tree-sitter-swift's own convention for a
         // tag that includes the generated C sources SPM actually needs to compile.
-        .package(url: "https://github.com/alex-pinkus/tree-sitter-swift", exact: "0.7.3-with-generated-files")
+        .package(url: "https://github.com/alex-pinkus/tree-sitter-swift", exact: "0.7.3-with-generated-files"),
+        // VelocityUI-snu1: test-only differential parse oracle for IncrementalMarkdownParser.
+        // Per HYBRID_PARSER_SPIKE.md's verdict, cmark-gfm is NO-GO as a runtime parser but
+        // GO as a test oracle. Pinned to the exact revision the vkw4 spike resolved
+        // (Package.resolved: 0.8.0) — this dependency must stay out of the VelocityUI target.
+        .package(url: "https://github.com/swiftlang/swift-markdown", revision: "3c6f9523da3a1ec2fd829673e472d95b8097a3b8")
     ],
     targets: [
         .target(
@@ -100,7 +105,10 @@ let package = Package(
             dependencies: [
                 "VelocityUI",
                 .product(name: "SwiftTreeSitter", package: "swift-tree-sitter"),
-                .product(name: "TreeSitterJSON", package: "tree-sitter-json")
+                .product(name: "TreeSitterJSON", package: "tree-sitter-json"),
+                // VelocityUI-snu1: differential parse oracle only — must never appear in the
+                // VelocityUI library target's dependency list.
+                .product(name: "Markdown", package: "swift-markdown")
             ],
             path: "Tests/VelocityUITests",
             swiftSettings: [
