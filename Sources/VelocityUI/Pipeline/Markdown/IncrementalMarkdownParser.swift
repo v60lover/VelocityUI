@@ -31,6 +31,10 @@ public enum MarkdownBlockKind: Sendable, Equatable, Hashable {
     case table(alignments: [TableColumnAlignment])
     /// A `---`/`***`/`___` rule line.
     case thematicBreak
+    /// Block LaTeX math (`$$...$$` or `\[...\]`), parallel to `.codeFence`. `text` (via
+    /// `style()`) holds the raw TeX with delimiter lines stripped, same convention as
+    /// `.codeFence` stripping its fence markers.
+    case mathBlock
 }
 
 /// A styled span within a text block's content, produced by `inlineRuns(_:)`. `url` is only
@@ -39,6 +43,12 @@ struct InlineRun: Equatable, Sendable {
     var text: String
     var style: StyleFlags
     var url: String?
+    /// Raw TeX source when this run is inline math (`$...$` / `\(...\)`); nil otherwise. A
+    /// dedicated field rather than a `StyleFlags` bit, because the payload is data (the TeX
+    /// string), not a style toggle. `text` also carries the same raw TeX so a caller that
+    /// doesn't branch on `mathSource` (everything before the inline-math renderer lands) still
+    /// shows literal text instead of nothing.
+    var mathSource: String? = nil
 }
 
 /// Inline markdown emphasis a run can carry, independent of the block-level `MarkdownBlockKind`.
@@ -92,6 +102,65 @@ nonisolated func inlineRuns(_ text: String) -> [InlineRun] {
             chars = chars.dropFirst(2)
             continue
         }
+        if chars.hasPrefix("\\$") {
+            // Escaped dollar is a literal '$', never a math delimiter.
+            buffer.append("$")
+            chars = chars.dropFirst(2)
+            continue
+        }
+        if chars.hasPrefix("\\(") {
+            let afterOpen = chars.dropFirst(2)
+            if let closeRange = afterOpen.range(of: "\\)") {
+                flush()
+                let tex = String(afterOpen[afterOpen.startIndex..<closeRange.lowerBound])
+                runs.append(InlineRun(text: tex, style: flags, url: nil, mathSource: tex))
+                chars = afterOpen[closeRange.upperBound...]
+                continue
+            }
+            // No matching close yet — still streaming. Render the marker literally, same
+            // discipline as an unclosed code span: no raw-TeX flash, no misparse.
+            buffer.append(contentsOf: chars.prefix(2))
+            chars = chars.dropFirst(2)
+            continue
+        }
+        if chars.first == "$" {
+            if chars.dropFirst().first == "$" {
+                // "$$" mid-paragraph is neither the block form (only recognized at line-start
+                // in parseTail) nor valid inline syntax — emit one literal '$' rather than guess.
+                buffer.append("$")
+                chars = chars.dropFirst()
+                continue
+            }
+            let afterOpen = chars.dropFirst()
+            // Pandoc's tex_math_dollars heuristic: the char right after the opening '$' and the
+            // char right before the closing '$' must both be non-space. Without this, "$5 and
+            // $10" (two literal prices) would misparse as one formula spanning "5 and ".
+            if let openNext = afterOpen.first, openNext != " ", openNext != "\n" {
+                var idx = afterOpen.startIndex
+                var prevChar = openNext
+                var closeIndex: Substring.Index?
+                while idx < afterOpen.endIndex {
+                    let c = afterOpen[idx]
+                    if c == "$", prevChar != " " {
+                        closeIndex = idx
+                        break
+                    }
+                    prevChar = c
+                    idx = afterOpen.index(after: idx)
+                }
+                if let closeIndex {
+                    flush()
+                    let tex = String(afterOpen[afterOpen.startIndex..<closeIndex])
+                    runs.append(InlineRun(text: tex, style: flags, url: nil, mathSource: tex))
+                    chars = afterOpen[afterOpen.index(after: closeIndex)...]
+                    continue
+                }
+            }
+            // Unclosed, or rejected by the guard above — literal dollar, no misparse.
+            buffer.append("$")
+            chars = chars.dropFirst()
+            continue
+        }
         if let first = chars.first, first == "*" || first == "_" {
             // A lone marker with nothing after it yet might still widen into "**"/"__" on the
             // next append. Drop it as a pending marker instead of toggling italic, so a trailing
@@ -134,7 +203,7 @@ nonisolated func inlineRuns(_ text: String) -> [InlineRun] {
                         runs.append(InlineRun(text: "", style: flags.union(.link), url: linkURL))
                     } else {
                         for inner in innerRuns {
-                            runs.append(InlineRun(text: inner.text, style: flags.union(inner.style).union(.link), url: linkURL))
+                            runs.append(InlineRun(text: inner.text, style: flags.union(inner.style).union(.link), url: linkURL, mathSource: inner.mathSource))
                         }
                     }
                     chars = chars[chars.index(after: closeParen)...]
@@ -319,6 +388,13 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             content = lines.joined(separator: "\n")
         case .table:
             font = theme.body
+        case .mathBlock:
+            font = theme.code
+            // Strip the `$$`/`\[...\]` delimiters the same way codeFence strips its fence
+            // markers — until gojy.3's rasterizer lands, this is what StreamingMarkdownText's
+            // default TextNode branch shows: the bare TeX source as literal text, no raw
+            // delimiter flash, no misparse of a still-streaming (unclosed) block.
+            content = Self.stripMathBlockDelimiters(content)
         case .listItem(let ordered, let number, let depth):
             font = theme.body
             let indent = String(repeating: "  ", count: depth)
@@ -457,7 +533,7 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             return inlineRuns(text)
         case .listItem:
             return inlineRuns(Self.stripListMarker(text))
-        case .codeFence, .table, .thematicBreak:
+        case .codeFence, .table, .thematicBreak, .mathBlock:
             return []
         }
     }
@@ -468,6 +544,49 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         guard trimmed.count >= 3 else { return false }
         return trimmed.allSatisfy { $0 == "`" } || trimmed.allSatisfy { $0 == "~" }
+    }
+
+    /// Strips a `.mathBlock`'s `$$`/`\[...\]` delimiters from its raw multi-line text, leaving
+    /// bare TeX — the same convention `style()` uses to strip codeFence's fence-marker lines.
+    /// Only the LEADING marker is ever assumed present (block detection guarantees it); the
+    /// TRAILING marker is stripped only when it's actually shaped like one, so a still-streaming
+    /// (unclosed) block never hides its most recently typed line.
+    private static func stripMathBlockDelimiters(_ text: String) -> String {
+        var lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        guard let first = lines.first else { return text }
+        let trimmedFirst = first.drop { $0 == " " }
+        let closeMarker: String
+        if trimmedFirst.hasPrefix("$$") {
+            closeMarker = "$$"
+        } else if trimmedFirst.hasPrefix("\\[") {
+            closeMarker = "\\]"
+        } else {
+            return text
+        }
+        var afterOpen = trimmedFirst.dropFirst(2)
+        if afterOpen.first == " " { afterOpen = afterOpen.dropFirst() }
+
+        if lines.count == 1 {
+            if let closeRange = afterOpen.range(of: closeMarker) {
+                var body = afterOpen[afterOpen.startIndex..<closeRange.lowerBound]
+                if body.last == " " { body = body.dropLast() }
+                return String(body)
+            }
+            return String(afterOpen)
+        }
+
+        // When the marker sits alone on the opening line (the common "$$\nformula\n$$" shape),
+        // drop that line entirely rather than leaving an empty first element — otherwise the
+        // join below would prepend a stray blank line ("\nformula") ahead of the real content.
+        if afterOpen.isEmpty {
+            lines.removeFirst()
+        } else {
+            lines[0] = afterOpen
+        }
+        if let last = lines.last, last.trimmingCharacters(in: .whitespaces) == closeMarker {
+            lines.removeLast()
+        }
+        return lines.joined(separator: "\n")
     }
 
     // MARK: - Tail parse
@@ -505,6 +624,8 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         var openLines: [Substring] = []
         var inFence = false
         var fenceMarker: Substring = ""
+        var inMathBlock = false
+        var mathBlockCloseMarker = ""
         var inContainer = false
         var containerBlankSeen = false
         var containerBlankCut: (index: String.Index, count: Int)?
@@ -535,6 +656,20 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             let info = trimmed.dropFirst(marker.count).trimmingCharacters(in: .whitespaces)
             let language = info.split(separator: " ").first.map(String.init)
             return (marker, language)
+        }
+        // `$$` / `\[` only opens block math at the start of a line (after optional leading
+        // spaces) — mid-paragraph occurrences stay literal, tokenized inline instead (see
+        // `inlineRuns`). `rest` is everything on the line after the opening marker, used to
+        // detect a same-line close (a one-line block).
+        func isMathBlockOpen(_ line: Substring) -> (closeMarker: String, rest: Substring)? {
+            let trimmed = line.drop { $0 == " " }
+            if trimmed.hasPrefix("$$") {
+                return ("$$", trimmed.dropFirst(2))
+            }
+            if trimmed.hasPrefix("\\[") {
+                return ("\\]", trimmed.dropFirst(2))
+            }
+            return nil
         }
         func isFenceClose(_ line: Substring, opening: Substring) -> Bool {
             guard let openChar = opening.first else { return false }
@@ -657,6 +792,18 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
                 continue
             }
 
+            if inMathBlock {
+                openLines.append(line)
+                if line.trimmingCharacters(in: .whitespaces) == mathBlockCloseMarker {
+                    inMathBlock = false
+                    finalizeOpenBlock()
+                    // A closed math block is an unconditional seal point, same as a closed fence.
+                    pendingSealCut = lineEnd
+                    pendingSealBlockCount = blocks.count
+                }
+                continue
+            }
+
             if isBlank(line) {
                 if inContainer {
                     containerBlankSeen = true
@@ -676,6 +823,25 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
                 inFence = true
                 fenceMarker = marker
                 openKind = .codeFence(language: language)
+                openLines = [line]
+                continue
+            }
+
+            if let (closeMarker, rest) = isMathBlockOpen(line) {
+                finalizeOpenBlock()
+                inContainer = false
+                containerBlankSeen = false
+                if rest.range(of: closeMarker) != nil {
+                    // Same-line close ("$$ E=mc^2 $$") — a one-line block, finalized right away
+                    // like a heading/thematic-break; `style()` strips both markers at render.
+                    openKind = .mathBlock
+                    openLines = [line]
+                    finalizeOpenBlock()
+                    continue
+                }
+                inMathBlock = true
+                mathBlockCloseMarker = closeMarker
+                openKind = .mathBlock
                 openLines = [line]
                 continue
             }
