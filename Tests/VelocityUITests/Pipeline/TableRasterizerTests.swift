@@ -167,6 +167,64 @@ final class TableRasterizerTests: XCTestCase {
         XCTAssertGreaterThan(row1Ink.b, row1Ink.r, "row 1's own band must show its blue text, not row 0's red")
     }
 
+    func testMultilineCellTextRetainsVerticalOrientation() {
+        let font = VFontDescriptor(size: 24, weight: VFontDescriptor.regularWeight)
+        let red = VColorDescriptor(red: 1, green: 0, blue: 0, alpha: 1)
+        let blue = VColorDescriptor(red: 0, green: 0, blue: 1, alpha: 1)
+        let content = "RED\nBLUE"
+        let descriptor = TextDescriptor(
+            content: content,
+            font: font,
+            color: red,
+            lineLimit: nil,
+            lineBreakMode: 0,
+            runs: [
+                TextRun(length: 3, font: font, color: red),
+                TextRun(length: content.utf16.count - 3, font: font, color: blue)
+            ],
+            layoutHash: 0,
+            appearanceHash: 0
+        )
+        let cells: [[TextDescriptor]] = [[descriptor]]
+        let gridLineWidth: CGFloat = 1
+        let layout = layoutTableCells(
+            cells: cells,
+            columnWidths: [140],
+            alignments: [.left],
+            measure: { d, w in TextMeasurementContext().measure(d, width: w) }
+        )
+
+        let (image, _) = rasterizeTable(
+            layout: layout,
+            gridColor: gridColor,
+            backgroundColor: backgroundColor,
+            gridLineWidth: gridLineWidth,
+            scale: 1
+        )
+        guard let image else {
+            return XCTFail("expected a non-nil raster")
+        }
+
+        let cellStart = Int(gridLineWidth.rounded())
+        let cellEnd = Int((gridLineWidth + layout.rows[0].frame.height).rounded())
+        let midpoint = cellStart + (cellEnd - cellStart) / 2
+        let upperInk = mostSaturatedPixel(
+            in: image,
+            xRange: 0..<image.width,
+            yRange: cellStart..<midpoint
+        )
+        let lowerInk = mostSaturatedPixel(
+            in: image,
+            xRange: 0..<image.width,
+            yRange: midpoint..<cellEnd
+        )
+
+        XCTAssertGreaterThan(upperInk.a, 0, "upper text band must contain ink")
+        XCTAssertGreaterThan(lowerInk.a, 0, "lower text band must contain ink")
+        XCTAssertGreaterThan(upperInk.r, upperInk.b, "upper line must retain its red orientation")
+        XCTAssertGreaterThan(lowerInk.b, lowerInk.r, "lower line must retain its blue orientation")
+    }
+
     // MARK: - Test 3: Header row (bold font) rasterizes
 
     func testHeaderRowBoldFontRasterizes() {
@@ -439,6 +497,50 @@ final class TableRasterizerTests: XCTestCase {
         XCTAssertEqual(size.height, 0, accuracy: 0.01)
     }
 
+    // MARK: - Test 9: single-token cells never wrap in an overflowing (min-width) table
+
+    /// Reproduces the screenshot bug: a wide, many-column table forced into overflow (branch 3,
+    /// every column at its `min`). A single-token cell -- a bold header like "Structure", a body
+    /// value like "O(1)" -- has no break opportunity, so it must render on one line even at min
+    /// width. Before the fix its `min` was a re-measured, runs-less token that underestimated the
+    /// real (styled) render width, so the last glyph wrapped ("Structur"/"e"). Uses the real
+    /// TextMeasurementContext so it exercises actual font metrics, not a synthetic measure.
+    func testSingleTokenCellsDoNotWrapInOverflowTable() {
+        let bold = VFontDescriptor(size: 16, weight: VFontDescriptor.boldWeight)
+        let measure: TextMeasure = { d, w in TextMeasurementContext().measure(d, width: w) }
+
+        let cells: [[TextDescriptor]] = [
+            [makeCell("Structure", font: bold), makeCell("get", font: bold),
+             makeCell("set", font: bold), makeCell("contains", font: bold),
+             makeCell("Properties", font: bold)],
+            [makeCell("Dictionary only"), makeCell("O(1)"), makeCell("O(1)"),
+             makeCell("O(1)"), makeCell("unavailable")],
+            [makeCell("Linked list only"), makeCell("O(n)"), makeCell("O(n)"),
+             makeCell("O(n)"), makeCell("O(1) if found")],
+        ]
+        let padding = TableCellPadding.default
+        let alignments = [TableColumnAlignment](repeating: .left, count: 5)
+
+        // Narrow available width -> table can't fit even at Σmin, so overflow + min widths.
+        let solution = solveColumnWidths(cells: cells, availableWidth: 200, measure: measure, padding: padding)
+        XCTAssertTrue(solution.overflow, "fixture must be wide enough to overflow")
+
+        let layout = layoutTableCells(
+            cells: cells, columnWidths: solution.widths, alignments: alignments, measure: measure, padding: padding
+        )
+
+        let oneLine = measure(makeCell("Ag", font: bold), .greatestFiniteMagnitude).height
+        for row in layout.rows {
+            for cell in row.cells where !cell.descriptor.content.contains(where: { $0.isWhitespace }) {
+                XCTAssertLessThan(
+                    cell.textFrame.height, oneLine * 1.5,
+                    "single-token cell '\(cell.descriptor.content)' wrapped: height " +
+                    "\(cell.textFrame.height) exceeds one line (\(oneLine))"
+                )
+            }
+        }
+    }
+
     // MARK: - Helpers
 
     private func makeCell(
@@ -469,8 +571,10 @@ final class TableRasterizerTests: XCTestCase {
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
         guard let data = ctx.data else { return (0, 0, 0, 0) }
         let bytes = data.bindMemory(to: UInt8.self, capacity: w * h * 4)
-        let flippedY = h - 1 - y // CGContext draws bottom-up
-        let offset = (flippedY * w + x) * 4
+        // Drawing a (top-down) CGImage into this context lands its visual top at memory row 0, so
+        // `y` indexes rows top-down directly -- no h-1-y flip (that read the image upside down and
+        // masked the real vertical orientation of table cells).
+        let offset = (y * w + x) * 4
         return (bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3])
     }
 
@@ -496,10 +600,11 @@ final class TableRasterizerTests: XCTestCase {
 
         var best: (r: UInt8, g: UInt8, b: UInt8, a: UInt8) = (255, 255, 255, 255)
         var bestSpread = -1
+        // Memory is top-down (visual top at row 0), so `row` indexes bands top-down -- no h-1-row
+        // flip, which previously read the image upside down.
         for row in yRange.clamped(to: 0..<h) {
-            let flippedY = h - 1 - row
             for col in xRange.clamped(to: 0..<w) {
-                let offset = (flippedY * w + col) * 4
+                let offset = (row * w + col) * 4
                 let r = bytes[offset], g = bytes[offset + 1], b = bytes[offset + 2]
                 let spread = Int(max(r, g, b)) - Int(min(r, g, b))
                 if spread > bestSpread {
@@ -531,10 +636,10 @@ final class TableRasterizerTests: XCTestCase {
 
         var best: (r: UInt8, g: UInt8, b: UInt8, a: UInt8) = (255, 255, 255, 255)
         var bestBrightness = Int.max
+        // Memory is top-down (visual top at row 0) -- index bands directly, no h-1-row flip.
         for row in yRange.clamped(to: 0..<h) {
-            let flippedY = h - 1 - row
             for col in xRange.clamped(to: 0..<w) {
-                let offset = (flippedY * w + col) * 4
+                let offset = (row * w + col) * 4
                 let r = bytes[offset], g = bytes[offset + 1], b = bytes[offset + 2]
                 let brightness = Int(r) + Int(g) + Int(b)
                 if brightness < bestBrightness {

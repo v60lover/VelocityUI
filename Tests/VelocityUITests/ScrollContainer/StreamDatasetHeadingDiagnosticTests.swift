@@ -138,7 +138,11 @@ final class StreamDatasetHeadingDiagnosticTests: XCTestCase {
         let expected = try XCTUnwrap(rasterizeText(descriptor, layoutWidth: 390, outputSize: cold, scale: scale))
         print("SINGLE_APPEND_DIAGNOSTIC text=\(descriptor.content) frame=\(heading.frame) cold=\(cold) paintedPixels=\(painted.width)x\(painted.height) expectedPixels=\(expected.width)x\(expected.height)")
 
-        XCTAssertEqual(heading.frame.width, cold.width, accuracy: 1)
+        // frame.width is the rendered bitmap's point width, which carries rasterizeText's
+        // inkGuard + device-pixel rounding and so sits a hair wider than the bare `cold`
+        // measure. The invariant (RenderCell: text frame.size == bitmap point size) ties the
+        // frame to the bitmap, not the tight measure -- assert against the bitmap width.
+        XCTAssertEqual(heading.frame.width, CGFloat(expected.width) / scale, accuracy: 0.5)
         XCTAssertEqual(heading.frame.height, cold.height, accuracy: 1)
         XCTAssertEqual(painted.width, expected.width)
         XCTAssertEqual(painted.height, expected.height)

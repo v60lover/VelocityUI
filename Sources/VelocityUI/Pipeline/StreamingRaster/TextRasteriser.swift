@@ -217,6 +217,10 @@ public nonisolated func rasterizeText(
 
     let storage = NSTextContentStorage()
     let container = NSTextContainer(size: CGSize(width: layoutWidth, height: .greatestFiniteMagnitude))
+    // Zero TextKit's legacy 5pt-per-side inset so wrap width and glyph origin match
+    // TextMeasurementContext (which also zeroes it) -- otherwise render wraps/insets 10pt tighter
+    // than measurement predicted.
+    container.lineFragmentPadding = 0
     container.lineBreakMode = NSLineBreakMode(rawValue: descriptor.lineBreakMode) ?? .byWordWrapping
     container.maximumNumberOfLines = descriptor.lineLimit ?? 0
     let lm = NSTextLayoutManager()

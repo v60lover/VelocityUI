@@ -140,12 +140,13 @@ final class TableColumnWidthSolverTests: XCTestCase {
             [makeCell("dog"), makeCell("hi")]
         ]
 
-        let intrinsics = measureColumnIntrinsics(cells: cells, measure: fakeMeasure)
+        let noPadding = TableCellPadding(horizontal: 0, vertical: 0)
+        let intrinsics = measureColumnIntrinsics(cells: cells, measure: fakeMeasure, padding: noPadding)
 
-        // Column 0: max("cat"=30, "dog"=30) = 30
-        XCTAssertEqual(intrinsics[0].max, 30, accuracy: 0.0001)
-        // Column 1: max("elephant"=80, "hi"=20) = 80
-        XCTAssertEqual(intrinsics[1].max, 80, accuracy: 0.0001)
+        // Column 0: max("cat"=30, "dog"=30) = 30 (+ the wrap guard, no padding here)
+        XCTAssertEqual(intrinsics[0].max, 30 + columnInkWrapGuard, accuracy: 0.0001)
+        // Column 1: max("elephant"=80, "hi"=20) = 80 (+ the wrap guard)
+        XCTAssertEqual(intrinsics[1].max, 80 + columnInkWrapGuard, accuracy: 0.0001)
     }
 
     // MARK: - Test 9: measureColumnIntrinsics min is widest single token, not whole cell
@@ -162,15 +163,16 @@ final class TableColumnWidthSolverTests: XCTestCase {
             [makeCell("Alexander"), makeCell("A very long sentence")]
         ]
 
-        let intrinsics = measureColumnIntrinsics(cells: cells, measure: fakeMeasure)
+        let noPadding = TableCellPadding(horizontal: 0, vertical: 0)
+        let intrinsics = measureColumnIntrinsics(cells: cells, measure: fakeMeasure, padding: noPadding)
 
-        // Column 0 (single-word): min == max == 90
-        XCTAssertEqual(intrinsics[0].min, 90, accuracy: 0.0001)
-        XCTAssertEqual(intrinsics[0].max, 90, accuracy: 0.0001)
+        // Column 0 (single-word): min == max == 90 (+ wrap guard, no padding here)
+        XCTAssertEqual(intrinsics[0].min, 90 + columnInkWrapGuard, accuracy: 0.0001)
+        XCTAssertEqual(intrinsics[0].max, 90 + columnInkWrapGuard, accuracy: 0.0001)
 
-        // Column 1 (multi-word): min should be widest token ("sentence" = 80), max = whole (200)
-        XCTAssertEqual(intrinsics[1].min, 80, accuracy: 0.0001)
-        XCTAssertEqual(intrinsics[1].max, 200, accuracy: 0.0001)
+        // Column 1 (multi-word): min = widest token ("sentence" = 80), max = whole (200), each + guard
+        XCTAssertEqual(intrinsics[1].min, 80 + columnInkWrapGuard, accuracy: 0.0001)
+        XCTAssertEqual(intrinsics[1].max, 200 + columnInkWrapGuard, accuracy: 0.0001)
         // Verify min < max (proves min is from token, not whole string)
         XCTAssertLessThan(intrinsics[1].min, intrinsics[1].max)
     }
@@ -204,6 +206,61 @@ final class TableColumnWidthSolverTests: XCTestCase {
             XCTAssertEqual(composedWidth, manualWidth, accuracy: 0.0001)
         }
         XCTAssertEqual(composedResult.overflow, manualResult.overflow)
+    }
+
+    // MARK: - Test 11: padding is reserved in both min and max
+
+    func testMeasureColumnIntrinsicsIncludesHorizontalPadding() {
+        let fakeMeasure: TextMeasure = { descriptor, _ in
+            CGSize(width: CGFloat(descriptor.content.count) * 10, height: 20)
+        }
+        let cells: [[TextDescriptor]] = [[makeCell("hello")]]  // 5 chars -> natural 50
+        let padding = TableCellPadding(horizontal: 8, vertical: 6)
+
+        let intrinsics = measureColumnIntrinsics(cells: cells, measure: fakeMeasure, padding: padding)
+
+        // Both bounds carry 2 * horizontal (16) + the wrap guard on top of the raw 50pt measurement.
+        XCTAssertEqual(intrinsics[0].min, 50 + 16 + columnInkWrapGuard, accuracy: 0.0001)
+        XCTAssertEqual(intrinsics[0].max, 50 + 16 + columnInkWrapGuard, accuracy: 0.0001)
+    }
+
+    // MARK: - Test 12: regression — header-width column doesn't wrap at natural width + padding
+
+    /// Reproduces the padding-vs-width mismatch bug: column widths were solved WITHOUT padding
+    /// but text was laid out WITH padding subtracted, squeezing every column 2*horizontal too
+    /// narrow so text that fits on one line wrapped. With padding folded into the intrinsics the
+    /// solved width reserves it back, so `layoutTableCells` re-measures at the full natural width
+    /// and the header stays one line.
+    func testHeaderColumnDoesNotWrapAtNaturalWidthPlusPadding() {
+        // "Name" has a 40pt natural single-line width; below 40pt it wraps to two lines.
+        let naturalWidth: CGFloat = 40
+        let lineHeight: CGFloat = 20
+        let wrappingMeasure: TextMeasure = { descriptor, width in
+            if width >= naturalWidth {
+                return CGSize(width: naturalWidth, height: lineHeight)
+            }
+            return CGSize(width: width, height: lineHeight * 2)  // wrapped
+        }
+
+        let cells: [[TextDescriptor]] = [[makeCell("Name")]]
+        let padding = TableCellPadding.default  // horizontal 8, vertical 6
+
+        // Plenty of room, so branch 1 hands each column its full max (natural + padding).
+        let solution = solveColumnWidths(
+            cells: cells, availableWidth: 1000, measure: wrappingMeasure, padding: padding
+        )
+        XCTAssertEqual(
+            solution.widths[0], naturalWidth + 2 * padding.horizontal + columnInkWrapGuard, accuracy: 0.0001
+        )
+
+        let layout = layoutTableCells(
+            cells: cells, columnWidths: solution.widths, alignments: [.none],
+            measure: wrappingMeasure, padding: padding
+        )
+
+        // One line: content box == naturalWidth, so height is a single line + vertical padding.
+        let rowHeight = layout.rows[0].frame.height
+        XCTAssertEqual(rowHeight, lineHeight + 2 * padding.vertical, accuracy: 0.0001)
     }
 
     // MARK: - Helpers

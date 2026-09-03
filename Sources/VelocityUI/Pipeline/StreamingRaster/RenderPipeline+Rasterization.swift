@@ -113,12 +113,18 @@ nonisolated func rasterizeTableArtifacts(
         else { return nil }
         let key = BlockKey(boxedItemID: itemID, index: position, blockID: fragment.blockID)
         let measure: TextMeasure = { d, w in TextMeasurementContext().measure(d, width: w) }
-        let solution = solveColumnWidths(cells: descriptor.cells, availableWidth: fragment.frame.width, measure: measure)
+        // solve/layout/raster must share one padding value (rasterizeTable's precondition).
+        let padding = TableCellPadding.default
+        let solution = solveColumnWidths(
+            cells: descriptor.cells, availableWidth: fragment.frame.width, measure: measure, padding: padding
+        )
         let resolved = layoutTableCells(
-            cells: descriptor.cells, columnWidths: solution.widths, alignments: descriptor.alignments, measure: measure
+            cells: descriptor.cells, columnWidths: solution.widths, alignments: descriptor.alignments,
+            measure: measure, padding: padding
         )
         let raster = rasterizeTable(
-            layout: resolved, gridColor: .tableGridLine, backgroundColor: .codeBlockBackground, scale: scale
+            layout: resolved, gridColor: .tableGridLine, backgroundColor: .codeBlockBackground,
+            padding: padding, scale: scale
         )
         guard let image = raster.image else { return nil }
         return TextBitmapArtifact(key: key, image: image, size: raster.size, codeBodyIdentity: nil)

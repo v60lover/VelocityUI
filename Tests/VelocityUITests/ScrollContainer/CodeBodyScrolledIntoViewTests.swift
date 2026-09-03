@@ -58,9 +58,10 @@ final class CodeBodyScrolledIntoViewTests: XCTestCase {
         let feed = makeFeed(controller: controller)
         publishAtTop(controller, to: feed)
 
-        // 1. Enough prose to push everything after it well below the 844pt fold, so the code
-        //    block streams and seals entirely offscreen (never entering the viewport window).
-        for paragraph in 0..<24 {
+        // 1. Enough prose to push everything after it clear of the working range (viewport plus
+        //    its ~one-screen prefetch band below the fold), so the code block streams and seals
+        //    entirely out of range -- never mounted, never painted -- until it is scrolled to.
+        for paragraph in 0..<40 {
             controller.append("This is prose paragraph number \(paragraph) explaining why streaming rendering must never jank.\n\n")
             publishAtTop(controller, to: feed)
             try? await Task.sleep(for: .milliseconds(5))

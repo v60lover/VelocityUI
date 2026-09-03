@@ -14,6 +14,12 @@ public struct ColumnIntrinsics: Equatable, Sendable {
     }
 }
 
+/// Extra slack folded into every column's intrinsic width before it becomes a wrap constraint.
+/// TextKit breaks a line when the next token *reaches* the container edge, so a column sized to
+/// exactly its measured ink width re-wraps the last glyph on floating-point equality. One point
+/// keeps that glyph on its line — same role as `rasterizeText`'s `inkGuard`.
+let columnInkWrapGuard: CGFloat = 1
+
 /// Result of `solveColumnWidths`. `overflow` is true only when the table can't fit even at
 /// every column's `min` width — the caller should turn on horizontal scroll.
 public struct ColumnWidthSolution: Equatable, Sendable {
@@ -73,13 +79,21 @@ public nonisolated func solveColumnWidths(
 ///
 /// `max` = each cell's natural single-line width (`measure(descriptor, .greatestFiniteMagnitude)`).
 /// `min` = the widest whitespace-delimited token in the cell: a token has no internal break
-/// opportunity, so its own natural width is the floor below which it would clip.
+/// opportunity, so its own natural width is the floor below which it would clip. A cell with no
+/// whitespace can't wrap at all, so its floor is its full `naturalWidth` (measured with runs),
+/// not a re-measured runs-less token that would underestimate a styled cell.
+///
+/// Both bounds include `2 * padding.horizontal` plus `columnInkWrapGuard`, so solved column
+/// widths reserve the cell's horizontal padding and a hairline of wrap slack —
+/// `layoutTableCells`/`rasterizeTable` subtract the padding back and the guard keeps the last
+/// glyph on one line. `padding` must match theirs.
 ///
 /// `measure` is injected exactly like `TextMeasure` in FreezeState.swift, so this stays
 /// pure/nonisolated and UIKit-free — same sibling pattern as `freeze(_:)`.
 public nonisolated func measureColumnIntrinsics(
     cells: [[TextDescriptor]],
-    measure: TextMeasure
+    measure: TextMeasure,
+    padding: TableCellPadding = .default
 ) -> [ColumnIntrinsics] {
     guard let columnCount = cells.first?.count else { return [] }
 
@@ -91,28 +105,41 @@ public nonisolated func measureColumnIntrinsics(
             let naturalWidth = measure(descriptor, .greatestFiniteMagnitude).width
             maxs[columnIndex] = max(maxs[columnIndex], naturalWidth)
 
-            let widestToken = descriptor.content
-                .split(whereSeparator: { $0.isWhitespace })
-                .map { token in
-                    measure(
-                        TextDescriptor(
-                            content: String(token),
-                            font: descriptor.font,
-                            color: descriptor.color,
-                            lineLimit: descriptor.lineLimit,
-                            lineBreakMode: descriptor.lineBreakMode,
-                            layoutHash: 0,
-                            appearanceHash: 0
-                        ),
-                        .greatestFiniteMagnitude
-                    ).width
-                }
-                .max() ?? naturalWidth
+            // A cell with no internal break opportunity can't wrap, so its floor is its own
+            // rendered width -- `naturalWidth`, measured on the real descriptor (runs and all).
+            // Re-measuring a stripped, runs-less token instead would underestimate any styled
+            // cell (a bold header, an inline-code span) and let it wrap one glyph in overflow.
+            let hasBreakOpportunity = descriptor.content.contains { $0.isWhitespace }
+            let widestToken: CGFloat
+            if hasBreakOpportunity {
+                widestToken = descriptor.content
+                    .split(whereSeparator: { $0.isWhitespace })
+                    .map { token in
+                        measure(
+                            TextDescriptor(
+                                content: String(token),
+                                font: descriptor.font,
+                                color: descriptor.color,
+                                lineLimit: descriptor.lineLimit,
+                                lineBreakMode: descriptor.lineBreakMode,
+                                layoutHash: 0,
+                                appearanceHash: 0
+                            ),
+                            .greatestFiniteMagnitude
+                        ).width
+                    }
+                    .max() ?? naturalWidth
+            } else {
+                widestToken = naturalWidth
+            }
             mins[columnIndex] = max(mins[columnIndex], widestToken)
         }
     }
 
-    return zip(mins, maxs).map { ColumnIntrinsics(min: $0, max: $1) }
+    // `columnInkWrapGuard` keeps the last glyph on one line (TextKit wraps on exact-width
+    // equality); `horizontalPadding` is the cell's padding the downstream layout subtracts back.
+    let reserve = columnInkWrapGuard + 2 * padding.horizontal
+    return zip(mins, maxs).map { ColumnIntrinsics(min: $0 + reserve, max: $1 + reserve) }
 }
 
 /// Composition of `measureColumnIntrinsics` + `solveColumnWidths(intrinsics:availableWidth:)` —
@@ -120,10 +147,11 @@ public nonisolated func measureColumnIntrinsics(
 public nonisolated func solveColumnWidths(
     cells: [[TextDescriptor]],
     availableWidth: CGFloat,
-    measure: TextMeasure
+    measure: TextMeasure,
+    padding: TableCellPadding = .default
 ) -> ColumnWidthSolution {
     solveColumnWidths(
-        intrinsics: measureColumnIntrinsics(cells: cells, measure: measure),
+        intrinsics: measureColumnIntrinsics(cells: cells, measure: measure, padding: padding),
         availableWidth: availableWidth
     )
 }

@@ -12,10 +12,11 @@ enum StreamDataset {
     /// 0-based block indices (in the `tokens()` stream) where splicing in an `AsyncImageNode`
     /// actually matches what the prose right above it is describing, instead of a blind parity
     /// rule that would scatter images across unrelated paragraphs. Block 3 is the "here's a
-    /// diagram of the eviction order" paragraph; block 16 is the "here's the shape of one
+    /// diagram of the eviction order" paragraph; block 18 is the "here's the shape of one
     /// `get(_:)` call" paragraph — see `tokens()`. Both must be recounted if blocks are added or
-    /// removed above them in `tokens()`.
-    static let imageAfterBlockIndices: Set<Int> = [3, 16]
+    /// removed above them in `tokens()` (the intro paragraph + GFM table added to
+    /// `markdownFeatureShowcase()` shifted this from 16 to 18).
+    static let imageAfterBlockIndices: Set<Int> = [3, 18]
     /// Index after which the interleaved "rule" divider (`SpacerNode` — the DSL has no dedicated
     /// divider node; a fixed-height spacer stands in for one) is spliced in — right after the
     /// first large fenced code block closes and seals (block 7 in `tokens()`).
@@ -44,6 +45,7 @@ enum StreamDataset {
         chunks += literal("\n\n")
         chunks += prose(sentenceCount: 10, rng: &rng)
         chunks += literal("\n\n")
+        chunks += markdownFeatureShowcase()
         chunks += literal("Here's a diagram of the eviction order — the tail is always the least recently used entry:\n\n")
         chunks += literal("\n\n")
         chunks += prose(sentenceCount: 10, rng: &rng)
@@ -52,7 +54,6 @@ enum StreamDataset {
         chunks += literal("A dictionary alone gets you O(1) lookups but no ordering, and a linked list alone gets you ordering but O(n) lookups. Combining the two — a hash map from key to node, plus a doubly linked list threading the nodes in recency order — gets O(1) for both:\n\n")
         chunks += codeFence(lineCount: codeLineCount, rng: &rng)
         chunks += literal("\n\n")
-        chunks += markdownFeatureShowcase()
         chunks += prose(sentenceCount: 15, rng: &rng)
         chunks += literal("\n")
         chunks += literal("## Walking through a `get`, step by step\n\n")
@@ -89,15 +90,17 @@ enum StreamDataset {
     }
 
     /// Exercises the same block/inline shapes as before (VelocityUI-fzvf.1: ATX heading,
-    /// ordered + nested list, thematic break, a language-tagged fence, inline emphasis) but
-    /// framed as real content instead of a "test" label, so the stream still reads as one
-    /// answer end to end.
+    /// ordered + nested list, thematic break, a language-tagged fence, inline emphasis) plus a
+    /// GFM table (VelocityUI-8ge8) but framed as real content instead of a "test" label, so the
+    /// stream still reads as one answer end to end.
     private static func markdownFeatureShowcase() -> [String] {
         var chunks: [String] = []
         chunks += literal("## A few implementation details worth calling out\n\n")
         chunks += literal("A couple of invariants make this correct: the *node-to-key map* is a **plain dictionary**, never a linear scan over the list — a linked list alone can't answer 'is this key already cached' without walking every node. ~~A sorted array keyed by last-access time~~ almost works, but insertion and removal in the middle both cost O(n). See the [Swift collections docs](https://example.com) for more on `Dictionary`'s amortized guarantees.\n\n")
         chunks += literal("What happens on every `set(_:forKey:)` call, in order:\n\n")
         chunks += literal("1. If the key already exists, its node is unlinked and its value updated.\n2. A new node is linked at the front of the list — the most-recently-used position.\n  3. The dictionary entry for the key is pointed at that node.\n4. If the cache is now over capacity, the tail node is unlinked and its key removed from the dictionary.\n\n")
+        chunks += literal("Here's how that compares to the two structures on their own:\n\n")
+        chunks += literal("| Structure | get | set | contains | Promote | Remove | Eviction | Space |\n| :-- | :-: | :-: | :-: | :-: | :-: | :-- | :-: |\n| Dictionary only | O(1) | O(1) | O(1) | unavailable | O(1) | no ordering, can't evict | O(n) |\n| Linked list only | O(n) | O(n) | O(n) | O(1) once found | O(1) once found | O(1) once found | O(n) |\n| Dictionary + linked list | O(1) | O(1) | O(1) | O(1) | O(1) | O(1) | O(n) |\n\n")
         chunks += literal("---\n\n")
         chunks += literal("```swift\nlet evicted = list.tail // about to be removed once count > capacity\n```\n\n")
         return chunks

@@ -19,12 +19,9 @@ import UIKit
 /// row heights and text frames already account for (same shared-value contract shape as
 /// `RenderEnvironment`'s `imageActor.dimensionCache === dimensionCache` precondition).
 ///
-/// Uses `UIGraphicsImageRenderer` for the outer canvas. Plain fills/strokes (background,
-/// gridlines) honor `layout.rows[i].frame`'s top-left/y-down coordinates directly. Per-cell text
-/// images do not: empirically, `CGContext.draw(_:in:)` for a `CGImage` in this renderer places the
-/// rect mirrored around the canvas's vertical center rather than top-down (a two-row fixture came
-/// back with row 0's and row 1's ink swapped). `drawCGImage(_:in:canvasHeight:context:)` below
-/// corrects for that -- see its own doc comment for what was actually tried and ruled out.
+/// Uses `UIGraphicsImageRenderer` for the outer canvas. Fills, gridlines, and cell images all use
+/// its top-left/y-down coordinate space; cell `CGImage`s are wrapped in `UIImage` so UIKit handles
+/// their orientation during compositing.
 ///
 /// Pure/nonisolated -- no cache lookup, no global state (Design Principle 4). `gridColor`/
 /// `backgroundColor` have no default, mirroring `rasterizeCodeBlockBackground(cornerRadius:
@@ -133,7 +130,7 @@ func rasterizeTable(
                     width: drawnWidth,
                     height: drawnHeight
                 )
-                drawCGImage(cellImage, in: drawRect, canvasHeight: totalHeight, context: cgContext)
+                UIImage(cgImage: cellImage, scale: scale, orientation: .up).draw(in: drawRect)
             }
         }
     }
@@ -146,27 +143,4 @@ func rasterizeTable(
     return (normalised, totalSize)
 }
 
-/// Draws `image` so its visual top-left lands at `rect.origin` (measured top-down from the
-/// canvas, matching every other coordinate in this file) and its visual bottom-right at
-/// `rect.origin + rect.size`.
-///
-/// Verified empirically, not derived from CTM theory: inside a `UIGraphicsImageRenderer` canvas,
-/// plain fills/strokes (the background and gridlines above) already honor a top-left/y-down
-/// `CGRect` directly, but `CGContext.draw(_:in:)` for a `CGImage` does not -- a rect placed at
-/// `y0` lands mirrored around the canvas's vertical center, at `canvasHeight - y0 - height`. (Two
-/// independent fixes -- an unadorned `context.draw`, and a manual local CTM flip/translate around
-/// the rect -- both reproduced the same mirrored placement, which rules out a simple double-flip
-/// and points at `CGContextDrawImage`'s own behavior disagreeing with this renderer's ambient
-/// space specifically for images.) Converting `rect.minY` through this mirror before drawing
-/// corrects it back to top-down placement, confirmed by `TableRasterizerTests
-/// .testCellTextPlacedCorrectly_eachRowStaysInOwnBand`.
-private func drawCGImage(_ image: CGImage, in rect: CGRect, canvasHeight: CGFloat, context: CGContext) {
-    let mirroredRect = CGRect(
-        x: rect.minX,
-        y: canvasHeight - rect.minY - rect.height,
-        width: rect.width,
-        height: rect.height
-    )
-    context.draw(image, in: mirroredRect)
-}
 #endif

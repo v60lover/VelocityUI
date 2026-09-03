@@ -63,7 +63,7 @@ final class StreamDatasetTests: XCTestCase {
     }
 
     func testNamedAnchorImagesAppearOnlyAfterTheirBlocksSealAndKeepStableUniqueIDs() {
-        // Named anchors are 3 and 16 (see `imageAfterBlockIndices`) — build enough sealed blocks
+        // Named anchors are 3 and 18 (see `imageAfterBlockIndices`) — build enough sealed blocks
         // to cross the first one but not the second.
         var parser = IncrementalMarkdownParser()
         parser.append("Block 0\n\nBlock 1\n\nBlock 2\n\nBlock 3")

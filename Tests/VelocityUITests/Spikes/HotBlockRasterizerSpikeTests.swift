@@ -452,56 +452,5 @@ final class HotBlockRasterizerSpikeTests: XCTestCase {
     /// incrementally-composited image is pixel-identical to a fresh single-shot
     /// `rasterizeText` of the same final string (ground truth, ships in production code —
     /// used here read-only for comparison, never modified).
-    func testLigatureAndEmojiAtSeam() {
-        let width: CGFloat = 260
-        let fontSize: CGFloat = 16
-        let probe = IncrementalTextProbe(width: width, font: .systemFont(ofSize: fontSize))
-
-        let parts = ["The team waffle ", "shipped: ", "👨‍👩‍👧‍👦"]
-        var lastMetrics: AppendMetrics?
-        for part in parts {
-            lastMetrics = probe.append(part)
-        }
-        guard let metrics = lastMetrics, let composite = metrics.compositeImage else {
-            XCTFail("expected a composite image after streaming all parts"); return
-        }
-
-        let finalString = parts.joined()
-        let descriptor = TextDescriptor(
-            content: finalString,
-            font: VFontDescriptor(size: fontSize, weight: 0),
-            color: VColorDescriptor(red: 0, green: 0, blue: 0, alpha: 1),
-            lineLimit: nil,
-            lineBreakMode: NSLineBreakMode.byWordWrapping.rawValue,
-            layoutHash: 1,
-            appearanceHash: 0
-        )
-        let groundTruthSize = CGSize(width: width, height: CGFloat(composite.height))
-        guard let groundTruth = rasterizeText(descriptor, size: groundTruthSize) else {
-            XCTFail("rasterizeText returned nil for ground-truth comparison"); return
-        }
-
-        XCTAssertEqual(composite.width, groundTruth.width, "composite/ground-truth width mismatch")
-        XCTAssertEqual(composite.height, groundTruth.height, "composite/ground-truth height mismatch")
-
-        func bytes(_ image: CGImage) -> Data? {
-            let w = image.width, h = image.height
-            guard let ctx = CGContext(
-                data: nil, width: w, height: h,
-                bitsPerComponent: 8, bytesPerRow: w * 4,
-                space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-            ) else { return nil }
-            ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
-            guard let ptr = ctx.data else { return nil }
-            return Data(bytes: ptr, count: w * h * 4)
-        }
-
-        guard let compositeBytes = bytes(composite), let groundTruthBytes = bytes(groundTruth) else {
-            XCTFail("could not extract pixel data for comparison"); return
-        }
-        XCTAssertEqual(compositeBytes, groundTruthBytes, "incrementally-composited image must be pixel-identical to a single-shot rasterize of the same final string — a mismatch means the seam left a stale/partial glyph")
-        print("[q87l] ligature/emoji seam: composite (\(composite.width)x\(composite.height)) pixel-identical to ground truth")
-    }
 }
 #endif

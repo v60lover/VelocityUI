@@ -137,10 +137,15 @@ private func measureContent(
         }
         let tableLayout = await textPool.withContext { ctx -> ResolvedTableLayout in
             let measure: TextMeasure = { d, w in ctx.measure(d, width: w) }
-            let solution = solveColumnWidths(cells: descriptor.cells, availableWidth: width, measure: measure)
+            // solve + layout must share one padding value so column widths reserve padding
+            // that layout then subtracts back for the text's wrap width.
+            let padding = TableCellPadding.default
+            let solution = solveColumnWidths(
+                cells: descriptor.cells, availableWidth: width, measure: measure, padding: padding
+            )
             return layoutTableCells(
                 cells: descriptor.cells, columnWidths: solution.widths,
-                alignments: descriptor.alignments, measure: measure
+                alignments: descriptor.alignments, measure: measure, padding: padding
             )
         }
         // Card frame is pinned to `width` unconditionally -- a wide table must never expand the

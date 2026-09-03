@@ -13,6 +13,11 @@ public final class TextMeasurementContext: @unchecked Sendable {
 
     public init() {
         container = NSTextContainer(size: .zero)
+        // Drop TextKit's legacy 5pt-per-side inset: it silently shrinks the usable wrap width by
+        // 10pt, so a natural width measured at an unbounded container (where the inset can't force
+        // a wrap) no longer fits inside a container sized to that same width -- text wraps one
+        // glyph. Must match rasterizeText's container, which also zeroes it, so measure == render.
+        container.lineFragmentPadding = 0
         container.lineBreakMode = .byWordWrapping
         layoutManager.textContainer = container
         contentStorage.addTextLayoutManager(layoutManager)

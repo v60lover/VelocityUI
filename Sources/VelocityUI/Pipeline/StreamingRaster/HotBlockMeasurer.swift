@@ -52,6 +52,9 @@ final class HotBlockMeasurer {
 
     init() {
         container = NSTextContainer(size: CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude))
+        // Match TextMeasurementContext and rasterizeText: zero the legacy 5pt-per-side inset so
+        // the hot (streaming) measure agrees with the sealed measure and the rendered bitmap.
+        container.lineFragmentPadding = 0
         container.lineBreakMode = .byWordWrapping
         layoutManager.textContainer = container
         contentStorage.addTextLayoutManager(layoutManager)
