@@ -2,6 +2,8 @@
 
 #if canImport(UIKit)
 import UIKit
+import SwaTex
+import SwaTexRender
 
 /// Per-`BlockKey` lifecycle owner for `HotBlockRasterizer`. At most one live rasterizer
 /// per hot key — only the trailing block is ever hot — so a dictionary-keyed store is
@@ -18,10 +20,15 @@ public final class HotBlockRasterizerStore {
     public init() {}
 
     /// Appends `descriptor`'s current content to the hot rasterizer owned by `key`,
-    /// creating one on first call for that key.
-    func append(_ descriptor: TextDescriptor, width: CGFloat, scale: CGFloat, contentHash: Int, for key: BlockKey) -> (height: CGFloat, image: CGImage?) {
+    /// creating one on first call for that key. `formulaCache`/`fontProvider` should be
+    /// `RenderEnvironment.formulaCache`/`.mathFontProvider` — same instances the sealed path
+    /// uses — so hot and sealed inline-math renders agree.
+    func append(
+        _ descriptor: TextDescriptor, width: CGFloat, scale: CGFloat, contentHash: Int, for key: BlockKey,
+        formulaCache: FormulaCache? = nil, fontProvider: KaTeXFontProvider? = nil
+    ) -> (height: CGFloat, image: CGImage?) {
         let rasterizer = entries[key]?.rasterizer ?? HotBlockRasterizer()
-        let result = rasterizer.append(descriptor, width: width, scale: scale)
+        let result = rasterizer.append(descriptor, width: width, scale: scale, formulaCache: formulaCache, fontProvider: fontProvider)
         entries[key] = Entry(rasterizer: rasterizer, contentHash: contentHash)
         return result
     }
@@ -38,12 +45,14 @@ public final class HotBlockRasterizerStore {
 
     /// Catches the live hot rasterizer for `key` up to `descriptor`'s current content,
     /// then seals it — an incremental blit instead of a full `freeze()` re-measure.
-    /// Returns `nil` without appending when `key` has no live entry.
+    /// Returns `nil` without appending when `key` has no live entry. `formulaCache`/
+    /// `fontProvider` forward to the catch-up `append`, same DI contract as above.
     func catchUpAndFinalize(
-        _ key: BlockKey, descriptor: TextDescriptor, width: CGFloat, scale: CGFloat, contentHash: Int
+        _ key: BlockKey, descriptor: TextDescriptor, width: CGFloat, scale: CGFloat, contentHash: Int,
+        formulaCache: FormulaCache? = nil, fontProvider: KaTeXFontProvider? = nil
     ) -> (size: CGSize, image: CGImage)? {
         guard entries[key] != nil else { return nil }
-        _ = append(descriptor, width: width, scale: scale, contentHash: contentHash, for: key)
+        _ = append(descriptor, width: width, scale: scale, contentHash: contentHash, for: key, formulaCache: formulaCache, fontProvider: fontProvider)
         return finalize(key, expectedContentHash: contentHash)
     }
 

@@ -2,6 +2,8 @@
 
 #if canImport(UIKit)
 import UIKit
+import SwaTex
+import SwaTexRender
 
 /// Rasterizes one still-growing hot text block. On an append, composites only the new
 /// tail fragments over the retained image — always redrawing the previous last fragment
@@ -22,8 +24,15 @@ final class HotBlockRasterizer {
     /// computes the delta internally) at `width`, returning the new height and the
     /// composited image. `image` is `nil` only on a degenerate size — treat that like a
     /// `FreezeState.hot` result: paint nothing yet, retry on a later call.
-    func append(_ descriptor: TextDescriptor, width: CGFloat, scale: CGFloat) -> (height: CGFloat, image: CGImage?) {
-        let (height, appended) = measurer.measure(descriptor, width: width)
+    ///
+    /// `formulaCache`/`fontProvider` should be `RenderEnvironment.formulaCache`/`.mathFontProvider`
+    /// — same instances the sealed path uses — so a hot inline formula's image is byte-identical
+    /// to what the seal-time rasterize produces.
+    func append(
+        _ descriptor: TextDescriptor, width: CGFloat, scale: CGFloat,
+        formulaCache: FormulaCache? = nil, fontProvider: KaTeXFontProvider? = nil
+    ) -> (height: CGFloat, image: CGImage?) {
+        let (height, appended) = measurer.measure(descriptor, width: width, formulaCache: formulaCache, fontProvider: fontProvider)
         let size = CGSize(width: width, height: height)
         lastSize = size
 
@@ -74,7 +83,7 @@ final class HotBlockRasterizer {
         } else {
             // Non-append (first call, or a full-reset fallback): the block changed
             // everywhere, so a full rasterize is correct here, not a missed optimization.
-            image = rasterizeText(descriptor, size: size, scale: scale)
+            image = rasterizeText(descriptor, size: size, scale: scale, formulaCache: formulaCache, fontProvider: fontProvider)
             _testHooks.lastRedrawnFragmentCount = newFragments.count
         }
 

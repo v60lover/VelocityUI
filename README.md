@@ -1,4 +1,8 @@
-# VelocityUI
+<p align="center">
+  <img src="docs/assets/velocityui-icon.png" alt="VelocityUI" width="160" height="160">
+</p>
+
+<h1 align="center">VelocityUI</h1>
 
 [![Swift 6](https://img.shields.io/badge/Swift-6.0-F05138?logo=swift&logoColor=white)](https://www.swift.org)
 [![Platform](https://img.shields.io/badge/Platform-iOS%2017%2B-1575F9?logo=apple&logoColor=white)](https://developer.apple.com/ios/)

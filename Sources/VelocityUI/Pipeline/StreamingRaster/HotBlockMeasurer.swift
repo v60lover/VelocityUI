@@ -2,6 +2,8 @@
 
 #if canImport(UIKit)
 import UIKit
+import SwaTex
+import SwaTexRender
 
 /// Measures one still-growing hot text block. On a pure append, re-measures only the
 /// new suffix (O(appended)) instead of the whole block; anything else falls back to a
@@ -64,12 +66,22 @@ final class HotBlockMeasurer {
         self.storage = storage
     }
 
+    /// True if `descriptor` carries any run the flat append-delta path can't handle: an
+    /// attachment-bearing math run (can't be spliced across a chunk boundary — a formula may
+    /// arrive as `'$x^'` then `'2$'`), or a run whose font diverges from the base font (e.g. an
+    /// inline-`code` monospace span, which needs the run-aware attributed string to measure at
+    /// its own height).
+    private func hasAttachmentOrDivergentStyleRun(_ descriptor: TextDescriptor) -> Bool {
+        descriptor.runs.contains { $0.mathSource != nil || $0.font != descriptor.font }
+    }
+
     /// True if the next `measure(_:width:)` call for these arguments would take the
     /// incremental append path.
     func isAppendOnly(_ descriptor: TextDescriptor, width: CGFloat) -> Bool {
         guard let lastAttributes,
               lastAttributes == AttributeFingerprint(descriptor),
-              width == lastWidth
+              width == lastWidth,
+              !hasAttachmentOrDivergentStyleRun(descriptor)
         else { return false }
         return descriptor.content.hasPrefix(lastContent)
     }
@@ -77,22 +89,28 @@ final class HotBlockMeasurer {
     /// Measures `descriptor` at `width`, taking the O(appended) path when
     /// `isAppendOnly(_:width:)` is true. Returns height only, not tight width — a tight
     /// width needs walking every fragment; use `TextMeasurementContext` for that.
+    ///
+    /// `formulaCache`/`fontProvider` thread the same instances the sealed path uses
+    /// (`RenderEnvironment.formulaCache`/`.mathFontProvider`) into the non-append branch's
+    /// run-aware attributed string, so a hot inline formula typesets identically to its sealed
+    /// render — no jump when the block freezes. `scale` is fixed at 1: attachments are never
+    /// drawn during pure measurement, only sized.
     @discardableResult
-    func measure(_ descriptor: TextDescriptor, width: CGFloat) -> (height: CGFloat, appended: Bool) {
+    func measure(
+        _ descriptor: TextDescriptor, width: CGFloat,
+        formulaCache: FormulaCache? = nil, fontProvider: KaTeXFontProvider? = nil
+    ) -> (height: CGFloat, appended: Bool) {
         let appended = isAppendOnly(descriptor, width: width)
-        // KNOWN GAP: `makeAttributes()` uses the base font only and IGNORES `descriptor.runs`,
-        // whereas TextMeasurementContext / rasterizeText measure via the run-aware
-        // `attributedString`. For a block whose runs differ from the base font (e.g. a monospace
-        // inline-`code` run), this hot height can diverge from the sealed/layout height — the
-        // height-axis twin of the heading width bug. Not yet observed, but latent: switch this to
-        // `descriptor.attributedString` if a styled hot block ever measures/paints at the wrong height.
-        let attributes = descriptor.makeAttributes()
 
         if appended {
             // Append into existing storage so TextKit2 invalidates only the edited range.
             // Never touch container geometry here — even a same-value assignment risks
             // TextKit2 treating it as a change and invalidating everything, silently
             // reintroducing the O(block) cost this type exists to avoid.
+            //
+            // Safe to build with the flat base-font attributes: `isAppendOnly` already ruled
+            // out any attachment-bearing or divergently-styled run for this descriptor.
+            let attributes = descriptor.makeAttributes()
             let delta = String(descriptor.content.dropFirst(lastContent.count))
             let attributedDelta = NSAttributedString(string: delta, attributes: attributes)
             contentStorage.performEditingTransaction {
@@ -100,11 +118,12 @@ final class HotBlockMeasurer {
             }
         } else {
             // Non-append fallback: replace the whole range. Correct here because the
-            // block genuinely changed everywhere (or this is the first call).
+            // block genuinely changed everywhere (or this is the first call, or the
+            // descriptor carries a math/styled run isAppendOnly rejected above).
             container.size = CGSize(width: width, height: .greatestFiniteMagnitude)
             container.maximumNumberOfLines = descriptor.lineLimit ?? 0
             container.lineBreakMode = NSLineBreakMode(rawValue: descriptor.lineBreakMode) ?? .byWordWrapping
-            let full = NSAttributedString(string: descriptor.content, attributes: attributes)
+            let full = descriptor.attributedString(formulaCache: formulaCache, fontProvider: fontProvider, scale: 1)
             contentStorage.performEditingTransaction {
                 storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: full)
             }

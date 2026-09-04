@@ -456,7 +456,8 @@ extension FeedScrollView {
             // current content so a block that grew further this round is caught up before the
             // seal check. Always tears down the entry so a stale hot rasterizer never lingers.
             if let sealed = environment.hotBlockRasterizerStore.catchUpAndFinalize(
-                block.key, descriptor: descriptor, width: block.width, scale: scale, contentHash: block.contentHash
+                block.key, descriptor: descriptor, width: block.width, scale: scale, contentHash: block.contentHash,
+                formulaCache: environment.formulaCache, fontProvider: environment.mathFontProvider
             ) {
                 residentStore.store(sealed.image, size: sealed.size, for: block.key)
                 return (sealed.size.height, sealed.image)
@@ -597,7 +598,8 @@ extension FeedScrollView {
                 return (result.height, nil)
             }
             let result = environment.hotBlockRasterizerStore.append(
-                descriptor, width: block.width, scale: scale, contentHash: block.contentHash, for: block.key
+                descriptor, width: block.width, scale: scale, contentHash: block.contentHash, for: block.key,
+                formulaCache: environment.formulaCache, fontProvider: environment.mathFontProvider
             )
             if let image = result.image {
                 residentStore.store(image, size: CGSize(width: block.width, height: result.height), for: block.key)
@@ -704,7 +706,9 @@ extension FeedScrollView {
                        descriptor: descriptor,
                        width: block.width,
                        scale: scale,
-                       contentHash: block.contentHash
+                       contentHash: block.contentHash,
+                       formulaCache: environment.formulaCache,
+                       fontProvider: environment.mathFontProvider
                    ) {
                     residentStore.store(sealed.image, size: sealed.size, for: block.key)
                     recordTextResult(
