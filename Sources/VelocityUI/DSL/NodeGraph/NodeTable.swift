@@ -321,6 +321,38 @@ public struct MarkdownTableDescriptor: Sendable {
     }
 }
 
+/// One block LaTeX formula at the Layer 1 → Layer 2 boundary. Mirrors `CodeBlockDescriptor`'s
+/// role — carries the raw TeX source through to rasterization, which independently decides
+/// (via the same pure `layoutMathBlock` helper measurement already used) whether it parses into
+/// a real formula or degrades to literal text.
+public struct MathBlockDescriptor: Sendable {
+    public let rawTeX: String
+    public let font: VFontDescriptor
+    public let color: VColorDescriptor
+    let blockID: BlockID?
+    let lifecycle: BlockLifecycle
+    public let layoutHash: Int
+    public let appearanceHash: Int
+
+    public init(
+        rawTeX: String,
+        font: VFontDescriptor,
+        color: VColorDescriptor,
+        blockID: BlockID?,
+        lifecycle: BlockLifecycle,
+        layoutHash: Int,
+        appearanceHash: Int
+    ) {
+        self.rawTeX = rawTeX
+        self.font = font
+        self.color = color
+        self.blockID = blockID
+        self.lifecycle = lifecycle
+        self.layoutHash = layoutHash
+        self.appearanceHash = appearanceHash
+    }
+}
+
 public struct ImageDescriptor: Sendable {
     public let url: URL?
     public let aspectRatio: CGFloat?
@@ -399,6 +431,7 @@ public enum NodeKind: Sendable {
     case text(TextDescriptor)
     case codeBlock(CodeBlockDescriptor)
     case table(MarkdownTableDescriptor)
+    case mathBlock(MathBlockDescriptor)
     case image(ImageDescriptor)
     case gif(GIFDescriptor)
     case video(VideoDescriptor)

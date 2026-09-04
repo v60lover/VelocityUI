@@ -10,6 +10,9 @@ enum RenderPartKind: Sendable, Hashable {
     /// A table's solved, natural (possibly cell-overflowing) content size — attached by
     /// `measureNode`'s `.table` case, mirroring `.codeBody`'s role for code cards.
     case tableBody
+    /// A math block's rasterized formula (or literal-fallback) natural content size — attached
+    /// by `measureNode`'s `.mathBlock` case, mirroring `.tableBody`.
+    case mathBody
 }
 
 /// The output of measureNode for a single node.

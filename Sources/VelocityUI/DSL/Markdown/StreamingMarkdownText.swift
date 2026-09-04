@@ -57,6 +57,12 @@ extension IncrementalMarkdownParser {
                 blockID: block.blockID, blockLifecycle: lifecycle
             )
         }
+        if case .mathBlock = block.parsed.kind {
+            return MathBlockNode(
+                rawTeX: styled.content, font: theme.body,
+                blockID: block.blockID, blockLifecycle: lifecycle
+            )
+        }
         return TextNode(
             styled.content, font: styled.font, runs: styled.runs,
             blockID: block.blockID, blockLifecycle: lifecycle

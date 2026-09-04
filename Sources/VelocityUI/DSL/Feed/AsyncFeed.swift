@@ -236,6 +236,7 @@ public struct AsyncFeed<
         let cache = environment.layoutCache
         let pool = environment.textPool
         let actor = environment.imageActor
+        let formulaCache = environment.formulaCache
         let capturedWidth = layout.provider.measureWidth(availableWidth: width)
 
         return Task {
@@ -253,7 +254,8 @@ public struct AsyncFeed<
                         let layout = await measureNode(
                             table, nodeIndex: 0,
                             width: capturedWidth,
-                            textPool: pool
+                            textPool: pool,
+                            formulaCache: formulaCache
                         )
                         let fragments = extractFragments(table: table, layout: layout)
                         await cache.set(CellEntry(layout: layout, fragments: fragments), for: key)

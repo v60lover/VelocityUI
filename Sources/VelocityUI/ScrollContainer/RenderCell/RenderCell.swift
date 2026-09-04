@@ -439,6 +439,57 @@ public final class RenderCell {
                 assertLayerInvariants(content)
                 #endif
                 continue
+            } else if case .mathBlock(let descriptor) = fragment.content {
+                codeChunkSublayers.removeValue(forKey: identity)?.forEach { $0.removeFromSuperlayer() }
+                codeBodyContentByFragmentID.removeValue(forKey: fragment.id)
+
+                // Identical Variant B mechanism to the `.table` branch above -- a math block is
+                // also exactly one raster tile, centered at raster time (see
+                // MathBlockRasterizer.swift), so mounting needs no centering logic of its own.
+                let clip: CALayer
+                if let existing = codeBodyClipLayer[identity] {
+                    clip = existing
+                } else {
+                    let l = CALayer()
+                    l.masksToBounds = true
+                    l.cornerRadius = 0
+                    contentLayer.addSublayer(l)
+                    codeBodyClipLayer[identity] = l
+                    clip = l
+                }
+                if clip.frame != fragment.frame {
+                    clip.frame = fragment.frame
+                }
+
+                let content: CALayer
+                if let existing = codeTailSublayers[identity] {
+                    content = existing
+                } else {
+                    let l = CALayer()
+                    l.masksToBounds = false
+                    l.cornerRadius = 0
+                    clip.addSublayer(l)
+                    codeTailSublayers[identity] = l
+                    content = l
+                }
+                content.frame = CGRect(origin: .zero, size: descriptor.naturalContentSize)
+                content.contents = synchronousContent[fragment.id]
+                content.backgroundColor = nil
+
+                let contentWidth = descriptor.naturalContentSize.width
+                codeBodyContentWidth[identity] = contentWidth
+                reclampCodeBodyOffset(identity: identity, clip: clip, contentWidth: contentWidth)
+
+                sub.contents = nil
+                sub.frame = CGRect(origin: fragment.frame.origin, size: .zero)
+                sub.backgroundColor = nil
+                mediaFragmentIDs.remove(fragment.id)
+                placeholderPaintedFragmentIDs.remove(fragment.id)
+                #if DEBUG
+                assertLayerInvariants(sub)
+                assertLayerInvariants(content)
+                #endif
+                continue
             } else {
                 codeTailSublayers.removeValue(forKey: identity)?.removeFromSuperlayer()
                 codeChunkSublayers.removeValue(forKey: identity)?.forEach { $0.removeFromSuperlayer() }

@@ -829,6 +829,10 @@ extension FeedScrollView {
                case .table = previousFragmentByID[block.fragment.id]?.content {
                 content = previousFragmentByID[block.fragment.id]!.content
             }
+            if case .mathBlock = content,
+               case .mathBlock = previousFragmentByID[block.fragment.id]?.content {
+                content = previousFragmentByID[block.fragment.id]!.content
+            }
             fragments.append(Fragment(
                 id: block.fragment.id,
                 blockID: block.blockID,

@@ -159,6 +159,7 @@ public enum BlockPresentationPolicy: Sendable {
     case image(ImageDescriptor)
     case codeBlockBackground(CodeBlockBackgroundDescriptor)
     case table(TableRasterDescriptor)
+    case mathBlock(MathBlockRasterDescriptor)
     case geometry
 
     public var fragmentContent: FragmentContent {
@@ -167,6 +168,7 @@ public enum BlockPresentationPolicy: Sendable {
         case .image(let descriptor): .image(descriptor)
         case .codeBlockBackground(let descriptor): .codeBlockBackground(descriptor)
         case .table(let descriptor): .table(descriptor)
+        case .mathBlock(let descriptor): .mathBlock(descriptor)
         case .geometry: .geometry
         }
     }
@@ -266,6 +268,8 @@ public struct Block: Sendable {
             self.contentHash = Block.combineHash(descriptor.layoutHash, descriptor.appearanceHash)
         case .table(let descriptor):
             self.contentHash = Block.combineHash(descriptor.layoutHash, descriptor.appearanceHash)
+        case .mathBlock(let descriptor):
+            self.contentHash = Block.combineHash(descriptor.layoutHash, descriptor.appearanceHash)
         case .codeBlockBackground, .geometry:
             self.contentHash = 0
         }
@@ -305,6 +309,7 @@ public struct Block: Sendable {
         case .image(let descriptor): .image(descriptor)
         case .codeBlockBackground(let descriptor): .codeBlockBackground(descriptor)
         case .table(let descriptor): .table(descriptor)
+        case .mathBlock(let descriptor): .mathBlock(descriptor)
         case .geometry: .geometry
         }
     }

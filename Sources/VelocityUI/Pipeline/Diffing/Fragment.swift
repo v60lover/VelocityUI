@@ -14,6 +14,9 @@ public enum FragmentContent: Sendable {
     /// A rasterized GFM table (grid lines + cell text baked into one `CGImage`). See
     /// `TableRasterDescriptor`.
     case table(TableRasterDescriptor)
+    /// A rasterized block math formula (or its literal-text fallback), baked into one `CGImage`.
+    /// See `MathBlockRasterDescriptor`.
+    case mathBlock(MathBlockRasterDescriptor)
     /// Spacer, hosting, gif, video, customLayer — frame only, no renderable content in Phase 1.
     case geometry
 }
@@ -25,6 +28,22 @@ public struct TableRasterDescriptor: Sendable {
     /// The table's full unclipped raster size (`Σ column widths + gridlines`,
     /// `TableRasterizer`'s reported size) — the clamp bound for horizontal scroll. Larger than
     /// `Fragment.frame.size.width` only when the table overflowed its cell and needs scroll.
+    public let naturalContentSize: CGSize
+    public let layoutHash: Int
+    public let appearanceHash: Int
+
+    public init(naturalContentSize: CGSize, layoutHash: Int, appearanceHash: Int) {
+        self.naturalContentSize = naturalContentSize
+        self.layoutHash = layoutHash
+        self.appearanceHash = appearanceHash
+    }
+}
+
+/// Carries a rasterized math block's identity/geometry through the Layer 1 → Layer 3 boundary,
+/// mirroring `TableRasterDescriptor` exactly. `naturalContentSize` is the raster canvas size --
+/// `max(formula width, block width)`, already centered at raster time -- the clamp bound for
+/// horizontal scroll.
+public struct MathBlockRasterDescriptor: Sendable {
     public let naturalContentSize: CGSize
     public let layoutHash: Int
     public let appearanceHash: Int
@@ -137,6 +156,18 @@ private nonisolated func collectFragments(
               let body = layout.children.first(where: { $0.renderPart == .tableBody })
         else { return }
         appendLeaf(.table(TableRasterDescriptor(
+            naturalContentSize: body.totalFrame.size,
+            layoutHash: descriptor.layoutHash,
+            appearanceHash: descriptor.appearanceHash
+        )))
+    case .mathBlock(let descriptor):
+        // Mirrors `.table` above: `measureNode`'s `.mathBlock` case attaches the natural
+        // (possibly overflowing) content size as a `.mathBody` child -- the outer
+        // `absoluteFrame` itself stays pinned to the cell width, same as a table.
+        guard layout.renderPart == nil,
+              let body = layout.children.first(where: { $0.renderPart == .mathBody })
+        else { return }
+        appendLeaf(.mathBlock(MathBlockRasterDescriptor(
             naturalContentSize: body.totalFrame.size,
             layoutHash: descriptor.layoutHash,
             appearanceHash: descriptor.appearanceHash

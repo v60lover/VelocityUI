@@ -3,6 +3,8 @@
 #if canImport(UIKit)
 import Foundation
 import CoreGraphics
+import SwaTex
+import SwaTexRender
 
 struct TextBitmapArtifact: @unchecked Sendable {
     let key: BlockKey
@@ -126,6 +128,45 @@ nonisolated func rasterizeTableArtifacts(
             layout: resolved, gridColor: .tableGridLine, backgroundColor: .codeBlockBackground,
             padding: padding, scale: scale
         )
+        guard let image = raster.image else { return nil }
+        return TextBitmapArtifact(key: key, image: image, size: raster.size, codeBodyIdentity: nil)
+    }
+}
+
+/// Rasterizes every `.mathBlock` fragment into one BGRA8888 premultiplied `CGImage`, mirroring
+/// `rasterizeTableArtifacts`'s shape exactly. Re-derives the layout decision (formula vs.
+/// literal-text fallback) from the original `MathBlockDescriptor` via `layoutMathBlock` -- the
+/// same pure function `LayoutEngine`'s `.mathBlock` case already called, so the two can never
+/// disagree on which branch applies (Section 3 cross-site consistency).
+///
+/// Always a full re-raster on every call, mirroring the table contract's "never an incremental
+/// append, a change re-solves whole" -- matches MATH_RENDER_DESIGN.md's streaming behavior: "on
+/// each token that completes a formula the block re-typesets — cheap, off-MainActor" (SwaTex
+/// parse+layout is ~70µs uncached, ~100ns on a `FormulaCache` hit).
+nonisolated func rasterizeMathArtifacts(
+    table: NodeTable,
+    fragments: [Fragment],
+    scale: CGFloat,
+    formulaCache: FormulaCache?,
+    fontProvider: KaTeXFontProvider
+) -> [TextBitmapArtifact] {
+    let itemID = table.itemID
+    return fragments.enumerated().compactMap { position, fragment -> TextBitmapArtifact? in
+        guard case .mathBlock = fragment.content,
+              fragment.id >= 0, fragment.id < table.nodes.count,
+              case .mathBlock(let descriptor) = table.nodes[fragment.id]
+        else { return nil }
+        let key = BlockKey(boxedItemID: itemID, index: position, blockID: fragment.blockID)
+        // `fragment.frame.width` is the card's pinned container width -- the same value
+        // `LayoutEngine`'s `.mathBlock` case measured against, so the literal-fallback wrap
+        // width and the formula/canvas centering base both agree with what was measured.
+        let blockWidth = fragment.frame.width
+        let mathLayout = layoutMathBlock(
+            rawTeX: descriptor.rawTeX, font: descriptor.font, color: descriptor.color,
+            width: blockWidth, cache: formulaCache,
+            measure: { d, w in TextMeasurementContext().measure(d, width: w) }
+        )
+        let raster = rasterizeMathBlock(mathLayout, blockWidth: blockWidth, scale: scale, fontProvider: fontProvider)
         guard let image = raster.image else { return nil }
         return TextBitmapArtifact(key: key, image: image, size: raster.size, codeBodyIdentity: nil)
     }

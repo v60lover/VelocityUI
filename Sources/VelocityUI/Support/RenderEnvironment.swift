@@ -4,6 +4,7 @@
 import CoreGraphics
 import Foundation
 import SwaTex
+import SwaTexRender
 
 /// Composition root for all long-lived VelocityUI collaborators.
 ///
@@ -87,6 +88,12 @@ public final class RenderEnvironment: Sendable {
     /// another collaborator, so it defaults freely in both inits — mirrors `highlightRegistry`.
     public let formulaCache: FormulaCache
 
+    /// Bundled KaTeX font/glyph cache backing `DisplayListRenderer.draw`'s CoreText glyph runs.
+    /// Long-lived on purpose -- constructing a fresh one per rasterize call would lose its
+    /// font/glyph caches across every formula and every scroll. No shared-identity DI contract
+    /// with another collaborator, so it defaults freely in both inits — mirrors `formulaCache`.
+    public let mathFontProvider: KaTeXFontProvider
+
     /// Designated init — all collaborators supplied by the caller. `nonisolated`, callable from any
     /// context — tests substituting a fake `ImageActor`/`VideoController` must use this instead of
     /// the `@MainActor` convenience init.
@@ -120,7 +127,8 @@ public final class RenderEnvironment: Sendable {
         codeBodyRetokenizeObserver: (@Sendable () -> Void)? = nil,
         codeStreamObserver: (@Sendable (CodeStreamEventKind) -> Void)? = nil,
         highlightRegistry: HighlightRegistry = .init(),
-        formulaCache: FormulaCache = .init()
+        formulaCache: FormulaCache = .init(),
+        mathFontProvider: KaTeXFontProvider = .init()
     ) {
         precondition(
             imageActor.dimensionCache === dimensionCache,
@@ -149,6 +157,7 @@ public final class RenderEnvironment: Sendable {
         self.codeStreamObserver = codeStreamObserver
         self.highlightRegistry = highlightRegistry
         self.formulaCache = formulaCache
+        self.mathFontProvider = mathFontProvider
     }
 
     /// Convenience init for app use. `@MainActor` because `VideoController.init` is `@MainActor`
@@ -178,7 +187,8 @@ public final class RenderEnvironment: Sendable {
         codeBodyRetokenizeObserver: (@Sendable () -> Void)? = nil,
         codeStreamObserver: (@Sendable (CodeStreamEventKind) -> Void)? = nil,
         highlightRegistry: HighlightRegistry = .init(),
-        formulaCache: FormulaCache = .init()
+        formulaCache: FormulaCache = .init(),
+        mathFontProvider: KaTeXFontProvider = .init()
     ) {
         let dc = DimensionCache(session: session)
         let videoPrep = VideoPreparationActor()
@@ -201,7 +211,8 @@ public final class RenderEnvironment: Sendable {
             codeBodyRetokenizeObserver: codeBodyRetokenizeObserver,
             codeStreamObserver: codeStreamObserver,
             highlightRegistry: highlightRegistry,
-            formulaCache: formulaCache
+            formulaCache: formulaCache,
+            mathFontProvider: mathFontProvider
         )
     }
 }

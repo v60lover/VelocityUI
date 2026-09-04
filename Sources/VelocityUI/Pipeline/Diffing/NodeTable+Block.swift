@@ -32,6 +32,15 @@ public extension NodeTable {
                 presentation: .table(TableRasterDescriptor(naturalContentSize: .zero, layoutHash: d.layoutHash, appearanceHash: d.appearanceHash)),
                 geometryHash: d.layoutHash, appearanceHash: d.appearanceHash
             )
+        // `naturalContentSize` is unknown at contract time (same reasoning as `.table` above) --
+        // this synthesized Block's fragment is only ever consulted for diffing, never painted
+        // directly; the real paint fragment comes from `extractFragments`.
+        case .mathBlock(let d):
+            return BlockRenderContract(
+                key: key, lifecycle: lifecycle, geometry: .measured,
+                presentation: .mathBlock(MathBlockRasterDescriptor(naturalContentSize: .zero, layoutHash: d.layoutHash, appearanceHash: d.appearanceHash)),
+                geometryHash: d.layoutHash, appearanceHash: d.appearanceHash
+            )
         case .vstack, .hstack, .zstack: return nil
         }
     }
@@ -39,7 +48,7 @@ public extension NodeTable {
     func isBlockLeaf(at index: Int) -> Bool {
         guard index >= 0, index < nodes.count else { return false }
         switch nodes[index] {
-        case .text, .codeBlock, .image, .spacer, .hosting, .gif, .video, .customLayer, .table: return true
+        case .text, .codeBlock, .image, .spacer, .hosting, .gif, .video, .customLayer, .table, .mathBlock: return true
         case .vstack, .hstack, .zstack: return false
         }
     }
@@ -60,9 +69,10 @@ func codeBlockRenderPartHash(_ descriptor: CodeBlockDescriptor, part: RenderPart
         hasher.combine(descriptor.rawCode)
         hasher.combine(descriptor.font)
         hasher.combine(descriptor.language)
-    case .tableBody:
+    case .tableBody, .mathBody:
         // Unreachable: this function is only ever called with a `part` derived from
-        // `codePartID`, which never produces `.tableBody` — a table has no `CodeBlockDescriptor`.
+        // `codePartID`, which never produces `.tableBody`/`.mathBody` — neither a table nor a
+        // math block has a `CodeBlockDescriptor`.
         break
     }
     return hasher.finalize()

@@ -4,6 +4,8 @@
 import Foundation
 import CoreGraphics
 import os
+import SwaTex
+import SwaTexRender
 
 /// Monotonic generation counter for the prefetch supersession guard. Bumped once per
 /// `onIndexBoundary` call; each spawned prefetch Task checks its captured generation against
@@ -57,6 +59,8 @@ public actor RenderPipeline {
     private let imageActor: ImageActor
     private let frozenBitmapStore: FrozenBitmapStore
     private let highlightRegistry: HighlightRegistry
+    private let formulaCache: FormulaCache
+    private let mathFontProvider: KaTeXFontProvider
 
     /// Fires once per code-block body tokenized+rasterized from scratch, on cold miss or
     /// cache-hit-without-reuse alike — see `RenderEnvironment.codeBodyRetokenizeObserver`.
@@ -85,6 +89,8 @@ public actor RenderPipeline {
         imageActor: ImageActor,
         frozenBitmapStore: FrozenBitmapStore = FrozenBitmapStore(),
         highlightRegistry: HighlightRegistry,
+        formulaCache: FormulaCache = .init(),
+        mathFontProvider: KaTeXFontProvider = .init(),
         codeBodyRetokenizeObserver: (@Sendable () -> Void)? = nil
     ) {
         self.textPool = textPool
@@ -92,6 +98,8 @@ public actor RenderPipeline {
         self.imageActor = imageActor
         self.frozenBitmapStore = frozenBitmapStore
         self.highlightRegistry = highlightRegistry
+        self.formulaCache = formulaCache
+        self.mathFontProvider = mathFontProvider
         self.codeBodyRetokenizeObserver = codeBodyRetokenizeObserver
     }
 
@@ -103,6 +111,8 @@ public actor RenderPipeline {
         self.imageActor = ImageActor()
         self.frozenBitmapStore = FrozenBitmapStore()
         self.highlightRegistry = HighlightRegistry()
+        self.formulaCache = FormulaCache()
+        self.mathFontProvider = KaTeXFontProvider()
         self.codeBodyRetokenizeObserver = nil
     }
 
@@ -161,6 +171,8 @@ public actor RenderPipeline {
         let actor = imageActor
         let bitmapStore = frozenBitmapStore
         let registry = highlightRegistry
+        let formulaCache = formulaCache
+        let fontProvider = mathFontProvider
         let capturedScale = scale
         let capturedWarmRange = warmRange
 
@@ -209,14 +221,19 @@ public actor RenderPipeline {
                             let tableArtifacts = rasterizeTableArtifacts(
                                 table: table, fragments: entry.fragments, scale: capturedScale
                             )
-                            return (index, entry.layout, entry.fragments, artifacts + tableArtifacts, true, retokenizeCount)
+                            let mathArtifacts = rasterizeMathArtifacts(
+                                table: table, fragments: entry.fragments, scale: capturedScale,
+                                formulaCache: formulaCache, fontProvider: fontProvider
+                            )
+                            return (index, entry.layout, entry.fragments, artifacts + tableArtifacts + mathArtifacts, true, retokenizeCount)
                         }
                         // Guard before the expensive path — exits quickly on cancellation.
                         guard !Task.isCancelled else { return (index, .placeholder, [], [], false, 0) }
                         let layout = await measureNode(
                             table, nodeIndex: 0,
                             width: availableWidth,
-                            textPool: pool
+                            textPool: pool,
+                            formulaCache: formulaCache
                         )
                         let fragments = extractFragments(table: table, layout: layout)
                         let (artifacts, retokenizeCount) = rasterizeTextArtifacts(
@@ -229,8 +246,12 @@ public actor RenderPipeline {
                             reusableFrom: nil
                         )
                         let tableArtifacts = rasterizeTableArtifacts(table: table, fragments: fragments, scale: capturedScale)
+                        let mathArtifacts = rasterizeMathArtifacts(
+                            table: table, fragments: fragments, scale: capturedScale,
+                            formulaCache: formulaCache, fontProvider: fontProvider
+                        )
                         await cache.set(CellEntry(layout: layout, fragments: fragments), for: key)
-                        return (index, layout, fragments, artifacts + tableArtifacts, false, retokenizeCount)
+                        return (index, layout, fragments, artifacts + tableArtifacts + mathArtifacts, false, retokenizeCount)
                     }
                 }
                 // Consume results in completion order; spawn prefetch immediately per item.

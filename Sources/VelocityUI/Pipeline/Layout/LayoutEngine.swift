@@ -3,15 +3,21 @@
 #if canImport(UIKit)
 import Foundation
 import CoreGraphics
+import SwaTex
 
 /// nonisolated async — runs on the cooperative pool, never touches @MainActor. Recursively
 /// measures a NodeTable tree, parallelising children via TaskGroup, then applies `.frame()`
 /// framing on top of `measureContent`'s intrinsic result.
+/// - Parameter formulaCache: memoizes SwaTex parse+layout for `.mathBlock` nodes. `nil` bypasses
+///   caching (mirrors `SwaTexEngine.displayList(for:cache:)`'s own nil-bypass convention) — a
+///   correctness-neutral perf knob, not an owned-collaborator identity contract, so it defaults
+///   freely instead of forcing every call site to thread one through.
 public func measureNode(
     _ table: NodeTable,
     nodeIndex: Int,
     width: CGFloat,
-    textPool: TextMeasurementPool
+    textPool: TextMeasurementPool,
+    formulaCache: FormulaCache? = nil
 ) async -> ResolvedLayout {
     guard nodeIndex >= 0, nodeIndex < table.nodes.count else {
         return .placeholder
@@ -20,7 +26,7 @@ public func measureNode(
     // A fixed width in the spec overrides the incoming width proposal — the node (and,
     // for containers, everything measured beneath it) is measured at the framed width
     // rather than whatever width the parent proposed. Unspecified stays a pure passthrough.
-    let content = await measureContent(table, nodeIndex: nodeIndex, width: spec.width ?? width, textPool: textPool)
+    let content = await measureContent(table, nodeIndex: nodeIndex, width: spec.width ?? width, textPool: textPool, formulaCache: formulaCache)
     return spec.isSpecified ? applyFrame(spec, to: content, table: table, nodeIndex: nodeIndex) : content
 }
 
@@ -31,19 +37,20 @@ private func measureContent(
     _ table: NodeTable,
     nodeIndex: Int,
     width: CGFloat,
-    textPool: TextMeasurementPool
+    textPool: TextMeasurementPool,
+    formulaCache: FormulaCache? = nil
 ) async -> ResolvedLayout {
     switch table.nodes[nodeIndex] {
     case .vstack(let d):
         return await measureVStack(
             table: table, nodeIndex: nodeIndex,
-            width: width, textPool: textPool,
+            width: width, textPool: textPool, formulaCache: formulaCache,
             spacing: d.spacing
         )
     case .hstack(let d):
         return await measureHStack(
             table: table, nodeIndex: nodeIndex,
-            width: width, textPool: textPool,
+            width: width, textPool: textPool, formulaCache: formulaCache,
             spacing: d.spacing
         )
     case .zstack:
@@ -54,7 +61,7 @@ private func measureContent(
         await withTaskGroup(of: (Int, ResolvedLayout).self) { group in
             for (i, ci) in childIndices.enumerated() {
                 group.addTask {
-                    let r = await measureNode(table, nodeIndex: ci, width: width, textPool: textPool)
+                    let r = await measureNode(table, nodeIndex: ci, width: width, textPool: textPool, formulaCache: formulaCache)
                     return (i, r)
                 }
             }
@@ -157,6 +164,37 @@ private func measureContent(
             totalFrame: CGRect(origin: .zero, size: tableLayout.size), nodeIndex: nodeIndex, renderPart: .tableBody
         )
         return ResolvedLayout(totalFrame: total, children: [body], nodeIndex: nodeIndex)
+
+    case .mathBlock(let descriptor):
+        // Card frame is pinned to `width` unconditionally -- same reasoning as `.codeBlock`/
+        // `.table`: a wide formula must never expand the container past the feed width. The
+        // real (possibly wider) content size travels via the `.mathBody` child, mirroring
+        // `.tableBody`'s role -- `extractFragments` reads it back the same way.
+        let mathLayout = await textPool.withContext { ctx -> MathBlockLayout in
+            layoutMathBlock(
+                rawTeX: descriptor.rawTeX, font: descriptor.font, color: descriptor.color,
+                width: width, cache: formulaCache,
+                measure: { d, w in ctx.measure(d, width: w) }
+            )
+        }
+        // Formula case: canvas is `max(formula width, block width)` -- see MathBlockRasterizer's
+        // centering contract. Literal-fallback case: the tight measured (possibly-wrapped,
+        // never-wider-than-`width`) size, NOT `width` itself -- mirrors how an ordinary TextNode
+        // block reports its own tight width rather than the full card width (`recordTextResult`'s
+        // "heading in a stretched font" invariant: a fragment's frame size must equal its
+        // bitmap's real pixel size, or `contentsGravity = .resize` silently stretches it).
+        let contentSize: CGSize
+        switch mathLayout {
+        case .formula(_, _, let metrics):
+            contentSize = CGSize(width: max(metrics.width, width), height: metrics.height)
+        case .literal(_, let size):
+            contentSize = size
+        }
+        let total = CGRect(x: 0, y: 0, width: width, height: contentSize.height)
+        let body = ResolvedLayout(
+            totalFrame: CGRect(origin: .zero, size: contentSize), nodeIndex: nodeIndex, renderPart: .mathBody
+        )
+        return ResolvedLayout(totalFrame: total, children: [body], nodeIndex: nodeIndex)
     }
 }
 
@@ -248,7 +286,7 @@ func intrinsicHeight(for table: NodeTable, width: CGFloat) -> CGFloat? {
 /// node types are added. No sequential pass is ever needed here.
 private func measureVStack(
     table: NodeTable, nodeIndex: Int,
-    width: CGFloat, textPool: TextMeasurementPool,
+    width: CGFloat, textPool: TextMeasurementPool, formulaCache: FormulaCache?,
     spacing: CGFloat
 ) async -> ResolvedLayout {
     let childIndices = table.children(of: nodeIndex)
@@ -260,7 +298,7 @@ private func measureVStack(
     await withTaskGroup(of: (Int, ResolvedLayout).self) { group in
         for (i, ci) in childIndices.enumerated() {
             group.addTask {
-                let r = await measureNode(table, nodeIndex: ci, width: width, textPool: textPool)
+                let r = await measureNode(table, nodeIndex: ci, width: width, textPool: textPool, formulaCache: formulaCache)
                 return (i, r)
             }
         }
@@ -290,7 +328,7 @@ private func measureVStack(
 /// height — correct for VStack, wrong for HStack.
 private func measureHStack(
     table: NodeTable, nodeIndex: Int,
-    width: CGFloat, textPool: TextMeasurementPool,
+    width: CGFloat, textPool: TextMeasurementPool, formulaCache: FormulaCache?,
     spacing: CGFloat
 ) async -> ResolvedLayout {
     let childIndices = table.children(of: nodeIndex)
@@ -316,7 +354,7 @@ private func measureHStack(
         if case .spacer(let size) = table.nodes[ci] {
             layout = ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: size, height: 0), nodeIndex: ci)
         } else {
-            layout = await measureNode(table, nodeIndex: ci, width: remainingWidth, textPool: textPool)
+            layout = await measureNode(table, nodeIndex: ci, width: remainingWidth, textPool: textPool, formulaCache: formulaCache)
         }
         remainingWidth = max(0, remainingWidth - layout.totalFrame.width)
         results[i] = layout
@@ -327,7 +365,7 @@ private func measureHStack(
         await withTaskGroup(of: (Int, ResolvedLayout).self) { group in
             for (slot, ci) in flexibleSlots {
                 group.addTask {
-                    let r = await measureNode(table, nodeIndex: ci, width: perFlexWidth, textPool: textPool)
+                    let r = await measureNode(table, nodeIndex: ci, width: perFlexWidth, textPool: textPool, formulaCache: formulaCache)
                     return (slot, r)
                 }
             }

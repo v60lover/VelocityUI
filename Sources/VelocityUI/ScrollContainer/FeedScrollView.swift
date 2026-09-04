@@ -216,6 +216,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
             imageActor: environment.imageActor,
             frozenBitmapStore: environment.frozenBitmapStore,
             highlightRegistry: environment.highlightRegistry,
+            formulaCache: environment.formulaCache,
+            mathFontProvider: environment.mathFontProvider,
             codeBodyRetokenizeObserver: environment.codeBodyRetokenizeObserver
         )
         self.workingRange = WorkingRange()

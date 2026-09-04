@@ -110,9 +110,9 @@ final class MediaDispatcher {
                     guard let image = visibleBlockStore.bitmap(for: key) else { continue }
                     map[fragment.id] = image
                 }
-            case .table:
-                // Same resident/frozen lookup shape as non-code-body `.text` above — a table
-                // raster is one flat `CGImage`, not a per-line chunk list.
+            case .table, .mathBlock:
+                // Same resident/frozen lookup shape as non-code-body `.text` above — a table or
+                // math-block raster is one flat `CGImage`, not a per-line chunk list.
                 let key = BlockKey(
                     boxedItemID: itemID,
                     index: position,
