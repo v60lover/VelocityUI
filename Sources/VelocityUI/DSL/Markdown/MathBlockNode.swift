@@ -32,13 +32,17 @@ public struct MathBlockNode: RenderNode {
 
     public static let defaultFont = VFontDescriptor(size: 20, weight: VFontDescriptor.regularWeight)
 
-    /// Covers `rawTeX` and `font.size` -- SwaTex's layout depends only on the TeX source and the
-    /// target font size, not weight/family/traits (meaningless to a math typesetter), so those
-    /// are appearance-only here, the same content-and-font split `CodeBlockNode.layoutHash` uses.
+    /// Covers `rawTeX`, `font.size`, and hot-ness -- SwaTex's layout depends only on the TeX
+    /// source and the target font size, not weight/family/traits (meaningless to a math
+    /// typesetter), so those are appearance-only here, the same content-and-font split
+    /// `CodeBlockNode.layoutHash` uses. Hot-ness must fold in too: at seal `rawTeX` is unchanged
+    /// (only the trailing `$$`, never part of the body, is stripped), so without it the
+    /// literal-to-formula transition looks like "unchanged" to block diffing and never re-rasters.
     public var layoutHash: Int {
         var h = Hasher()
         h.combine(rawTeX)
         h.combine(font.size)
+        h.combine(blockLifecycle == .hot)
         return h.finalize()
     }
 

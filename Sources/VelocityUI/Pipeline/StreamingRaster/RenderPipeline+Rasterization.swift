@@ -177,6 +177,7 @@ nonisolated func rasterizeMathArtifacts(
         let mathLayout = layoutMathBlock(
             rawTeX: descriptor.rawTeX, font: descriptor.font, color: descriptor.color,
             width: blockWidth, cache: formulaCache,
+            allowFormula: descriptor.lifecycle != .hot,
             measure: { d, w in TextMeasurementContext().measure(d, width: w) }
         )
         let raster = rasterizeMathBlock(mathLayout, blockWidth: blockWidth, scale: scale, fontProvider: fontProvider)

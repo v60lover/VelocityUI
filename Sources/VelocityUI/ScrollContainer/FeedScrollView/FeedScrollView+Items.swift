@@ -605,10 +605,43 @@ extension FeedScrollView {
             return (result.height, result.image)
         }
 
+        // Synchronous measure+raster for a math block, mirroring `measureAndMaybeFreeze`'s role
+        // for text -- lets seal commit the formula's height AND pixels in one frame instead of
+        // bailing to the async `measureNode` fallback (which would show the old short height for
+        // one frame, then jump when the formula lands).
+        func measureAndRasterizeMathBlock(_ block: Block)
+            -> (height: CGFloat, size: CGSize, bitmap: CGImage?)? {
+            guard case .mathBlock = block.fragment.content,
+                  case .mathBlock(let d) = newTable.nodes[block.fragment.id] else { return nil }
+            let mathLayout = layoutMathBlock(
+                rawTeX: d.rawTeX, font: d.font, color: d.color, width: block.width,
+                cache: environment.formulaCache,
+                allowFormula: d.lifecycle != .hot,
+                measure: { [self] desc, w in measureTextSync(desc, width: w) })
+            // Must match LayoutEngine's `.mathBlock` contentSize computation exactly (Section 3
+            // cross-site consistency) so the sync and async paths can never disagree.
+            let size: CGSize
+            switch mathLayout {
+            case .formula(_, _, let m): size = CGSize(width: max(m.width, block.width), height: m.height)
+            case .literal(_, let s):    size = s
+            }
+            let raster = rasterizeMathBlock(mathLayout, blockWidth: block.width,
+                                            scale: scale, fontProvider: environment.mathFontProvider)
+            // Persist into the resident tier under `block.key` -- exactly what the text helpers do.
+            // Without this the raster lives only in this round's `textBitmaps`; on the next token
+            // the now-sealed block is `.reused` (not re-measured), and `buildSyncMap`'s resident
+            // lookup finds nothing -- the formula blanks until the whole message stops streaming.
+            if let bitmap = raster.image {
+                residentStore.store(bitmap, size: size, for: block.key)
+            }
+            return (size.height, size, raster.image)
+        }
+
         var heights = [CGFloat](repeating: 0, count: newBlocks.count)
         var localFragmentFrames = [CGRect](repeating: .null, count: newBlocks.count)
         var textBitmaps: [Int: CGImage] = [:]
         var codeBodyContents: [Int: CodeBodyLayerContent] = [:]
+        var mathSizes: [Int: CGSize] = [:]
         var resolvedIndices = Set<Int>()
 
         func resolveDeterministicGeometry(_ block: Block) -> LeafGeometryResolution? {
@@ -728,6 +761,12 @@ extension FeedScrollView {
                     : measureAndMaybeFreeze(block)
                 guard let result else { return nil }
                 recordTextResult(result, for: block, at: i)
+            } else if case .mathBlock = block.fragment.content {
+                guard let r = measureAndRasterizeMathBlock(block) else { return nil }
+                heights[i] = r.height
+                localFragmentFrames[i] = CGRect(x: 0, y: 0, width: width, height: r.height)
+                textBitmaps[block.fragment.id] = r.bitmap
+                mathSizes[block.fragment.id] = r.size
             } else {
                 guard let geometry = resolveDeterministicGeometry(block) else { return nil }
                 recordGeometry(geometry, at: i)
@@ -743,6 +782,12 @@ extension FeedScrollView {
                     : measureAndMaybeFreeze(block)
                 guard let result else { return nil }
                 recordTextResult(result, for: block, at: i)
+            } else if case .mathBlock = block.fragment.content {
+                guard let r = measureAndRasterizeMathBlock(block) else { return nil }
+                heights[i] = r.height
+                localFragmentFrames[i] = CGRect(x: 0, y: 0, width: width, height: r.height)
+                textBitmaps[block.fragment.id] = r.bitmap
+                mathSizes[block.fragment.id] = r.size
             } else {
                 guard let geometry = resolveDeterministicGeometry(block) else { return nil }
                 recordGeometry(geometry, at: i)
@@ -832,9 +877,18 @@ extension FeedScrollView {
                case .table = previousFragmentByID[block.fragment.id]?.content {
                 content = previousFragmentByID[block.fragment.id]!.content
             }
-            if case .mathBlock = content,
-               case .mathBlock = previousFragmentByID[block.fragment.id]?.content {
-                content = previousFragmentByID[block.fragment.id]!.content
+            if case .mathBlock = content {
+                // A freshly measured/rasterized math block (this round) carries its real size in
+                // `mathSizes` -- use that. Otherwise (unchanged/reused) fall back to the previous
+                // fragment's real content, same as `.table` above, since the contract-derived
+                // content always carries a placeholder `naturalContentSize`.
+                if let s = mathSizes[block.fragment.id],
+                   case .mathBlock(let d) = newTable.nodes[block.fragment.id] {
+                    content = .mathBlock(MathBlockRasterDescriptor(
+                        naturalContentSize: s, layoutHash: d.layoutHash, appearanceHash: d.appearanceHash))
+                } else if case .mathBlock = previousFragmentByID[block.fragment.id]?.content {
+                    content = previousFragmentByID[block.fragment.id]!.content
+                }
             }
             fragments.append(Fragment(
                 id: block.fragment.id,

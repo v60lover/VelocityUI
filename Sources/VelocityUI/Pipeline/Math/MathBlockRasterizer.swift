@@ -41,15 +41,20 @@ func swaTexColor(_ color: VColorDescriptor) -> SwaTex.Color {
 /// `IncrementalMarkdownParser`'s `.mathBlock` style case, which strips delimiters and lets the
 /// default `TextNode` branch show the bare TeX as wrapped literal text) -- a malformed formula
 /// looks the same as "no math support," never a new broken state.
+///
+/// `allowFormula: false` skips the SwaTex attempt entirely and forces the literal fallback --
+/// used while the block is `.hot` so a half-typed formula never flickers formula/literal/formula
+/// as the partial TeX flickers valid/invalid, which would jitter every following block's height.
 func layoutMathBlock(
     rawTeX: String,
     font: VFontDescriptor,
     color: VColorDescriptor,
     width: CGFloat,
     cache: FormulaCache?,
+    allowFormula: Bool,
     measure: (TextDescriptor, CGFloat) -> CGSize
 ) -> MathBlockLayout {
-    if let list = try? SwaTexEngine.displayList(
+    if allowFormula, let list = try? SwaTexEngine.displayList(
         for: rawTeX, style: .display, color: swaTexColor(color), cache: cache
     ) {
         let options = mathBlockRenderOptions(fontSize: font.size)

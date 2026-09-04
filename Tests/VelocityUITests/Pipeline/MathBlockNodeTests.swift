@@ -46,6 +46,7 @@ final class MathBlockNodeTests: XCTestCase {
     func testLayoutMathBlock_ValidTeX_ProducesFormula() {
         let layout = layoutMathBlock(
             rawTeX: "x^2", font: font, color: .primary, width: 300, cache: nil,
+            allowFormula: true,
             measure: { d, w in TextMeasurementContext().measure(d, width: w) }
         )
         guard case .formula = layout else {
@@ -59,6 +60,7 @@ final class MathBlockNodeTests: XCTestCase {
         let malformed = #"\frac{1}"#
         let layout = layoutMathBlock(
             rawTeX: malformed, font: font, color: .primary, width: 300, cache: nil,
+            allowFormula: true,
             measure: { d, w in TextMeasurementContext().measure(d, width: w) }
         )
         guard case .literal(let descriptor, let size) = layout else {
@@ -73,6 +75,7 @@ final class MathBlockNodeTests: XCTestCase {
     func testRasterizeMathBlock_Formula_IsBGRA8888() throws {
         let layout = layoutMathBlock(
             rawTeX: "x^2", font: font, color: .primary, width: 300, cache: nil,
+            allowFormula: true,
             measure: { d, w in TextMeasurementContext().measure(d, width: w) }
         )
         let raster = rasterizeMathBlock(layout, blockWidth: 300, scale: 2, fontProvider: KaTeXFontProvider())
@@ -85,6 +88,7 @@ final class MathBlockNodeTests: XCTestCase {
         let blockWidth: CGFloat = 400
         let layout = layoutMathBlock(
             rawTeX: rawTeX, font: font, color: .primary, width: blockWidth, cache: nil,
+            allowFormula: true,
             measure: { d, w in TextMeasurementContext().measure(d, width: w) }
         )
         guard case .formula(_, _, let metrics) = layout else { return XCTFail("expected a formula layout") }
@@ -110,6 +114,7 @@ final class MathBlockNodeTests: XCTestCase {
         let blockWidth: CGFloat = 50
         let layout = layoutMathBlock(
             rawTeX: rawTeX, font: font, color: .primary, width: blockWidth, cache: nil,
+            allowFormula: true,
             measure: { d, w in TextMeasurementContext().measure(d, width: w) }
         )
         guard case .formula(_, _, let metrics) = layout else { return XCTFail("expected a formula layout") }

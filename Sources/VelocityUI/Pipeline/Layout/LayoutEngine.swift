@@ -176,6 +176,7 @@ private func measureContent(
             layoutMathBlock(
                 rawTeX: descriptor.rawTeX, font: descriptor.font, color: descriptor.color,
                 width: width, cache: formulaCache,
+                allowFormula: descriptor.lifecycle != .hot,
                 measure: { d, w in ctx.measure(d, width: w) }
             )
         }

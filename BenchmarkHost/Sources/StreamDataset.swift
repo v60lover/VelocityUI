@@ -43,7 +43,9 @@ enum StreamDataset {
         chunks += literal("\n")
         chunks += literal("## How an LRU cache works\n\n")
         chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 10, rng: &rng)
+        chunks += prose(sentenceCount: 2, rng: &rng)
+        chunks += literal("\n\n")
+        chunks += mathShowcase()
         chunks += literal("\n\n")
         chunks += markdownFeatureShowcase()
         chunks += literal("Here's a diagram of the eviction order — the tail is always the least recently used entry:\n\n")
@@ -86,6 +88,67 @@ enum StreamDataset {
         chunks += literal("\n\n")
         chunks += prose(sentenceCount: 25, rng: &rng)
         chunks += literal("\n\n")
+        return chunks
+    }
+
+    /// Every LaTeX shape the math pipeline (VelocityUI-gojy) needs to survive, appended after
+    /// everything else so it never shifts `imageAfterBlockIndices`/`ruleAfterBlockIndex`, which
+    /// are counted from the front: both inline delimiters (`$...$` and `\(...\)`), both block
+    /// delimiters (`$$...$$` and `\[...\]`), the same-line block form (`"$$ E=mc^2 $$"`), a
+    /// formula deliberately wide enough to trigger the block's Variant B horizontal scroll, a
+    /// malformed formula (missing `\frac` argument) that must degrade to literal text instead of
+    /// crashing or dropping the block, and an escaped dollar sign that must stay plain text and
+    /// never be misread as a delimiter.
+    ///
+    /// Inline formulas stream **character by character** (`charByChar`) specifically to hit the
+    /// half-typed state the parser has to treat as literal until closed — e.g. the stream sits on
+    /// `$\alpha` for several appends before the closing `$` lands — per gojy's streaming-safety
+    /// requirement (an unclosed delimiter must never flash raw TeX or mis-parse). Block formulas
+    /// stream their inner content the same way, to hit the analogous mid-formula states
+    /// (`\frac{a` before the closing brace, etc.) while the block stays open.
+    private static func mathShowcase() -> [String] {
+        var chunks: [String] = []
+        chunks += literal("## Putting a number on it\n\n")
+        chunks += literal("Every claim above holds up in real notation too. Load factor — how full the underlying hash table is — is usually written ")
+        chunks += charByChar(#"$\alpha = n / m$"#)
+        chunks += literal(", where $n$ is the entry count and $m$ is the table's bucket count; most implementations resize once ")
+        chunks += charByChar(#"\(\alpha\)"#)
+        chunks += literal(" crosses somewhere around 0.75. The get and set costs described above are both constant, independent of $n$:\n\n")
+        chunks += mathBlock(#"T_{get}(n) = T_{set}(n) = O(1)"#)
+        chunks += literal("\ncompared to a naive scan without the dictionary, which is linear in the number of entries:\n\n")
+        chunks += mathBlock(#"T_{scan}(n) = O(n)"#, open: "\\[", close: "\\]")
+        chunks += literal("\nFor $n$ insertions with no eviction pressure, the total work is the sum of $n$ constant-time steps — the classic identity behind that sum is worth having on hand:\n\n")
+        chunks += mathBlock(#"\sum_{i=1}^{n} i = \frac{n(n+1)}{2}"#)
+        chunks += literal("\nThe eviction order can also be read off a state transition, if matrices read more clearly than prose:\n\n")
+        chunks += mathBlock(#"\begin{pmatrix} 0 & 1 \\ 1 & 0 \end{pmatrix}"#)
+        chunks += literal("\nand the quadratic formula — nothing to do with caches, just a stress case for a fraction, a square root, and the ± sign all in one expression:\n\n")
+        chunks += mathBlock(#"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}"#)
+        chunks += literal("\nA hit-rate model that's piecewise, depending on whether the working set fits in the cache:\n\n")
+        chunks += mathBlock(#"H(n) = \begin{cases} 1 & n \le C \\ C/n & n > C \end{cases}"#)
+        chunks += literal("\nAnd a formula deliberately wide enough that it should scroll horizontally instead of wrapping or getting clipped:\n\n")
+        chunks += mathBlock(#"a_1 + a_2 + a_3 + a_4 + a_5 + a_6 + a_7 + a_8 + a_9 + a_{10} + a_{11} + a_{12} + a_{13} + a_{14} + a_{15}"#)
+        chunks += literal("\nThe same-line block form — everything between the delimiters on one line instead of its own line:\n\n")
+        chunks += literal("$$ E = mc^2 $$\n\n")
+        chunks += literal("A malformed formula — a `\\frac` missing its second argument — should render as plain literal text instead of crashing or dropping the block:\n\n")
+        chunks += mathBlock(#"\frac{1}"#)
+        chunks += literal("\nAnd a plain dollar sign, escaped, must never be read as a delimiter: the whole cache above costs about \\$0 to run since it's just memory, not a hosted service.\n\n")
+        return chunks
+    }
+
+    /// Splits `s` into one-character chunks so a `StreamDriver` appends it one character at a
+    /// time — the only way to actually exercise a parser's mid-token states (half-typed inline
+    /// math delimiters, an unclosed `\frac{`, etc.) instead of skipping straight from "not there"
+    /// to "fully formed."
+    private static func charByChar(_ s: String) -> [String] { s.map { String($0) } }
+
+    /// Streams one block-math formula (`$$...$$` by default, or `\[...\]` via `open`/`close`):
+    /// opens the delimiter, streams `tex` character by character (see `charByChar`), then closes
+    /// on its own line — mirrors `codeFence`'s "stay hot until sealed" shape for the block-math
+    /// path (VelocityUI-gojy.2/.3).
+    private static func mathBlock(_ tex: String, open: String = "$$", close: String = "$$") -> [String] {
+        var chunks: [String] = [open + "\n"]
+        chunks += charByChar(tex)
+        chunks.append("\n" + close + "\n")
         return chunks
     }
 
