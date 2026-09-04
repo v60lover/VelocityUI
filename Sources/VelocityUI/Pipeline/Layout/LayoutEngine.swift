@@ -95,7 +95,7 @@ private func measureContent(
             }
         }
         return await textPool.withContext { ctx in
-            let size = ctx.measure(d, width: width)
+            let size = ctx.measure(d, width: width, formulaCache: formulaCache)
             return ResolvedLayout(totalFrame: CGRect(origin: .zero, size: size), nodeIndex: nodeIndex)
         }
 
@@ -143,7 +143,9 @@ private func measureContent(
             return ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: width, height: 0), nodeIndex: nodeIndex)
         }
         let tableLayout = await textPool.withContext { ctx -> ResolvedTableLayout in
-            let measure: TextMeasure = { d, w in ctx.measure(d, width: w) }
+            // Table cells tokenize inline runs the same way paragraphs do (gojy.2), so a cell's
+            // `$...$` gets the same cached typeset path as a paragraph's.
+            let measure: TextMeasure = { d, w in ctx.measure(d, width: w, formulaCache: formulaCache) }
             // solve + layout must share one padding value so column widths reserve padding
             // that layout then subtracts back for the text's wrap width.
             let padding = TableCellPadding.default

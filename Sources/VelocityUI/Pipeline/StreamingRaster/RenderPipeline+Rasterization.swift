@@ -24,14 +24,19 @@ nonisolated func rasterizeTextFragment(
     scale: CGFloat,
     highlightRegistry: HighlightRegistry,
     theme: Theme,
-    existingBodyRaster: (image: CGImage, size: CGSize)?
+    existingBodyRaster: (image: CGImage, size: CGSize)?,
+    formulaCache: FormulaCache? = nil,
+    fontProvider: KaTeXFontProvider? = nil
 ) -> (image: CGImage?, size: CGSize, retokenized: Bool) {
     guard case .body(let chrome) = descriptor.codeBlockRole else {
         // layoutWidth is the full width the fragment was measured at (see LayoutEngine's
         // `.text` case); frameSize is the tight measured size -- laying out narrower than
         // measurement here is exactly the clip bug this split fixes.
         return (
-            rasterizeText(descriptor, layoutWidth: layoutWidth, outputSize: frameSize, scale: scale),
+            rasterizeText(
+                descriptor, layoutWidth: layoutWidth, outputSize: frameSize, scale: scale,
+                formulaCache: formulaCache, fontProvider: fontProvider
+            ),
             frameSize, false
         )
     }
@@ -60,7 +65,9 @@ nonisolated func rasterizeTextArtifacts(
     scale: CGFloat,
     highlightRegistry: HighlightRegistry,
     themeSnapshot: HighlightThemeSnapshot,
-    reusableFrom: FrozenBitmapStore?
+    reusableFrom: FrozenBitmapStore?,
+    formulaCache: FormulaCache? = nil,
+    fontProvider: KaTeXFontProvider? = nil
 ) -> (artifacts: [TextBitmapArtifact], codeBodyRetokenizeCount: Int) {
     let itemID = table.itemID
     let codeBodyIdentity = CodeBodyRasterIdentity(
@@ -80,7 +87,8 @@ nonisolated func rasterizeTextArtifacts(
             descriptor, frameSize: fragment.frame.size, layoutWidth: layoutWidth, scale: scale,
             highlightRegistry: highlightRegistry,
             theme: themeSnapshot.theme,
-            existingBodyRaster: existing
+            existingBodyRaster: existing,
+            formulaCache: formulaCache, fontProvider: fontProvider
         )
         guard let image else { return nil }
         if retokenized { retokenizeCount += 1 }
@@ -105,7 +113,9 @@ nonisolated func rasterizeTextArtifacts(
 nonisolated func rasterizeTableArtifacts(
     table: NodeTable,
     fragments: [Fragment],
-    scale: CGFloat
+    scale: CGFloat,
+    formulaCache: FormulaCache? = nil,
+    fontProvider: KaTeXFontProvider? = nil
 ) -> [TextBitmapArtifact] {
     let itemID = table.itemID
     return fragments.enumerated().compactMap { position, fragment -> TextBitmapArtifact? in
@@ -114,7 +124,10 @@ nonisolated func rasterizeTableArtifacts(
               case .table(let descriptor) = table.nodes[fragment.id]
         else { return nil }
         let key = BlockKey(boxedItemID: itemID, index: position, blockID: fragment.blockID)
-        let measure: TextMeasure = { d, w in TextMeasurementContext().measure(d, width: w) }
+        // Cells tokenize inline runs the same way paragraphs do (gojy.2), so a cell's `$...$`
+        // gets the same cached typeset path as a paragraph's -- matches LayoutEngine's `.table`
+        // measure case, which already threads `formulaCache` into this same `ctx.measure` call.
+        let measure: TextMeasure = { d, w in TextMeasurementContext().measure(d, width: w, formulaCache: formulaCache) }
         // solve/layout/raster must share one padding value (rasterizeTable's precondition).
         let padding = TableCellPadding.default
         let solution = solveColumnWidths(
@@ -126,7 +139,7 @@ nonisolated func rasterizeTableArtifacts(
         )
         let raster = rasterizeTable(
             layout: resolved, gridColor: .tableGridLine, backgroundColor: .codeBlockBackground,
-            padding: padding, scale: scale
+            padding: padding, scale: scale, formulaCache: formulaCache, fontProvider: fontProvider
         )
         guard let image = raster.image else { return nil }
         return TextBitmapArtifact(key: key, image: image, size: raster.size, codeBodyIdentity: nil)

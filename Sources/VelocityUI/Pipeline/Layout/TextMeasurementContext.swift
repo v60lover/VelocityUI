@@ -2,6 +2,7 @@
 
 #if canImport(UIKit)
 import UIKit
+import SwaTex
 
 /// Single-owner TextKit 2 measurement unit.
 /// @unchecked Sendable is safe: TextMeasurementPool guarantees exclusive
@@ -23,12 +24,19 @@ public final class TextMeasurementContext: @unchecked Sendable {
         contentStorage.addTextLayoutManager(layoutManager)
     }
 
-    /// Synchronous measurement — called from within a pool checkout.
-    public func measure(_ descriptor: TextDescriptor, width: CGFloat) -> CGSize {
+    /// Synchronous measurement — called from within a pool checkout. `formulaCache` threads
+    /// through to any inline math run (`TextRun.mathSource`) so its typeset geometry is cached
+    /// the same way a `.mathBlock` node's is (`layoutMathBlock`'s nil-bypass convention) --
+    /// `nil` still typesets, just uncached. `scale: 1` is a placeholder: this context's
+    /// attachments are never drawn (only their pure `attachmentBounds` are read), so the value
+    /// can't affect the returned size.
+    public func measure(_ descriptor: TextDescriptor, width: CGFloat, formulaCache: FormulaCache? = nil) -> CGSize {
         // Uses the same attributedString builder as rasterizeText, so measured size never
         // drifts from rendered pixels.
         contentStorage.performEditingTransaction {
-            contentStorage.attributedString = descriptor.attributedString
+            contentStorage.attributedString = descriptor.attributedString(
+                formulaCache: formulaCache, fontProvider: nil, scale: 1
+            )
         }
 
         container.size = CGSize(width: width, height: .greatestFiniteMagnitude)

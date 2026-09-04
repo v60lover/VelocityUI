@@ -549,7 +549,10 @@ extension FeedScrollView {
                 },
                 rasterize: { [self] descriptor, layoutWidth, size, s in
                     _testHooks.blockDiffRasterizeCallCount += 1
-                    return rasterizeText(descriptor, layoutWidth: layoutWidth, outputSize: size, scale: s)
+                    return rasterizeText(
+                        descriptor, layoutWidth: layoutWidth, outputSize: size, scale: s,
+                        formulaCache: environment.formulaCache, fontProvider: environment.mathFontProvider
+                    )
                 }
             )
             switch state {
@@ -949,7 +952,7 @@ extension FeedScrollView {
     /// most one or two text blocks per update.
     private func measureTextSync(_ descriptor: TextDescriptor, width: CGFloat) -> CGSize {
         _testHooks.blockDiffMeasureCallCount += 1
-        return TextMeasurementContext().measure(descriptor, width: width)
+        return TextMeasurementContext().measure(descriptor, width: width, formulaCache: environment.formulaCache)
     }
 
     // MARK: - Hot-block side-channel during an active scroll gesture

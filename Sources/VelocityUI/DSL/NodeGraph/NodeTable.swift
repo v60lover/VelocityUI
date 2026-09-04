@@ -138,6 +138,12 @@ public struct TextRun: Sendable, Hashable {
     public let backgroundColor: VColorDescriptor?
     /// Carried as an `.link` attribute for a later hit-test pass to resolve.
     public let linkURL: URL?
+    /// Raw TeX source for an inline `$...$` / `\(...\)` formula. Dedicated field, not a
+    /// `StyleFlags` bit -- the payload is data, matching `InlineRun.mathSource`'s wording
+    /// (`IncrementalMarkdownParser.swift`). When set, this run's span of `content` is replaced
+    /// by a typeset attachment instead of drawn as literal text; a parse failure falls back to
+    /// the literal text `content` already holds for this span.
+    public let mathSource: String?
 
     public init(
         length: Int,
@@ -146,7 +152,8 @@ public struct TextRun: Sendable, Hashable {
         underlineStyle: Int = 0,
         strikethroughStyle: Int = 0,
         backgroundColor: VColorDescriptor? = nil,
-        linkURL: URL? = nil
+        linkURL: URL? = nil,
+        mathSource: String? = nil
     ) {
         self.length = length
         self.font = font
@@ -155,6 +162,7 @@ public struct TextRun: Sendable, Hashable {
         self.strikethroughStyle = strikethroughStyle
         self.backgroundColor = backgroundColor
         self.linkURL = linkURL
+        self.mathSource = mathSource
     }
 }
 

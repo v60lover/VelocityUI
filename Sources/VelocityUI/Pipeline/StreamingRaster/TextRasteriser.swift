@@ -2,6 +2,8 @@
 
 #if canImport(UIKit)
 import UIKit
+import SwaTex
+import SwaTexRender
 
 // MARK: - VContentSizeCategory <-> UIContentSizeCategory
 
@@ -135,7 +137,25 @@ extension TextDescriptor {
 
     /// Single-style when `runs` is empty (legacy path), otherwise each run's own attributes
     /// laid end-to-end. Shared by `measure` and `rasterizeText`, so they can't diverge.
+    ///
+    /// Bypass convenience: no formula cache/font provider, so an inline math run (if any)
+    /// still typesets (uncached -- mirrors `SwaTexEngine.displayList(for:cache:)`'s own
+    /// nil-bypass convention) and, if ever actually drawn, falls back to a fresh
+    /// `KaTeXFontProvider()` (mirrors `DisplayListRenderer.draw`'s own default parameter).
+    /// Existing callers that don't care about math caching keep using this; production
+    /// measure/raster call the cache-aware overload below.
     var attributedString: NSAttributedString {
+        attributedString(formulaCache: nil, fontProvider: nil, scale: 1)
+    }
+
+    /// Same as `attributedString`, but threads a `FormulaCache`/`KaTeXFontProvider` through to
+    /// any `TextRun.mathSource` span so inline formulas typeset through the shared cache and
+    /// draw through the shared font/glyph cache instead of a fresh instance per call. `scale`
+    /// only matters if an attachment is ever actually drawn (`InlineMathAttachment.image(forBounds:...)`),
+    /// never during pure measurement.
+    func attributedString(
+        formulaCache: FormulaCache?, fontProvider: KaTeXFontProvider?, scale: CGFloat
+    ) -> NSAttributedString {
         guard !runs.isEmpty else {
             return NSAttributedString(string: content, attributes: makeAttributes())
         }
@@ -146,8 +166,33 @@ extension TextDescriptor {
         for run in runs {
             let length = min(run.length, ns.length - cursor)
             guard length > 0 else { continue }
-            let span = ns.substring(with: NSRange(location: cursor, length: length))
-            result.append(NSAttributedString(string: span, attributes: run.makeAttributes(base: self)))
+            if let mathSource = run.mathSource,
+               case .formula(let list, let options, let metrics) = layoutInlineMath(
+                   rawTeX: mathSource, font: run.font, color: run.color, cache: formulaCache
+               ) {
+                let attachment = InlineMathAttachment(
+                    list: list, options: options, metrics: metrics,
+                    fontProvider: fontProvider ?? KaTeXFontProvider(), scale: scale
+                )
+                let attachmentString = NSMutableAttributedString(attachment: attachment)
+                // Attachments don't need `.font` for their own drawing (the image IS the glyph),
+                // but TextKit still consults the run's font when a formula is the ONLY content on
+                // its line (no neighboring text run to anchor line metrics to) -- without it,
+                // TextKit falls back to an unspecified default font's line height instead of the
+                // attachment's own `attachmentBounds`. `run.makeAttributes(base:)` also carries
+                // `.link` when the run has one (a formula inside a markdown link stays tappable) --
+                // the parts that would visibly double-paint under an opaque image, which is none
+                // of them (foreground color/underline/background are simply unused for glyph
+                // U+FFFC), keeps this consistent with every other run's attribute path.
+                attachmentString.addAttributes(
+                    run.makeAttributes(base: self),
+                    range: NSRange(location: 0, length: attachmentString.length)
+                )
+                result.append(attachmentString)
+            } else {
+                let span = ns.substring(with: NSRange(location: cursor, length: length))
+                result.append(NSAttributedString(string: span, attributes: run.makeAttributes(base: self)))
+            }
             cursor += length
         }
         // Under-covering runs: append the remainder in base style instead of dropping it.
@@ -210,7 +255,9 @@ public nonisolated func rasterizeText(
     layoutWidth: CGFloat,
     outputSize: CGSize,
     scale: CGFloat = 1,
-    inkGuard: CGFloat = 2
+    inkGuard: CGFloat = 2,
+    formulaCache: FormulaCache? = nil,
+    fontProvider: KaTeXFontProvider? = nil
 ) -> CGImage? {
     TextRasterizeDebugCounter.increment()
     guard outputSize.width > 0, outputSize.height > 0, layoutWidth > 0 else { return nil }
@@ -227,7 +274,9 @@ public nonisolated func rasterizeText(
     lm.textContainer = container
     storage.addTextLayoutManager(lm)
     storage.performEditingTransaction {
-        storage.attributedString = descriptor.attributedString
+        storage.attributedString = descriptor.attributedString(
+            formulaCache: formulaCache, fontProvider: fontProvider, scale: scale
+        )
     }
 
     let format = UIGraphicsImageRendererFormat()
@@ -268,8 +317,13 @@ public nonisolated func rasterizeText(
 public nonisolated func rasterizeText(
     _ descriptor: TextDescriptor,
     size: CGSize,
-    scale: CGFloat = 1
+    scale: CGFloat = 1,
+    formulaCache: FormulaCache? = nil,
+    fontProvider: KaTeXFontProvider? = nil
 ) -> CGImage? {
-    rasterizeText(descriptor, layoutWidth: size.width, outputSize: size, scale: scale, inkGuard: 0)
+    rasterizeText(
+        descriptor, layoutWidth: size.width, outputSize: size, scale: scale, inkGuard: 0,
+        formulaCache: formulaCache, fontProvider: fontProvider
+    )
 }
 #endif

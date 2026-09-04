@@ -2,6 +2,8 @@
 
 #if canImport(UIKit)
 import UIKit
+import SwaTex
+import SwaTexRender
 
 /// Draws a resolved table layout (VelocityUI-8ge8.3's `layoutTableCells`) into one BGRA8888
 /// premultiplied `CGImage`, mirroring `CodeBlockRasterizer`'s "one raster, one CGContext" shape.
@@ -34,7 +36,9 @@ func rasterizeTable(
     cornerRadius: CGFloat = 12,
     gridLineWidth: CGFloat = 1,
     padding: TableCellPadding = .default,
-    scale: CGFloat = 1
+    scale: CGFloat = 1,
+    formulaCache: FormulaCache? = nil,
+    fontProvider: KaTeXFontProvider? = nil
 ) -> (image: CGImage?, size: CGSize) {
     guard !layout.rows.isEmpty, !layout.columnWidths.isEmpty,
           layout.size.width > 0, layout.size.height > 0
@@ -119,7 +123,9 @@ func rasterizeTable(
                     layoutWidth: contentWidth,
                     outputSize: cell.textFrame.size,
                     scale: scale,
-                    inkGuard: codeInkRightGuard
+                    inkGuard: codeInkRightGuard,
+                    formulaCache: formulaCache,
+                    fontProvider: fontProvider
                 ) else { continue }
 
                 let drawnWidth = CGFloat(cellImage.width) / scale

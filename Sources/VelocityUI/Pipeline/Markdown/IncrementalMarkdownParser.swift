@@ -487,7 +487,8 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             color: color,
             strikethroughStyle: strikethroughStyle,
             backgroundColor: backgroundColor,
-            linkURL: linkURL
+            linkURL: linkURL,
+            mathSource: run.mathSource
         )
     }
 

@@ -216,10 +216,12 @@ public actor RenderPipeline {
                                 scale: capturedScale,
                                 highlightRegistry: registry,
                                 themeSnapshot: themeSnapshot,
-                                reusableFrom: bitmapStore
+                                reusableFrom: bitmapStore,
+                                formulaCache: formulaCache, fontProvider: fontProvider
                             )
                             let tableArtifacts = rasterizeTableArtifacts(
-                                table: table, fragments: entry.fragments, scale: capturedScale
+                                table: table, fragments: entry.fragments, scale: capturedScale,
+                                formulaCache: formulaCache, fontProvider: fontProvider
                             )
                             let mathArtifacts = rasterizeMathArtifacts(
                                 table: table, fragments: entry.fragments, scale: capturedScale,
@@ -243,9 +245,13 @@ public actor RenderPipeline {
                             scale: capturedScale,
                             highlightRegistry: registry,
                             themeSnapshot: themeSnapshot,
-                            reusableFrom: nil
+                            reusableFrom: nil,
+                            formulaCache: formulaCache, fontProvider: fontProvider
                         )
-                        let tableArtifacts = rasterizeTableArtifacts(table: table, fragments: fragments, scale: capturedScale)
+                        let tableArtifacts = rasterizeTableArtifacts(
+                            table: table, fragments: fragments, scale: capturedScale,
+                            formulaCache: formulaCache, fontProvider: fontProvider
+                        )
                         let mathArtifacts = rasterizeMathArtifacts(
                             table: table, fragments: fragments, scale: capturedScale,
                             formulaCache: formulaCache, fontProvider: fontProvider
