@@ -21,7 +21,10 @@ public enum MarkdownBlockKind: Sendable, Equatable, Hashable {
     case codeFence(language: String?)
     /// `number` is the literal digit run the source used (e.g. `3.` -> 3), meaningless when
     /// `ordered` is false. `depth` is the nesting level inferred from leading indentation.
-    case listItem(ordered: Bool, number: Int, depth: Int)
+    /// `checked` is nil for a plain list item, `false`/`true` for a GFM task item's `[ ]`/`[x]`
+    /// marker — nil is distinct from `false` so `style()` can tell "no checkbox" from "unchecked
+    /// checkbox" and only swap in the checkbox glyph for an actual task item.
+    case listItem(ordered: Bool, number: Int, depth: Int, checked: Bool?)
     case blockquote
     /// A GFM table, grouped into ONE block from a header row + delimiter row + zero or more
     /// body rows. `alignments` (one per column, from the delimiter row) lives here because
@@ -395,10 +398,14 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             // default TextNode branch shows: the bare TeX source as literal text, no raw
             // delimiter flash, no misparse of a still-streaming (unclosed) block.
             content = Self.stripMathBlockDelimiters(content)
-        case .listItem(let ordered, let number, let depth):
+        case .listItem(let ordered, let number, let depth, let checked):
             font = theme.body
             let indent = String(repeating: "  ", count: depth)
-            prefix = indent + (ordered ? "\(number). " : "• ")
+            if let checked {
+                prefix = indent + (checked ? checkedTaskGlyph : uncheckedTaskGlyph) + " "
+            } else {
+                prefix = indent + (ordered ? "\(number). " : "• ")
+            }
             content = Self.stripListMarker(content)
         case .blockquote:
             font = theme.body
@@ -448,6 +455,12 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         }
         return (content, runs)
     }
+
+    /// Task-list checkbox glyphs, rendered in place of a `.listItem`'s bullet/number when
+    /// `checked` is non-nil — plain text glyphs (no CALayer), same rasterization path as any
+    /// other prefix text.
+    private static let uncheckedTaskGlyph = "☐"
+    private static let checkedTaskGlyph = "☑"
 
     /// Subtle background pill for inline code, drawn into the raster via `.backgroundColor` —
     /// never a CALayer cornerRadius.
@@ -565,7 +578,27 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         var s = Substring(line)
         s = s.drop { $0 == " " }
         s = s.drop { $0 == "-" || $0 == "*" || $0 == "+" || $0.isNumber || $0 == "." || $0 == ")" }
-        return s.drop { $0 == " " }.description
+        s = s.drop { $0 == " " }
+        if Self.taskMarkerChecked(s) != nil {
+            s = s.dropFirst(3).drop { $0 == " " }
+        }
+        return s.description
+    }
+
+    /// Recognizes a GFM task-list marker (`[ ]` unchecked, `[x]`/`[X]` checked) at the very
+    /// start of `rest` — nil when `rest` doesn't start with one. Shared by the parser's
+    /// `listMarkerInfo` (decides `MarkdownBlockKind.listItem`'s `checked`) and `stripListMarker`
+    /// (drops the marker from rendered content), so the two can't disagree on what counts as a
+    /// task marker.
+    private static func taskMarkerChecked(_ rest: Substring) -> Bool? {
+        let chars = Array(rest.prefix(4))
+        guard chars.count >= 3, chars[0] == "[", chars[2] == "]" else { return nil }
+        guard chars.count == 3 || chars[3] == " " else { return nil }
+        switch chars[1] {
+        case " ": return false
+        case "x", "X": return true
+        default: return nil
+        }
     }
 
     /// listItem tokenizes the same marker-stripped text `style()` renders, via the same
@@ -727,7 +760,7 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             guard count >= opening.count else { return false }
             return trimmed.allSatisfy { $0 == " " || $0 == "\t" }
         }
-        func listMarkerInfo(_ line: Substring) -> (ordered: Bool, number: Int, depth: Int)? {
+        func listMarkerInfo(_ line: Substring) -> (ordered: Bool, number: Int, depth: Int, checked: Bool?)? {
             let spaces = leadingSpaces(line)
             guard spaces <= 3 else { return nil }
             let rest = line.drop { $0 == " " }
@@ -736,7 +769,8 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             if "-*+".contains(first) {
                 let after = rest.index(after: rest.startIndex)
                 guard after < rest.endIndex, rest[after] == " " else { return nil }
-                return (ordered: false, number: 0, depth: depth)
+                let content = rest[rest.index(after: after)...].drop { $0 == " " }
+                return (ordered: false, number: 0, depth: depth, checked: Self.taskMarkerChecked(content))
             }
             var idx = rest.startIndex
             var digits = 0
@@ -748,7 +782,8 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             let after = rest.index(after: idx)
             guard after < rest.endIndex, rest[after] == " " else { return nil }
             let number = Int(rest[rest.startIndex..<idx]) ?? 1
-            return (ordered: true, number: number, depth: depth)
+            let content = rest[rest.index(after: after)...].drop { $0 == " " }
+            return (ordered: true, number: number, depth: depth, checked: Self.taskMarkerChecked(content))
         }
         func isListMarker(_ line: Substring) -> Bool {
             listMarkerInfo(line) != nil
@@ -943,7 +978,7 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
                 finalizeOpenBlock()
                 inContainer = true
                 containerBlankSeen = false
-                openKind = .listItem(ordered: info.ordered, number: info.number, depth: info.depth)
+                openKind = .listItem(ordered: info.ordered, number: info.number, depth: info.depth, checked: info.checked)
                 openLines = [line]
                 finalizeOpenBlock()  // each list marker line is its own block
                 continue

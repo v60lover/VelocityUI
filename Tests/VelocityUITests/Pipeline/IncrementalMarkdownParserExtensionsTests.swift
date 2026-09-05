@@ -88,12 +88,12 @@ final class IncrementalMarkdownParserExtensionsTests: XCTestCase {
         var parser = IncrementalMarkdownParser()
         parser.append("1. first\n2. second\n\n")
         XCTAssertGreaterThanOrEqual(parser.hotBlocksState.count, 2)
-        guard case .listItem(let ordered0, let number0, _) = parser.hotBlocksState[0].kind else {
+        guard case .listItem(let ordered0, let number0, _, _) = parser.hotBlocksState[0].kind else {
             return XCTFail("block 0 must be a list item")
         }
         XCTAssertTrue(ordered0)
         XCTAssertEqual(number0, 1)
-        guard case .listItem(let ordered1, let number1, _) = parser.hotBlocksState[1].kind else {
+        guard case .listItem(let ordered1, let number1, _, _) = parser.hotBlocksState[1].kind else {
             return XCTFail("block 1 must be a list item")
         }
         XCTAssertTrue(ordered1)
@@ -103,7 +103,7 @@ final class IncrementalMarkdownParserExtensionsTests: XCTestCase {
     func testOrderedList_NonSequentialStartNumberIsPreservedVerbatim() {
         var parser = IncrementalMarkdownParser()
         parser.append("7. seven\n\n")
-        guard case .listItem(_, let number, _) = parser.hotBlocksState[0].kind else {
+        guard case .listItem(_, let number, _, _) = parser.hotBlocksState[0].kind else {
             return XCTFail("must be a list item")
         }
         XCTAssertEqual(number, 7, "the literal digit run from the source must be kept, not renumbered from 1")
@@ -112,10 +112,10 @@ final class IncrementalMarkdownParserExtensionsTests: XCTestCase {
     func testOrderedList_NestedItemGetsGreaterDepth() {
         var parser = IncrementalMarkdownParser()
         parser.append("1. top\n  2. nested\n\n")
-        guard case .listItem(_, _, let topDepth) = parser.hotBlocksState[0].kind else {
+        guard case .listItem(_, _, let topDepth, _) = parser.hotBlocksState[0].kind else {
             return XCTFail("block 0 must be a list item")
         }
-        guard case .listItem(_, _, let nestedDepth) = parser.hotBlocksState[1].kind else {
+        guard case .listItem(_, _, let nestedDepth, _) = parser.hotBlocksState[1].kind else {
             return XCTFail("block 1 must be a list item")
         }
         XCTAssertEqual(topDepth, 0)
@@ -125,7 +125,7 @@ final class IncrementalMarkdownParserExtensionsTests: XCTestCase {
     func testUnorderedList_RendersBulletNotNumber() {
         var parser = IncrementalMarkdownParser()
         parser.append("- item\n\n")
-        guard case .listItem(let ordered, _, _) = parser.hotBlocksState[0].kind else {
+        guard case .listItem(let ordered, _, _, _) = parser.hotBlocksState[0].kind else {
             return XCTFail("must be a list item")
         }
         XCTAssertFalse(ordered)

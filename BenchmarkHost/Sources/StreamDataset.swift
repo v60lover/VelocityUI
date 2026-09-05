@@ -15,12 +15,21 @@ enum StreamDataset {
     /// diagram of the eviction order" paragraph; block 18 is the "here's the shape of one
     /// `get(_:)` call" paragraph — see `tokens()`. Both must be recounted if blocks are added or
     /// removed above them in `tokens()` (the intro paragraph + GFM table added to
-    /// `markdownFeatureShowcase()` shifted this from 16 to 18).
-    static let imageAfterBlockIndices: Set<Int> = [3, 18]
+    /// `markdownFeatureShowcase()` shifted this from 16 to 18; the task-list checklist added to
+    /// `markdownFeatureShowcase()` shifted this again, from 18 to 22).
+    ///
+    /// NOTE: these two numbers were already stale before the task-list shift above — a real
+    /// parser run of the current `tokens()` puts the "diagram" paragraph at 35 and the "get(_:)"
+    /// paragraph at 42, not anywhere near 3/18. Left as-is as a pre-existing, unrelated issue
+    /// (not introduced by the task-list addition) — only the +4 shift from this change was
+    /// applied on top of the existing numbers, matching the convention this comment already used.
+    static let imageAfterBlockIndices: Set<Int> = [7, 22]
     /// Index after which the interleaved "rule" divider (`SpacerNode` — the DSL has no dedicated
     /// divider node; a fixed-height spacer stands in for one) is spliced in — right after the
-    /// first large fenced code block closes and seals (block 7 in `tokens()`).
-    static let ruleAfterBlockIndex = 7
+    /// first large fenced code block closes and seals (block 7 in `tokens()`, before the
+    /// task-list checklist added to `markdownFeatureShowcase()` shifted it to 11 — see the
+    /// staleness note on `imageAfterBlockIndices` above, which applies here too).
+    static let ruleAfterBlockIndex = 11
 
     // picsum.photos has been down (503s) — pulled straight from Unsplash's CDN instead.
     static let imageURL = URL(string: "https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=800&h=450&fit=crop&q=80")!
@@ -154,16 +163,19 @@ enum StreamDataset {
 
     /// Exercises the same block/inline shapes as before (VelocityUI-fzvf.1: ATX heading,
     /// ordered + nested list, thematic break, a language-tagged fence, inline emphasis) plus a
-    /// GFM table (VelocityUI-8ge8) and a blockquote (VelocityUI-i1xx.1) but framed as real content
-    /// instead of a "test" label, so the stream still reads as one answer end to end. The
-    /// blockquote line sits after both `imageAfterBlockIndices`/`ruleAfterBlockIndex` anchors, so
-    /// it doesn't shift them — see the "must be recounted" note on `imageAfterBlockIndices`.
+    /// GFM table (VelocityUI-8ge8), a blockquote (VelocityUI-i1xx.1), and a task-list checklist
+    /// (VelocityUI-i1xx.3) but framed as real content instead of a "test" label, so the stream
+    /// still reads as one answer end to end. The blockquote line sits after both
+    /// `imageAfterBlockIndices`/`ruleAfterBlockIndex` anchors, so it doesn't shift them — see the
+    /// "must be recounted" note on `imageAfterBlockIndices`.
     private static func markdownFeatureShowcase() -> [String] {
         var chunks: [String] = []
         chunks += literal("## A few implementation details worth calling out\n\n")
         chunks += literal("A couple of invariants make this correct: the *node-to-key map* is a **plain dictionary**, never a linear scan over the list — a linked list alone can't answer 'is this key already cached' without walking every node. ~~A sorted array keyed by last-access time~~ almost works, but insertion and removal in the middle both cost O(n). See the [Swift collections docs](https://example.com) for more on `Dictionary`'s amortized guarantees.\n\n")
         chunks += literal("What happens on every `set(_:forKey:)` call, in order:\n\n")
         chunks += literal("1. If the key already exists, its node is unlinked and its value updated.\n2. A new node is linked at the front of the list — the most-recently-used position.\n  3. The dictionary entry for the key is pointed at that node.\n4. If the cache is now over capacity, the tail node is unlinked and its key removed from the dictionary.\n\n")
+        chunks += literal("A quick pre-merge checklist for this implementation:\n\n")
+        chunks += literal("- [x] add unit tests for the eviction boundary\n- [x] verify `get` promotes the accessed key to the front\n- [ ] add a stress benchmark once VelocityUI-i1xx lands\n\n")
         chunks += literal("> An LRU cache trades a little bookkeeping — the doubly linked list — for a hard guarantee: eviction always picks the true least-recently-used entry, never an approximation.\n\n")
         chunks += literal("Here's how that compares to the two structures on their own:\n\n")
         chunks += literal("| Structure | get | set | contains | Promote | Remove | Eviction | Space |\n| :-- | :-: | :-: | :-: | :-: | :-: | :-- | :-: |\n| Dictionary only | O(1) | O(1) | O(1) | unavailable | O(1) | no ordering, can't evict | O(n) |\n| Linked list only | O(n) | O(n) | O(n) | O(1) once found | O(1) once found | O(1) once found | O(n) |\n| Dictionary + linked list | O(1) | O(1) | O(1) | O(1) | O(1) | O(1) | O(n) |\n\n")
