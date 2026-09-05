@@ -63,8 +63,10 @@ extension IncrementalMarkdownParser {
                 blockID: block.blockID, blockLifecycle: lifecycle
             )
         }
+        let decoration = IncrementalMarkdownParser.textDecoration(for: block.parsed.kind)
         return TextNode(
-            styled.content, font: styled.font, runs: styled.runs,
+            styled.content, font: styled.font, color: decoration.color, runs: styled.runs,
+            leadingBarColor: decoration.barColor, leadingBarWidth: decoration.barWidth, leadingBarGap: decoration.barGap,
             blockID: block.blockID, blockLifecycle: lifecycle
         )
     }

@@ -407,7 +407,12 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         case .thematicBreak:
             font = theme.body
         }
-        let baseColor = VColorDescriptor.primary
+        // Runs cover the base text too (inlineRuns always emits at least one plain run for
+        // non-empty text), so a block's own color -- muted for .blockquote -- has to flow in
+        // here, not just onto TextDescriptor.color: `styledContentAndRuns`'s run path (taken
+        // whenever `parsed.runs` is non-empty, effectively always) ignores TextDescriptor.color
+        // entirely and paints from each run's own color instead.
+        let baseColor = Self.textDecoration(for: parsed.kind).color
         let (finalContent, runs) = Self.styledContentAndRuns(
             parsed, fallbackContent: content, prefix: prefix, baseFont: font, baseColor: baseColor
         )
@@ -445,6 +450,29 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
     private static let codeFontFamily = "Menlo"
     /// Matches UIColor.link's light-mode RGB (0, 122, 255).
     private static let linkColor = VColorDescriptor(red: 0, green: 0.478, blue: 1, alpha: 1)
+    /// Muted body-text tint for a `.blockquote`, distinct from `.primary` so a quote reads as
+    /// de-emphasized next to a normal paragraph.
+    private static let blockquoteTextColor = VColorDescriptor(red: 0.44, green: 0.44, blue: 0.46, alpha: 1)
+    /// Fill for a blockquote's left bar — a shade darker than its muted text so the bar reads as
+    /// a rule, not just more muted text.
+    private static let blockquoteBarColor = VColorDescriptor(red: 0.64, green: 0.64, blue: 0.66, alpha: 1)
+    private static let blockquoteBarWidth: CGFloat = 3
+    private static let blockquoteBarGap: CGFloat = 10
+
+    /// Text color plus left-bar decoration for a block kind — `.blockquote`'s muted color and
+    /// vertical rule, `.primary` with no bar for everything else. Shared by `makeDescriptor`
+    /// (the `blockList` layout path) and `renderNode(for:)` (the `TextNode` DSL path) so the two
+    /// can't silently diverge on how a blockquote paints (Section 3 cross-site consistency).
+    static func textDecoration(
+        for kind: MarkdownBlockKind
+    ) -> (color: VColorDescriptor, barColor: VColorDescriptor?, barWidth: CGFloat, barGap: CGFloat) {
+        switch kind {
+        case .blockquote:
+            return (blockquoteTextColor, blockquoteBarColor, blockquoteBarWidth, blockquoteBarGap)
+        default:
+            return (.primary, nil, 0, 0)
+        }
+    }
 
     /// One `InlineRun`'s markdown emphasis mapped onto a `TextRun` layered over `baseFont`/
     /// `baseColor`. Bold becomes a heavier weight — `VFontTraits` only defines `.italic`
@@ -504,14 +532,18 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         hasher.combine(styled.content)
         hasher.combine(styled.runs)
         let hash = hasher.finalize()
+        let decoration = Self.textDecoration(for: parsed.kind)
 
         return TextDescriptor(
             content: styled.content,
             font: styled.font,
-            color: VColorDescriptor.primary,
+            color: decoration.color,
             lineLimit: nil,
             lineBreakMode: 0,
             runs: styled.runs,
+            leadingBarColor: decoration.barColor,
+            leadingBarWidth: decoration.barWidth,
+            leadingBarGap: decoration.barGap,
             layoutHash: hash,
             appearanceHash: hash
         )

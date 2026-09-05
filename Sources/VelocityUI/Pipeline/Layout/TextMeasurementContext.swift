@@ -53,7 +53,11 @@ public final class TextMeasurementContext: @unchecked Sendable {
         ) { fragment in
             let frame = fragment.layoutFragmentFrame
             totalHeight = max(totalHeight, frame.maxY)
-            maxWidth = max(maxWidth, frame.width)
+            // maxX, not frame.width: a nonzero headIndent (blockquote's leading bar reservation)
+            // shifts the fragment's origin right without widening its box, so width alone would
+            // under-report by exactly that indent -- same measurement rasterizeText's own
+            // widestLine tracking uses, so the two never disagree on how wide the text box is.
+            maxWidth = max(maxWidth, frame.maxX)
             return true
         }
 

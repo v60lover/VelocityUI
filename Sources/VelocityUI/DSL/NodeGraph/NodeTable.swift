@@ -189,6 +189,17 @@ public struct TextDescriptor: Sendable {
     /// path — `font`/`color`/etc. apply to the whole string. Non-empty runs are applied
     /// left-to-right, each consuming `TextRun.length` UTF-16 units of `content`.
     public let runs: [TextRun]
+    /// Fill for a vertical bar drawn into the raster along the text's left edge (e.g. a markdown
+    /// blockquote). `nil` (the default) draws no bar. Paint-only — folds into `appearanceHash`,
+    /// never `layoutHash`.
+    public let leadingBarColor: VColorDescriptor?
+    /// Bar thickness in points. Ignored when `leadingBarColor` is nil. Reserves this much space
+    /// (plus `leadingBarGap`) on the left via `NSParagraphStyle.headIndent`/`firstLineHeadIndent`,
+    /// so it affects wrap and folds into `layoutHash`.
+    public let leadingBarWidth: CGFloat
+    /// Blank space between the bar and the text's left edge, in points. Same layout-affecting
+    /// contract as `leadingBarWidth`.
+    public let leadingBarGap: CGFloat
     public let layoutHash: Int
     public let appearanceHash: Int
     /// Marks this descriptor as one of `CodeBlockNode`'s expanded header/body leaves. Internal —
@@ -212,6 +223,9 @@ public struct TextDescriptor: Sendable {
         lineSpacing: CGFloat = 0,
         contentSizeCategory: VContentSizeCategory = .unspecified,
         runs: [TextRun] = [],
+        leadingBarColor: VColorDescriptor? = nil,
+        leadingBarWidth: CGFloat = 0,
+        leadingBarGap: CGFloat = 0,
         layoutHash: Int,
         appearanceHash: Int
     ) {
@@ -219,6 +233,7 @@ public struct TextDescriptor: Sendable {
             content: content, font: font, color: color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
             underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
             kerning: kerning, lineSpacing: lineSpacing, contentSizeCategory: contentSizeCategory, runs: runs,
+            leadingBarColor: leadingBarColor, leadingBarWidth: leadingBarWidth, leadingBarGap: leadingBarGap,
             layoutHash: layoutHash, appearanceHash: appearanceHash, codeBlockRole: nil
         )
     }
@@ -235,6 +250,9 @@ public struct TextDescriptor: Sendable {
         lineSpacing: CGFloat = 0,
         contentSizeCategory: VContentSizeCategory = .unspecified,
         runs: [TextRun] = [],
+        leadingBarColor: VColorDescriptor? = nil,
+        leadingBarWidth: CGFloat = 0,
+        leadingBarGap: CGFloat = 0,
         layoutHash: Int,
         appearanceHash: Int,
         codeBlockRole: CodeBlockRole?
@@ -250,6 +268,9 @@ public struct TextDescriptor: Sendable {
         self.lineSpacing = lineSpacing
         self.contentSizeCategory = contentSizeCategory
         self.runs = runs
+        self.leadingBarColor = leadingBarColor
+        self.leadingBarWidth = leadingBarWidth
+        self.leadingBarGap = leadingBarGap
         self.layoutHash = layoutHash
         self.appearanceHash = appearanceHash
         self.codeBlockRole = codeBlockRole

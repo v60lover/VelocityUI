@@ -98,13 +98,25 @@ extension TextDescriptor {
         return uiFont
     }
 
+    /// Total left margin `leadingBarColor` reserves for its bar + gap. Zero when no bar is set —
+    /// the common case, so wrap geometry is untouched for every text block that isn't a blockquote.
+    var leadingIndent: CGFloat {
+        guard leadingBarColor != nil else { return 0 }
+        return leadingBarWidth + leadingBarGap
+    }
+
     /// Shared across every run so multi-run text wraps as one paragraph, not one per run.
     fileprivate var paragraphStyleIfNeeded: NSParagraphStyle? {
-        guard lineBreakMode != NSLineBreakMode.byWordWrapping.rawValue || lineLimit != nil || lineSpacing != 0
-        else { return nil } 
+        guard lineBreakMode != NSLineBreakMode.byWordWrapping.rawValue || lineLimit != nil
+            || lineSpacing != 0 || leadingIndent != 0
+        else { return nil }
         let para = NSMutableParagraphStyle()
         para.lineBreakMode = NSLineBreakMode(rawValue: lineBreakMode) ?? .byWordWrapping
         para.lineSpacing = lineSpacing
+        // Same indent on the first line and wrapped continuations, so a blockquote's bar sits
+        // flush against every line, not just the ones after the first.
+        para.firstLineHeadIndent = leadingIndent
+        para.headIndent = leadingIndent
         return para
     }
 
@@ -301,6 +313,14 @@ public nonisolated func rasterizeText(
 
     let renderer = UIGraphicsImageRenderer(size: renderSize, format: format)
     let uiImage = renderer.image { ctx in
+        // Bar first so its flat fill can never paint over a glyph that (at some future font
+        // metric) reaches slightly left of the paragraph's headIndent margin.
+        if let barColor = descriptor.leadingBarColor, descriptor.leadingBarWidth > 0 {
+            ctx.cgContext.setFillColor(
+                red: barColor.red, green: barColor.green, blue: barColor.blue, alpha: barColor.alpha
+            )
+            ctx.cgContext.fill(CGRect(x: 0, y: 0, width: descriptor.leadingBarWidth, height: renderSize.height))
+        }
         lm.enumerateTextLayoutFragments(
             from: lm.documentRange.location,
             options: [.ensuresLayout]

@@ -154,14 +154,17 @@ enum StreamDataset {
 
     /// Exercises the same block/inline shapes as before (VelocityUI-fzvf.1: ATX heading,
     /// ordered + nested list, thematic break, a language-tagged fence, inline emphasis) plus a
-    /// GFM table (VelocityUI-8ge8) but framed as real content instead of a "test" label, so the
-    /// stream still reads as one answer end to end.
+    /// GFM table (VelocityUI-8ge8) and a blockquote (VelocityUI-i1xx.1) but framed as real content
+    /// instead of a "test" label, so the stream still reads as one answer end to end. The
+    /// blockquote line sits after both `imageAfterBlockIndices`/`ruleAfterBlockIndex` anchors, so
+    /// it doesn't shift them — see the "must be recounted" note on `imageAfterBlockIndices`.
     private static func markdownFeatureShowcase() -> [String] {
         var chunks: [String] = []
         chunks += literal("## A few implementation details worth calling out\n\n")
         chunks += literal("A couple of invariants make this correct: the *node-to-key map* is a **plain dictionary**, never a linear scan over the list — a linked list alone can't answer 'is this key already cached' without walking every node. ~~A sorted array keyed by last-access time~~ almost works, but insertion and removal in the middle both cost O(n). See the [Swift collections docs](https://example.com) for more on `Dictionary`'s amortized guarantees.\n\n")
         chunks += literal("What happens on every `set(_:forKey:)` call, in order:\n\n")
         chunks += literal("1. If the key already exists, its node is unlinked and its value updated.\n2. A new node is linked at the front of the list — the most-recently-used position.\n  3. The dictionary entry for the key is pointed at that node.\n4. If the cache is now over capacity, the tail node is unlinked and its key removed from the dictionary.\n\n")
+        chunks += literal("> An LRU cache trades a little bookkeeping — the doubly linked list — for a hard guarantee: eviction always picks the true least-recently-used entry, never an approximation.\n\n")
         chunks += literal("Here's how that compares to the two structures on their own:\n\n")
         chunks += literal("| Structure | get | set | contains | Promote | Remove | Eviction | Space |\n| :-- | :-: | :-: | :-: | :-: | :-: | :-- | :-: |\n| Dictionary only | O(1) | O(1) | O(1) | unavailable | O(1) | no ordering, can't evict | O(n) |\n| Linked list only | O(n) | O(n) | O(n) | O(1) once found | O(1) once found | O(1) once found | O(n) |\n| Dictionary + linked list | O(1) | O(1) | O(1) | O(1) | O(1) | O(1) | O(n) |\n\n")
         chunks += literal("---\n\n")

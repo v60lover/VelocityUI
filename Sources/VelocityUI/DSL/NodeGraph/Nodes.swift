@@ -227,6 +227,13 @@ public struct TextNode: RenderNode {
     /// `strikethroughStyle` apply to the whole string. Non-empty runs win — those scalar fields
     /// are ignored for run-covered text.
     public let runs: [TextRun]
+    /// Fill for a vertical bar drawn into the raster along the text's left edge (e.g. a markdown
+    /// blockquote). `nil` (the default) draws no bar. Mirrors `TextDescriptor.leadingBarColor`.
+    public let leadingBarColor: VColorDescriptor?
+    /// Bar thickness in points, same contract as `TextDescriptor.leadingBarWidth`.
+    public let leadingBarWidth: CGFloat
+    /// Gap between the bar and the text, same contract as `TextDescriptor.leadingBarGap`.
+    public let leadingBarGap: CGFloat
     /// Marks this node as one of `CodeBlockNode`'s expanded header/body leaves. Internal — only
     /// `CodeBlockNode.expandedChildren` sets this; the public init always defaults it to `nil`.
     let codeBlockRole: CodeBlockRole?
@@ -242,6 +249,9 @@ public struct TextNode: RenderNode {
         kerning: CGFloat = 0,
         lineSpacing: CGFloat = 0,
         runs: [TextRun] = [],
+        leadingBarColor: VColorDescriptor? = nil,
+        leadingBarWidth: CGFloat = 0,
+        leadingBarGap: CGFloat = 0,
         blockID: BlockID? = nil,
         blockLifecycle: BlockLifecycle = .positional
     ) {
@@ -249,6 +259,7 @@ public struct TextNode: RenderNode {
             content, font: font, color: color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
             underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
             kerning: kerning, lineSpacing: lineSpacing, runs: runs,
+            leadingBarColor: leadingBarColor, leadingBarWidth: leadingBarWidth, leadingBarGap: leadingBarGap,
             blockID: blockID, blockLifecycle: blockLifecycle, codeBlockRole: nil
         )
     }
@@ -264,6 +275,9 @@ public struct TextNode: RenderNode {
         kerning: CGFloat = 0,
         lineSpacing: CGFloat = 0,
         runs: [TextRun] = [],
+        leadingBarColor: VColorDescriptor? = nil,
+        leadingBarWidth: CGFloat = 0,
+        leadingBarGap: CGFloat = 0,
         blockID: BlockID? = nil,
         blockLifecycle: BlockLifecycle = .positional,
         codeBlockRole: CodeBlockRole?
@@ -280,6 +294,9 @@ public struct TextNode: RenderNode {
         self.kerning = kerning
         self.lineSpacing = lineSpacing
         self.runs = runs
+        self.leadingBarColor = leadingBarColor
+        self.leadingBarWidth = leadingBarWidth
+        self.leadingBarGap = leadingBarGap
         self.codeBlockRole = codeBlockRole
     }
 
@@ -297,6 +314,8 @@ public struct TextNode: RenderNode {
         h.combine(lineBreakMode)
         h.combine(kerning)
         h.combine(lineSpacing)
+        h.combine(leadingBarWidth)
+        h.combine(leadingBarGap)
         for run in runs {
             h.combine(run.length)
             h.combine(run.font)
@@ -312,6 +331,7 @@ public struct TextNode: RenderNode {
         h.combine(color)
         h.combine(underlineStyle)
         h.combine(strikethroughStyle)
+        h.combine(leadingBarColor)
         for run in runs {
             h.combine(run.color)
             h.combine(run.underlineStyle)
