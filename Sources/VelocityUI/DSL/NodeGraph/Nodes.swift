@@ -234,6 +234,9 @@ public struct TextNode: RenderNode {
     public let leadingBarWidth: CGFloat
     /// Gap between the bar and the text, same contract as `TextDescriptor.leadingBarGap`.
     public let leadingBarGap: CGFloat
+    /// Fill for a horizontal rule drawn across the full raster width (e.g. a markdown thematic
+    /// break). `nil` (the default) draws no rule. Mirrors `TextDescriptor.ruleColor`.
+    public let ruleColor: VColorDescriptor?
     /// Marks this node as one of `CodeBlockNode`'s expanded header/body leaves. Internal — only
     /// `CodeBlockNode.expandedChildren` sets this; the public init always defaults it to `nil`.
     let codeBlockRole: CodeBlockRole?
@@ -252,6 +255,7 @@ public struct TextNode: RenderNode {
         leadingBarColor: VColorDescriptor? = nil,
         leadingBarWidth: CGFloat = 0,
         leadingBarGap: CGFloat = 0,
+        ruleColor: VColorDescriptor? = nil,
         blockID: BlockID? = nil,
         blockLifecycle: BlockLifecycle = .positional
     ) {
@@ -260,7 +264,7 @@ public struct TextNode: RenderNode {
             underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
             kerning: kerning, lineSpacing: lineSpacing, runs: runs,
             leadingBarColor: leadingBarColor, leadingBarWidth: leadingBarWidth, leadingBarGap: leadingBarGap,
-            blockID: blockID, blockLifecycle: blockLifecycle, codeBlockRole: nil
+            ruleColor: ruleColor, blockID: blockID, blockLifecycle: blockLifecycle, codeBlockRole: nil
         )
     }
 
@@ -278,6 +282,7 @@ public struct TextNode: RenderNode {
         leadingBarColor: VColorDescriptor? = nil,
         leadingBarWidth: CGFloat = 0,
         leadingBarGap: CGFloat = 0,
+        ruleColor: VColorDescriptor? = nil,
         blockID: BlockID? = nil,
         blockLifecycle: BlockLifecycle = .positional,
         codeBlockRole: CodeBlockRole?
@@ -297,6 +302,7 @@ public struct TextNode: RenderNode {
         self.leadingBarColor = leadingBarColor
         self.leadingBarWidth = leadingBarWidth
         self.leadingBarGap = leadingBarGap
+        self.ruleColor = ruleColor
         self.codeBlockRole = codeBlockRole
     }
 
@@ -332,6 +338,7 @@ public struct TextNode: RenderNode {
         h.combine(underlineStyle)
         h.combine(strikethroughStyle)
         h.combine(leadingBarColor)
+        h.combine(ruleColor)
         for run in runs {
             h.combine(run.color)
             h.combine(run.underlineStyle)

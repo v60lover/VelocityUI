@@ -328,9 +328,26 @@ public nonisolated func rasterizeText(
             fragment.draw(at: fragment.layoutFragmentFrame.origin, in: ctx.cgContext)
             return true
         }
+        // A markdown thematic break: content is a single invisible space so the box's height
+        // comes from the font's own line height (giving the rule its vertical margin for free);
+        // the rule itself is a flat fill spanning the full canvas, centered in that height.
+        if let ruleColor = descriptor.ruleColor {
+            ctx.cgContext.setFillColor(
+                red: ruleColor.red, green: ruleColor.green, blue: ruleColor.blue, alpha: ruleColor.alpha
+            )
+            // Snapped to the device pixel grid -- an unsnapped centered y (e.g. 11.5pt) straddles
+            // two pixel rows, antialiasing the fill to ~50% opacity on both instead of one fully
+            // opaque row.
+            let device = scale > 0 ? scale : 1
+            let y = (((renderSize.height - thematicBreakRuleThickness) / 2) * device).rounded() / device
+            ctx.cgContext.fill(CGRect(x: 0, y: y, width: renderSize.width, height: thematicBreakRuleThickness))
+        }
     }
     return uiImage.cgImage
 }
+
+/// Thickness of a markdown thematic break's drawn rule, in points.
+private let thematicBreakRuleThickness: CGFloat = 1
 
 /// Compatibility wrapper for callers that measured and rasterize at the same width (code
 /// bodies at `.greatestFiniteMagnitude`, hot-path compositing already at the layout width).

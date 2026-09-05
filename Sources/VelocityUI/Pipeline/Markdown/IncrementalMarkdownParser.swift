@@ -406,6 +406,11 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             font = theme.body
         case .thematicBreak:
             font = theme.body
+            // A single invisible space, not the raw "---"/"***"/"___" source: the rule itself is
+            // drawn into the raster by `rasterizeText` off `TextDescriptor.ruleColor` (set below,
+            // via `textDecoration(for:)`), so the "text" here exists only to give the block a
+            // line-height-derived box with margin above and below the rule.
+            content = " "
         }
         // Runs cover the base text too (inlineRuns always emits at least one plain run for
         // non-empty text), so a block's own color -- muted for .blockquote -- has to flow in
@@ -458,19 +463,25 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
     private static let blockquoteBarColor = VColorDescriptor(red: 0.64, green: 0.64, blue: 0.66, alpha: 1)
     private static let blockquoteBarWidth: CGFloat = 3
     private static let blockquoteBarGap: CGFloat = 10
+    /// Fill for a `.thematicBreak`'s horizontal rule — a light separator gray, distinct from
+    /// (and lighter than) the blockquote bar so a rule reads as a subtle divider, not a callout.
+    private static let thematicBreakRuleColor = VColorDescriptor(red: 0.78, green: 0.78, blue: 0.8, alpha: 1)
 
-    /// Text color plus left-bar decoration for a block kind — `.blockquote`'s muted color and
-    /// vertical rule, `.primary` with no bar for everything else. Shared by `makeDescriptor`
-    /// (the `blockList` layout path) and `renderNode(for:)` (the `TextNode` DSL path) so the two
-    /// can't silently diverge on how a blockquote paints (Section 3 cross-site consistency).
+    /// Text color plus left-bar/rule decoration for a block kind — `.blockquote`'s muted color and
+    /// vertical bar, `.thematicBreak`'s horizontal rule, `.primary` with neither for everything
+    /// else. Shared by `makeDescriptor` (the `blockList` layout path) and `renderNode(for:)` (the
+    /// `TextNode` DSL path) so the two can't silently diverge on how a block paints (Section 3
+    /// cross-site consistency).
     static func textDecoration(
         for kind: MarkdownBlockKind
-    ) -> (color: VColorDescriptor, barColor: VColorDescriptor?, barWidth: CGFloat, barGap: CGFloat) {
+    ) -> (color: VColorDescriptor, barColor: VColorDescriptor?, barWidth: CGFloat, barGap: CGFloat, ruleColor: VColorDescriptor?) {
         switch kind {
         case .blockquote:
-            return (blockquoteTextColor, blockquoteBarColor, blockquoteBarWidth, blockquoteBarGap)
+            return (blockquoteTextColor, blockquoteBarColor, blockquoteBarWidth, blockquoteBarGap, nil)
+        case .thematicBreak:
+            return (.primary, nil, 0, 0, thematicBreakRuleColor)
         default:
-            return (.primary, nil, 0, 0)
+            return (.primary, nil, 0, 0, nil)
         }
     }
 
@@ -544,6 +555,7 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             leadingBarColor: decoration.barColor,
             leadingBarWidth: decoration.barWidth,
             leadingBarGap: decoration.barGap,
+            ruleColor: decoration.ruleColor,
             layoutHash: hash,
             appearanceHash: hash
         )

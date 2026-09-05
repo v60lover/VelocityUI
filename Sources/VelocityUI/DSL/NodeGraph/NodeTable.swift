@@ -200,6 +200,12 @@ public struct TextDescriptor: Sendable {
     /// Blank space between the bar and the text's left edge, in points. Same layout-affecting
     /// contract as `leadingBarWidth`.
     public let leadingBarGap: CGFloat
+    /// Fill for a horizontal rule drawn across the full raster width (e.g. a markdown thematic
+    /// break `---`). `nil` (the default) draws no rule. Paint-only — folds into `appearanceHash`,
+    /// never `layoutHash`. Its presence also tells `measureNode`'s `.text` case to pin this
+    /// block's width to the proposed container width instead of the text's own (near-zero,
+    /// single-space) intrinsic width — see `LayoutEngine.swift`.
+    public let ruleColor: VColorDescriptor?
     public let layoutHash: Int
     public let appearanceHash: Int
     /// Marks this descriptor as one of `CodeBlockNode`'s expanded header/body leaves. Internal —
@@ -226,6 +232,7 @@ public struct TextDescriptor: Sendable {
         leadingBarColor: VColorDescriptor? = nil,
         leadingBarWidth: CGFloat = 0,
         leadingBarGap: CGFloat = 0,
+        ruleColor: VColorDescriptor? = nil,
         layoutHash: Int,
         appearanceHash: Int
     ) {
@@ -234,7 +241,7 @@ public struct TextDescriptor: Sendable {
             underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
             kerning: kerning, lineSpacing: lineSpacing, contentSizeCategory: contentSizeCategory, runs: runs,
             leadingBarColor: leadingBarColor, leadingBarWidth: leadingBarWidth, leadingBarGap: leadingBarGap,
-            layoutHash: layoutHash, appearanceHash: appearanceHash, codeBlockRole: nil
+            ruleColor: ruleColor, layoutHash: layoutHash, appearanceHash: appearanceHash, codeBlockRole: nil
         )
     }
 
@@ -253,6 +260,7 @@ public struct TextDescriptor: Sendable {
         leadingBarColor: VColorDescriptor? = nil,
         leadingBarWidth: CGFloat = 0,
         leadingBarGap: CGFloat = 0,
+        ruleColor: VColorDescriptor? = nil,
         layoutHash: Int,
         appearanceHash: Int,
         codeBlockRole: CodeBlockRole?
@@ -271,6 +279,7 @@ public struct TextDescriptor: Sendable {
         self.leadingBarColor = leadingBarColor
         self.leadingBarWidth = leadingBarWidth
         self.leadingBarGap = leadingBarGap
+        self.ruleColor = ruleColor
         self.layoutHash = layoutHash
         self.appearanceHash = appearanceHash
         self.codeBlockRole = codeBlockRole

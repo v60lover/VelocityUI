@@ -96,7 +96,12 @@ private func measureContent(
         }
         return await textPool.withContext { ctx in
             let size = ctx.measure(d, width: width, formulaCache: formulaCache)
-            return ResolvedLayout(totalFrame: CGRect(origin: .zero, size: size), nodeIndex: nodeIndex)
+            // A rule (markdown thematic break) must span the full proposed width, not the
+            // near-zero intrinsic width of its single-space content -- same "pin to container
+            // width" contract `.codeBlock`/`.table`/`.mathBlock` use below, just in the other
+            // direction (widening a too-narrow leaf instead of clamping a too-wide one).
+            let resolvedWidth = d.ruleColor != nil ? width : size.width
+            return ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: resolvedWidth, height: size.height), nodeIndex: nodeIndex)
         }
 
     case .codeBlock(let descriptor):
