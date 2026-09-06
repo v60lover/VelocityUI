@@ -95,13 +95,27 @@ private func measureContent(
             }
         }
         return await textPool.withContext { ctx in
-            let size = ctx.measure(d, width: width, formulaCache: formulaCache)
+            // A row measures at its own maxWidthFraction of the proposed column width -- the
+            // user bubble (fraction ~0.8) wraps narrower than the assistant's full-width text
+            // (fraction 1.0), same width-in/size-out contract as the grid's per-column
+            // measurement (GridTextMeasurementTests).
+            let measureWidth = width * CGFloat(d.maxWidthFraction)
+            let size = ctx.measure(d, width: measureWidth, formulaCache: formulaCache)
             // A rule (markdown thematic break) must span the full proposed width, not the
             // near-zero intrinsic width of its single-space content -- same "pin to container
             // width" contract `.codeBlock`/`.table`/`.mathBlock` use below, just in the other
-            // direction (widening a too-narrow leaf instead of clamping a too-wide one).
+            // direction (widening a too-narrow leaf instead of clamping a too-wide one). This
+            // overrides maxWidthFraction intentionally: a rule always spans the row.
             let resolvedWidth = d.ruleColor != nil ? width : size.width
-            return ResolvedLayout(totalFrame: CGRect(x: 0, y: 0, width: resolvedWidth, height: size.height), nodeIndex: nodeIndex)
+            // x is placed against the undivided column `width`, not `measureWidth` -- a trailing
+            // row is flush with the column's right edge, not the fraction's own right edge.
+            let x: CGFloat
+            switch d.alignment {
+            case .leading: x = 0
+            case .center: x = (width - resolvedWidth) / 2
+            case .trailing: x = width - resolvedWidth
+            }
+            return ResolvedLayout(totalFrame: CGRect(x: x, y: 0, width: resolvedWidth, height: size.height), nodeIndex: nodeIndex)
         }
 
     case .codeBlock(let descriptor):
