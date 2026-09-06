@@ -108,6 +108,19 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// Leading index sent to pipeline on last boundary crossing.
     var lastNotifiedLeadingIndex: Int = -1
 
+    /// `.llmChat` tail-follow: index the reserved-height spacer's floor is measured from. `nil`
+    /// only before the first `pinTailSpacer()` (or when `tailFollowMode == .off`). Once pinned it
+    /// persists at that index until the next `pinTailSpacer()` re-pins it — it is not cleared when
+    /// content outgrows the floor; `tailSpacerFloor`'s `max()` just makes it inert. Set only by
+    /// `pinTailSpacer()` — see `FeedScrollView+TailFollow.swift`.
+    var _tailSpacerPinIndex: Int?
+
+    /// `.llmChat` tail-follow: whether the viewport currently tracks the content bottom as it
+    /// grows. Starts `true` (mounts pinned to the latest turn); flips to `false` the moment
+    /// `scrollViewDidScroll` sees the user pull away from bottom, and back to `true` once they
+    /// scroll back within reach of it. See `FeedScrollView+TailFollow.swift`.
+    var _isFollowingTail = true
+
     /// `contentOffset.y` observed on the previous `layoutSubviews` pass. Compared against
     /// the current value each pass to derive `scrollDirection` from a real scroll metric.
     private var lastScrollOffsetY: CGFloat = 0
@@ -170,6 +183,11 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// as before this was added. Set at init, like `warmWindow` — doesn't change later.
     public let layoutProvider: any LayoutProvider
 
+    /// Reserved-height tail spacer + scroll-to-bottom follow, for a top-down LLM-chat
+    /// transcript. `.off` (default) — no behavior change. Set at init, like `warmWindow` —
+    /// doesn't change later. See `FeedScrollView+TailFollow.swift`.
+    public let tailFollowMode: TailFollowMode
+
     // MARK: - Test hooks
 
     /// Container for test-only observability/override state that can't live in
@@ -190,6 +208,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     ///   - layoutSpacing: Vertical gap between cells (pt).
     ///   - layoutProvider: Places item frames and drives visibility/content-height. `nil`
     ///     (default) uses `VerticalLayoutProvider(spacing: layoutSpacing)`.
+    ///   - tailFollowMode: Reserved-height tail spacer + scroll-to-bottom follow. `.off` default.
     ///   - notificationCenter: Source of `UIContentSizeCategory.didChangeNotification` for
     ///     Dynamic Type invalidation. Default `.default` is the one system-API singleton
     ///     exception in CLAUDE.md's no-singletons rule; tests inject a private instance.
@@ -201,6 +220,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
         estimatedItemHeight: CGFloat = 300,
         layoutSpacing: CGFloat = 8,
         layoutProvider: (any LayoutProvider)? = nil,
+        tailFollowMode: TailFollowMode = .off,
         notificationCenter: NotificationCenter = .default
     ) {
         self.environment = environment
@@ -209,6 +229,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
         self.estimatedItemHeight = estimatedItemHeight
         self.layoutSpacing = layoutSpacing
         self.layoutProvider = layoutProvider ?? VerticalLayoutProvider(spacing: layoutSpacing)
+        self.tailFollowMode = tailFollowMode
         self.notificationCenter = notificationCenter
         self.pipeline = RenderPipeline(
             textPool: environment.textPool,
@@ -340,6 +361,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
         }
 
         refineKnownFrames()
+        applyTailFollowIfNeeded()
         let visRange = updateVisibleCells()
         notifyPipelineIfNeeded()
         checkReachEnd(visRange: visRange)
@@ -360,6 +382,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
         if !decelerate { flushDeferredContentSizeIfNeeded() }
     }
 
+    /// `.llmChat` tail-follow: forwards to `updateTailFollowFromUserScroll()` in
+    /// `FeedScrollView+TailFollow.swift` — the non-`@objc` body, factored out since extensions of
+    /// a generic class can't declare `@objc` members themselves.
+    public func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        updateTailFollowFromUserScroll()
+    }
 
     // MARK: - Tap handling
 

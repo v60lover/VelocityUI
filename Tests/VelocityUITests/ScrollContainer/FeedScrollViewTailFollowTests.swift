@@ -1,0 +1,256 @@
+// FeedScrollViewTailFollowTests.swift
+
+#if canImport(UIKit)
+import XCTest
+@testable import VelocityUI
+
+/// Covers VelocityUI-8otc.4: `TailFollowMode.llmChat` — the reserved-height tail spacer and
+/// scroll-to-bottom follow for a top-down LLM-chat transcript. Reuses the `ChatItem`/
+/// `makeChatFeed`/`waitForWorkingRangeCommit` fixture shape from `FeedScrollViewGrowHotBlockTests`.
+@MainActor
+final class FeedScrollViewTailFollowTests: XCTestCase {
+
+    struct ChatItem: Identifiable, Sendable {
+        let id: Int
+        let blocks: [String]
+    }
+
+    private func makeEnvironment() -> RenderEnvironment {
+        let dc = DimensionCache()
+        let videoPrep = VideoPreparationActor()
+        return RenderEnvironment(
+            textPool: TextMeasurementPool(),
+            layoutCache: LayoutCache(),
+            dimensionCache: dc,
+            imageActor: ImageActor(dimensionCache: dc),
+            gifActor: GIFActor(),
+            videoController: VideoController(videoPreparation: videoPrep),
+            videoPreparation: videoPrep,
+            frozenBitmapStore: FrozenBitmapStore(),
+            hotBlockRasterizerStore: HotBlockRasterizerStore(),
+            hotCodeStreamStore: HotCodeStreamStore()
+        )
+    }
+
+    private func makeChatFeed(
+        tailFollowMode: TailFollowMode = .llmChat,
+        width: CGFloat = 375, height: CGFloat = 812
+    ) -> FeedScrollView<ChatItem> {
+        let env = makeEnvironment()
+        let feed = FeedScrollView<ChatItem>(
+            environment: env,
+            frame: CGRect(x: 0, y: 0, width: width, height: height),
+            tailFollowMode: tailFollowMode
+        )
+        feed.cellBuilder = { item in
+            VStackNode(spacing: 4) {
+                for text in item.blocks {
+                    TextNode(text)
+                }
+            }
+        }
+        return feed
+    }
+
+    private func waitForWorkingRangeCommit(_ feed: FeedScrollView<ChatItem>, index: Int, seconds: Double = 10) async {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(seconds))
+        while ContinuousClock.now < deadline {
+            if feed._workingRangeMissCount(from: index, to: index + 1) == 0 { return }
+            await Task.yield()
+            feed.layoutSubviews()
+        }
+    }
+
+    // MARK: - 4. Top-down list — no inverted/bottom-anchored layout
+
+    func testLLMChatMode_UsesDefaultTopDownVerticalLayoutProvider() {
+        let feed = makeChatFeed()
+        XCTAssertTrue(feed.layoutProvider is VerticalLayoutProvider,
+            "llmChat composes with the existing top-down VerticalLayoutProvider — no coordinate flip, no inverted provider")
+    }
+
+    // MARK: - 1. New user message rises near the top of the viewport on send
+
+    func testPinTailSpacer_ScrollsNewTurnToTopOfViewport() async throws {
+        let feed = makeChatFeed()
+        feed._debugScrollAtRestOverride = true
+
+        // Seed a short history, then append the new turn's first item (the user message).
+        feed.items = [ChatItem(id: 0, blocks: ["hi"]), ChatItem(id: 1, blocks: ["how are you"])]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+        await waitForWorkingRangeCommit(feed, index: 1)
+
+        feed.items += [ChatItem(id: 2, blocks: ["a brand new user question"])]
+        feed.pinTailSpacer()
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 2)
+
+        let newTurnFrame = try XCTUnwrap(feed._debugResolvedFrame(at: 2),
+            "Precondition: the new turn must have a resolved frame")
+        let pinnedMinY = newTurnFrame.minY
+
+        // The reserved floor is pinnedMinY + viewportHeight, so scrolling to the bottom
+        // (contentSize.height - viewportHeight) lands exactly at the new turn's top.
+        XCTAssertEqual(feed.contentOffset.y, pinnedMinY, accuracy: 0.5,
+            "sending a new turn must scroll it to the top of the viewport, with reserved room below")
+        XCTAssertEqual(feed.contentSize.height, pinnedMinY + feed.bounds.height, accuracy: 0.5,
+            "the reserved-height floor must be exactly one viewport below the pinned turn's top")
+
+        await drainFeedWork(feed)
+    }
+
+    // MARK: - 2. Spacer collapses as the answer grows; no permanent dead space
+
+    func testTailSpacer_CollapsesOnceAnswerGrowsPastTheFloor() async throws {
+        let feed = makeChatFeed()
+        feed._debugScrollAtRestOverride = true
+
+        feed.items = [ChatItem(id: 0, blocks: ["a brand new user question"])]
+        feed.pinTailSpacer()
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+
+        let floor = feed.contentSize.height
+        let pinnedFrame = try XCTUnwrap(feed._debugResolvedFrame(at: 0))
+        XCTAssertEqual(floor, pinnedFrame.minY + feed.bounds.height, accuracy: 0.5,
+            "Precondition: the floor must be exactly one viewport below the pinned turn's top")
+
+        // Grow the same item (as if streaming) with a large paragraph — many times the viewport's
+        // worth of text — until natural height clears the reserved floor.
+        let longText = (0..<400).map { "word\($0)" }.joined(separator: " ")
+        feed.items = [ChatItem(id: 0, blocks: ["a brand new user question", longText])]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+
+        let grownFrame = try XCTUnwrap(feed._debugResolvedFrame(at: 0))
+        let naturalHeight = grownFrame.maxY
+        XCTAssertGreaterThan(naturalHeight, floor,
+            "Precondition: the streamed answer must have grown past the originally reserved floor")
+
+        // No permanent dead space: once natural content exceeds the floor, contentSize.height
+        // tracks it exactly — nothing left over from the collapsed spacer.
+        XCTAssertEqual(feed.contentSize.height, naturalHeight, accuracy: 0.5,
+            "the spacer must fully collapse once real content exceeds the reserved floor")
+
+        await drainFeedWork(feed)
+    }
+
+    // MARK: - 3a. Auto scroll-to-bottom follows the stream while engaged
+
+    func testAutoFollow_TracksBottomAsContentGrows() async {
+        let feed = makeChatFeed()
+        feed._debugScrollAtRestOverride = true
+
+        feed.items = [ChatItem(id: 0, blocks: ["seed"])]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+        XCTAssertEqual(feed.contentOffset.y, max(0, feed.contentSize.height - feed.bounds.height), accuracy: 0.5,
+            "tail-follow starts engaged and pins to the bottom on first layout")
+
+        let longText = (0..<1000).map { "word\($0)" }.joined(separator: " ")
+        feed.items = [ChatItem(id: 0, blocks: ["seed", longText])]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+
+        XCTAssertEqual(feed.contentOffset.y, max(0, feed.contentSize.height - feed.bounds.height), accuracy: 0.5,
+            "while following, the viewport must keep tracking the bottom as content streams in")
+
+        await drainFeedWork(feed)
+    }
+
+    // MARK: - 3b. Disengages when the user scrolls away from bottom
+
+    func testAutoFollow_DisengagesWhenUserScrollsAwayFromBottom() async {
+        let feed = makeChatFeed()
+        feed._debugScrollAtRestOverride = true
+
+        let longText = (0..<1000).map { "word\($0)" }.joined(separator: " ")
+        feed.items = [ChatItem(id: 0, blocks: ["seed", longText])]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+        XCTAssertTrue(feed._debugIsFollowingTail, "Precondition: follow starts engaged")
+        XCTAssertGreaterThan(feed.contentSize.height, feed.bounds.height * 2,
+            "Precondition: content must be tall enough to have real scrollable range")
+
+        // Simulate the user dragging away from the bottom.
+        feed._debugUserScrollMotionOverride = true
+        feed.contentOffset = CGPoint(x: 0, y: 0)
+        feed.updateTailFollowFromUserScroll()
+
+        XCTAssertFalse(feed._debugIsFollowingTail,
+            "scrolling away from the bottom must disengage auto-follow")
+
+        // Disengaged: further content growth must NOT yank the viewport back to bottom.
+        let offsetAfterDisengage = feed.contentOffset.y
+        feed.items = [ChatItem(id: 0, blocks: ["seed", longText, "more streamed text"])]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+
+        XCTAssertEqual(feed.contentOffset.y, offsetAfterDisengage, accuracy: 0.5,
+            "disengaged follow must let the user keep reading history uninterrupted")
+
+        await drainFeedWork(feed)
+    }
+
+    // MARK: - 3c. Re-engages when the user scrolls back to the bottom
+
+    func testAutoFollow_ReengagesWhenUserScrollsBackToBottom() async {
+        let feed = makeChatFeed()
+        feed._debugScrollAtRestOverride = true
+
+        let longText = (0..<1000).map { "word\($0)" }.joined(separator: " ")
+        feed.items = [ChatItem(id: 0, blocks: ["seed", longText])]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+        XCTAssertGreaterThan(feed.contentSize.height, feed.bounds.height * 2,
+            "Precondition: content must be tall enough to have real scrollable range")
+
+        // Disengage first (same trigger as the previous test).
+        feed._debugUserScrollMotionOverride = true
+        feed.contentOffset = CGPoint(x: 0, y: 0)
+        feed.updateTailFollowFromUserScroll()
+        XCTAssertFalse(feed._debugIsFollowingTail, "Precondition: must be disengaged before re-engaging")
+
+        // User manually scrolls back down, within reach of the bottom.
+        let maxOffset = max(0, feed.contentSize.height - feed.bounds.height)
+        feed.contentOffset = CGPoint(x: 0, y: maxOffset)
+        feed.updateTailFollowFromUserScroll()
+
+        XCTAssertTrue(feed._debugIsFollowingTail,
+            "returning to the bottom must re-engage auto-follow")
+
+        // Re-engaged: the next layout pass keeps the viewport pinned to bottom on further growth.
+        feed._debugUserScrollMotionOverride = nil
+        feed.items = [ChatItem(id: 0, blocks: ["seed", longText, "more streamed text"])]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+
+        XCTAssertEqual(feed.contentOffset.y, max(0, feed.contentSize.height - feed.bounds.height), accuracy: 0.5,
+            "once re-engaged, growth must resume tracking the bottom")
+
+        await drainFeedWork(feed)
+    }
+
+    // MARK: - Regression: .off mode is a total no-op
+
+    func testTailFollowOff_NeverForcesContentOffsetOrFloorsContentSize() async {
+        let feed = makeChatFeed(tailFollowMode: .off)
+        feed._debugScrollAtRestOverride = true
+
+        feed.items = [ChatItem(id: 0, blocks: ["seed"])]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+
+        feed.pinTailSpacer()  // must be a no-op when tailFollowMode == .off
+        feed.contentOffset = CGPoint(x: 0, y: 5)
+        feed.layoutSubviews()
+
+        XCTAssertEqual(feed.contentOffset.y, 5, accuracy: 0.01,
+            ".off must never force contentOffset back to the bottom")
+        XCTAssertNil(feed._debugTailSpacerPinIndex, "pinTailSpacer() must no-op when tailFollowMode == .off")
+
+        await drainFeedWork(feed)
+    }
+}
+#endif

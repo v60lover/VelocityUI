@@ -63,6 +63,11 @@ final class FeedScrollViewTestHooks {
     /// Mirrors the `visRange` computed at the top of `updateVisibleCells()` — the range actually
     /// used to mount cells this layout pass. Test-only; no other production purpose.
     var lastVisibleRange: Range<Int> = 0..<0
+
+    /// Overrides "is this real user-scroll motion" (`isDragging || isDecelerating`) for
+    /// `updateTailFollowFromUserScroll()` — can't be set without a live touch. `nil` (default)
+    /// falls back to the real UIKit signals.
+    var userScrollMotionOverride: Bool?
 }
 
 #if canImport(XCTest)
@@ -183,6 +188,24 @@ extension FeedScrollView {
     /// region. Non-zero only during an edge over-pull; returns to 0 once the deferred delta is
     /// flushed. Test-only observability for the defer/flush cycle.
     var _debugDeferredContentSizeDelta: CGFloat { _deferredContentSizeDelta }
+
+    /// `.llmChat` tail-follow observability: whether the viewport currently tracks content
+    /// bottom. See `FeedScrollView+TailFollow.swift`.
+    var _debugIsFollowingTail: Bool {
+        get { _isFollowingTail }
+        set { _isFollowingTail = newValue }
+    }
+
+    /// `.llmChat` tail-follow observability: the pinned index the reserved-height floor is
+    /// measured from, or `nil` if nothing is pinned. See `FeedScrollView+TailFollow.swift`.
+    var _debugTailSpacerPinIndex: Int? { _tailSpacerPinIndex }
+
+    /// Overrides "is this real user-scroll motion" for `updateTailFollowFromUserScroll()` — see
+    /// `FeedScrollViewTestHooks.userScrollMotionOverride`.
+    var _debugUserScrollMotionOverride: Bool? {
+        get { _testHooks.userScrollMotionOverride }
+        set { _testHooks.userScrollMotionOverride = newValue }
+    }
 }
 #endif
 #endif

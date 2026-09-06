@@ -166,6 +166,10 @@ extension FeedScrollView {
         guard delta != 0 else { return }
         if isInTopBounceRegion {
             _deferredContentSizeDelta += delta
+        } else if tailFollowMode != .off {
+            // A tail-spacer floor can already sit above natural height — blindly adding `delta`
+            // on top would over-count. Recompute directly instead; O(1) for VerticalLayoutProvider.
+            contentSize.height = tailSpacerFloor(naturalHeight: layoutProvider.contentHeight(for: resolvedFrames))
         } else {
             contentSize.height += delta
         }
@@ -173,7 +177,7 @@ extension FeedScrollView {
 
     /// True when no gesture or bounce animation is in flight — nothing left to perturb, so a
     /// deferred height write is safe to commit even if `contentOffset` still sits at the edge.
-    private var isScrollAtRest: Bool {
+    var isScrollAtRest: Bool {
         if let override = _testHooks.scrollAtRestOverride { return override }
         return !isTracking && !isDragging && !isDecelerating
     }
@@ -186,7 +190,11 @@ extension FeedScrollView {
     /// frozen, the only possible direction is up, which was the reported bug.
     func flushDeferredContentSizeIfNeeded() {
         guard _deferredContentSizeDelta != 0, !isInBounceRegion || isScrollAtRest else { return }
-        contentSize.height += _deferredContentSizeDelta
+        if tailFollowMode != .off {
+            contentSize.height = tailSpacerFloor(naturalHeight: layoutProvider.contentHeight(for: resolvedFrames))
+        } else {
+            contentSize.height += _deferredContentSizeDelta
+        }
         _deferredContentSizeDelta = 0
     }
 
@@ -194,7 +202,7 @@ extension FeedScrollView {
         // In an edge bounce, defer: writing the authoritative height now perturbs the animation.
         // resolvedFrames stays truthful, so the post-settle flush lands the correct height.
         guard !isInBounceRegion else { return }
-        let height = layoutProvider.contentHeight(for: resolvedFrames)
+        let height = tailSpacerFloor(naturalHeight: layoutProvider.contentHeight(for: resolvedFrames))
         let target = CGSize(width: containerWidth, height: height)
         // Absolute write already carries the full truth from resolvedFrames — any accumulated
         // delta is now subsumed, so clear it to avoid a double-apply on the next flush.
