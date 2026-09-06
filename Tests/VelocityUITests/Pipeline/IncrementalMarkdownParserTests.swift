@@ -410,4 +410,93 @@ final class IncrementalMarkdownParserTests: XCTestCase {
         XCTAssertEqual(spy.rasterizeCallCount, sealedFrozenCount,
             "cumulative rasterize calls must equal the number of sealed blocks frozen, for the same reason")
     }
+
+    // MARK: - VelocityUI-fzvf.4: frontier holds with inline runs present (bold/italic/code/link)
+
+    /// Same shape as `testSealedBlocks_StableContentAcrossLaterAppends`, but the sealed block
+    /// carries inline emphasis, an inline code span, and a link — the case the earlier
+    /// plain-text-only coverage never exercised. `runs` (not just `text`) must stay identical.
+    func testSealedBlocks_StableRunsAcrossLaterAppends_WithInlineMarkup() {
+        var parser = IncrementalMarkdownParser()
+        parser.append("A **bold** and *italic* word with `code` and a [link](https://example.com).\n\n")
+        XCTAssertEqual(parser.frontier, 1)
+        let sealedSnapshot = parser.sealedBlocks[0]
+        XCTAssertGreaterThan(sealedSnapshot.runs.count, 1, "precondition: the sealed block must actually carry multiple inline runs")
+
+        // A long, unrelated stream of further mixed markdown must never perturb the already-sealed
+        // block's tokenized runs.
+        parser.append(
+            "Second **paragraph** with `more code`.\n\n# Heading\n\n```\ncode\n```\n\n"
+            + "- item with *emphasis*\n\nmore text with a [link](https://other.example)"
+        )
+        XCTAssertEqual(parser.sealedBlocks[0].kind, sealedSnapshot.kind)
+        XCTAssertEqual(parser.sealedBlocks[0].text, sealedSnapshot.text)
+        XCTAssertEqual(parser.sealedBlocks[0].runs, sealedSnapshot.runs, "a sealed block's tokenized inline runs must never change once frozen")
+        XCTAssertGreaterThan(parser.frontier, 1, "later content must still go on sealing further blocks")
+    }
+
+    /// `debugSealedPrefixMatches` (the tripwire `FeedScrollView`/callers rely on) must still hold
+    /// when the sealed prefix contains inline runs, not just plain text.
+    func testParserOutput_DebugSealedPrefixTripwire_WithInlineMarkup() {
+        var parser = IncrementalMarkdownParser()
+        parser.append("A **bold** word, `inline code`, and a [link](https://example.com) here.\n\n")
+        let firstBlocks = parser.blockList(itemID: "msg", width: 300)
+        parser.append("more hot text with *italic* and `code` too")
+        XCTAssertTrue(parser.debugSealedPrefixMatches(firstBlocks, itemID: "msg", width: 300),
+            "an unrelated hot-region append must never perturb an already-sealed prefix, even when that prefix carries inline runs")
+    }
+
+    /// Locks in the claim documented at `IncrementalMarkdownParser.makeDescriptor`'s comment
+    /// (IncrementalMarkdownParser.swift:648-651): two blocks that render to the SAME final text
+    /// but differ only in inline styling must NOT collide onto the same `contentHash` — otherwise
+    /// `HotBlockRasterizerStore`/`BlockDiff` would serve a stale cached raster for the wrong style.
+    func testContentHash_DistinguishesInlineStylingFromPlainTextWithSameRenderedContent() {
+        var plainParser = IncrementalMarkdownParser()
+        plainParser.append("just bold text\n\n")
+        var boldParser = IncrementalMarkdownParser()
+        boldParser.append("**just bold text**\n\n")
+
+        let plainBlock = plainParser.blockList(itemID: "msg", width: 300)[0]
+        let boldBlock = boldParser.blockList(itemID: "msg", width: 300)[0]
+
+        guard case .text(let plainDescriptor) = plainBlock.fragment.content,
+              case .text(let boldDescriptor) = boldBlock.fragment.content else {
+            return XCTFail("both blocks must render as .text fragments")
+        }
+        XCTAssertEqual(plainDescriptor.content, boldDescriptor.content, "precondition: both must render to the identical final string once markers are stripped")
+        XCTAssertNotEqual(plainBlock.contentHash, boldBlock.contentHash,
+            "contentHash must reflect TextRuns, not just rendered text — a plain vs. all-bold block with identical text must not collide")
+    }
+
+    /// Extends `testFlatPerTokenCost_SealedBlocksIncurZeroFurtherMeasureRasterizeCallsAsStreamGrows`
+    /// to blocks that carry inline runs (bold/code/link per paragraph) — proves inline-run
+    /// tokenization on the hot tail doesn't leak into re-measuring/re-rasterizing already-sealed
+    /// blocks as the stream grows.
+    func testFlatPerTokenCost_SealedBlocksWithInlineRuns_IncurZeroFurtherCalls() {
+        let spy = BlockReuseTests.MeasureRasterizeSpy()
+        var cache: [BlockKey: FreezeState] = [:]
+        var parser = IncrementalMarkdownParser()
+        var previousBlocks: [Block] = []
+        var sealedFrozenCount = 0
+
+        for i in 0..<100 {
+            parser.append("Paragraph **\(i)** with `inline code` and a [link](https://example.com/\(i)).\n\n")
+            let newBlocks = parser.blockList(itemID: "msg", width: 300)
+            let d = diff(previous: previousBlocks, new: newBlocks, frontier: parser.frontier)
+
+            for idx in d.sealedChanged {
+                freeze(newBlocks[idx], scale: 2, cache: &cache, measure: spy.measure, rasterize: spy.rasterize)
+                sealedFrozenCount += 1
+            }
+            previousBlocks = newBlocks
+        }
+
+        XCTAssertEqual(parser.frontier, 100, "every fully blank-line-terminated paragraph must have sealed")
+        XCTAssertGreaterThan(sealedFrozenCount, 0, "at least some paragraphs must have sealed and been frozen")
+        XCTAssertEqual(spy.measureCallCount, sealedFrozenCount,
+            "cumulative measure calls must equal the number of sealed blocks frozen, even with inline runs present on every block — "
+            + "if a sealed block were re-measured on a later round, this would grow past sealedFrozenCount as the stream grows")
+        XCTAssertEqual(spy.rasterizeCallCount, sealedFrozenCount,
+            "cumulative rasterize calls must equal the number of sealed blocks frozen, for the same reason")
+    }
 }

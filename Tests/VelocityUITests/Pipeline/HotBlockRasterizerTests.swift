@@ -377,5 +377,49 @@ final class HotBlockRasterizerTests: XCTestCase {
         XCTAssertNil(store.finalize(keyA, expectedContentHash: 1), "keyA was evicted — finalize must return nil even with the correct hash")
         XCTAssertNotNil(store.finalize(keyB, expectedContentHash: 2), "keyB was NOT evicted — finalize must still succeed for it")
     }
+
+    // MARK: - VelocityUI-fzvf.4: sealed-block raster stability with inline runs present
+
+    /// Raster-layer counterpart to `IncrementalMarkdownParserTests
+    /// .testSealedBlocks_StableRunsAcrossLaterAppends_WithInlineMarkup`. A sealed block carrying
+    /// bold/code/link inline runs must keep producing the exact same rasterized bitmap after a
+    /// long, unrelated stream of further markdown appends below it — not merely the same
+    /// `TextDescriptor` fields, but pixel-identical output when independently rasterized.
+    func testSealedBlockDescriptor_WithInlineRuns_ProducesByteIdenticalRasterAcrossAppends() {
+        var parser = IncrementalMarkdownParser()
+        parser.append("A **bold** word, `inline code`, and a [link](https://example.com).\n\n")
+        XCTAssertEqual(parser.frontier, 1)
+
+        guard case .text(let descriptorBefore) = parser.blockList(itemID: "msg", width: 300)[0].fragment.content else {
+            return XCTFail("sealed block must render as a .text fragment")
+        }
+        XCTAssertGreaterThan(descriptorBefore.runs.count, 1, "precondition: the sealed block must actually carry multiple inline runs")
+
+        parser.append(
+            "Second **paragraph** with `more code`.\n\n# Heading\n\n```\ncode\n```\n\n"
+            + "- item with *emphasis*\n\nmore text with a [link](https://other.example)"
+        )
+
+        guard case .text(let descriptorAfter) = parser.blockList(itemID: "msg", width: 300)[0].fragment.content else {
+            return XCTFail("still-sealed block must still render as a .text fragment")
+        }
+
+        XCTAssertEqual(descriptorBefore.content, descriptorAfter.content, "sealed descriptor content must not change")
+        XCTAssertEqual(descriptorBefore.runs, descriptorAfter.runs, "sealed descriptor's inline runs must not change")
+        XCTAssertEqual(descriptorBefore.layoutHash, descriptorAfter.layoutHash, "sealed descriptor's layoutHash must not change")
+        XCTAssertEqual(descriptorBefore.appearanceHash, descriptorAfter.appearanceHash, "sealed descriptor's appearanceHash must not change")
+
+        let width: CGFloat = 300
+        let (heightBefore, imageBefore) = HotBlockRasterizer().append(descriptorBefore, width: width, scale: 2)
+        let (heightAfter, imageAfter) = HotBlockRasterizer().append(descriptorAfter, width: width, scale: 2)
+        guard let imageBefore, let imageAfter else {
+            return XCTFail("both independent rasterize calls must succeed")
+        }
+        XCTAssertEqual(heightBefore, heightAfter, "identical descriptors must measure to the identical height")
+        XCTAssertEqual(imageBefore.width, imageAfter.width)
+        XCTAssertEqual(imageBefore.height, imageAfter.height)
+        XCTAssertEqual(pixelBytes(of: imageBefore), pixelBytes(of: imageAfter),
+            "a sealed block carrying inline runs must rasterize to byte-identical output before and after unrelated content appends below it")
+    }
 }
 #endif
