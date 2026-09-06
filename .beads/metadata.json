@@ -1,7 +1,0 @@
-{
-  "database": "dolt",
-  "backend": "dolt",
-  "dolt_mode": "embedded",
-  "dolt_database": "VelocityUI",
-  "project_id": "537712f7-3f01-44fc-b1b9-4ba65f4a0bba"
-}
