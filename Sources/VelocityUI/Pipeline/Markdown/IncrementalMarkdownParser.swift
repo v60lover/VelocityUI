@@ -74,6 +74,19 @@ struct StyleFlags: OptionSet, Sendable, Hashable {
 /// `StyleFlags` accumulator on delimiter runs, treats code spans as literal, and recurses into
 /// `[text](url)` bodies for their own emphasis. Unclosed/malformed syntax degrades to literal
 /// text instead of mis-nesting.
+/// CommonMark's escapable ASCII punctuation set — a backslash before any of these consumes
+/// itself and the following char is emitted literally, bypassing whatever markup meaning it
+/// would otherwise carry.
+private func isEscapableMarkdownPunctuation(_ c: Character) -> Bool {
+    switch c {
+    case "!", "\"", "#", "$", "%", "&", "'", "(", ")", "*", "+", ",", "-", ".", "/",
+         ":", ";", "<", "=", ">", "?", "@", "[", "\\", "]", "^", "_", "`", "{", "|", "}", "~":
+        return true
+    default:
+        return false
+    }
+}
+
 nonisolated func inlineRuns(_ text: String) -> [InlineRun] {
     var runs: [InlineRun] = []
     var buffer = ""
@@ -124,6 +137,24 @@ nonisolated func inlineRuns(_ text: String) -> [InlineRun] {
             // discipline as an unclosed code span: no raw-TeX flash, no misparse.
             buffer.append(contentsOf: chars.prefix(2))
             chars = chars.dropFirst(2)
+            continue
+        }
+        if chars.first == "\\" {
+            let rest = chars.dropFirst()
+            guard let next = rest.first else {
+                // Trailing lone backslash mid-stream — its partner char isn't known yet, so
+                // drop it pending rather than committing to "literal backslash", same discipline
+                // as a trailing lone `*`/`_` above.
+                chars = rest
+                continue
+            }
+            if isEscapableMarkdownPunctuation(next) {
+                buffer.append(next)
+                chars = rest.dropFirst()
+                continue
+            }
+            buffer.append("\\")
+            chars = rest
             continue
         }
         if chars.first == "$" {

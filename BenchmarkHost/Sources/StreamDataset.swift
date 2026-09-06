@@ -163,11 +163,12 @@ enum StreamDataset {
 
     /// Exercises the same block/inline shapes as before (VelocityUI-fzvf.1: ATX heading,
     /// ordered + nested list, thematic break, a language-tagged fence, inline emphasis) plus a
-    /// GFM table (VelocityUI-8ge8), a blockquote (VelocityUI-i1xx.1), and a task-list checklist
-    /// (VelocityUI-i1xx.3) but framed as real content instead of a "test" label, so the stream
-    /// still reads as one answer end to end. The blockquote line sits after both
-    /// `imageAfterBlockIndices`/`ruleAfterBlockIndex` anchors, so it doesn't shift them — see the
-    /// "must be recounted" note on `imageAfterBlockIndices`.
+    /// GFM table (VelocityUI-8ge8), a blockquote (VelocityUI-i1xx.1), a task-list checklist
+    /// (VelocityUI-i1xx.3), and a backslash-escapes line (VelocityUI-i1xx.4) but framed as real
+    /// content instead of a "test" label, so the stream still reads as one answer end to end.
+    /// The blockquote and escapes lines both sit after both `imageAfterBlockIndices`/
+    /// `ruleAfterBlockIndex` anchors, so neither shifts them — see the "must be recounted" note
+    /// on `imageAfterBlockIndices`.
     private static func markdownFeatureShowcase() -> [String] {
         var chunks: [String] = []
         chunks += literal("## A few implementation details worth calling out\n\n")
@@ -177,6 +178,7 @@ enum StreamDataset {
         chunks += literal("A quick pre-merge checklist for this implementation:\n\n")
         chunks += literal("- [x] add unit tests for the eviction boundary\n- [x] verify `get` promotes the accessed key to the front\n- [ ] add a stress benchmark once VelocityUI-i1xx lands\n\n")
         chunks += literal("> An LRU cache trades a little bookkeeping — the doubly linked list — for a hard guarantee: eviction always picks the true least-recently-used entry, never an approximation.\n\n")
+        chunks += literal("One more subtlety worth flagging: literal punctuation in prose needs escaping so it isn't misread as markup — writing \\*not italic\\*, \\`still backticks\\`, and \\[not a link\\] all render their punctuation as plain text instead of toggling emphasis, a code span, or a link.\n\n")
         chunks += literal("Here's how that compares to the two structures on their own:\n\n")
         chunks += literal("| Structure | get | set | contains | Promote | Remove | Eviction | Space |\n| :-- | :-: | :-: | :-: | :-: | :-: | :-- | :-: |\n| Dictionary only | O(1) | O(1) | O(1) | unavailable | O(1) | no ordering, can't evict | O(n) |\n| Linked list only | O(n) | O(n) | O(n) | O(1) once found | O(1) once found | O(1) once found | O(n) |\n| Dictionary + linked list | O(1) | O(1) | O(1) | O(1) | O(1) | O(1) | O(n) |\n\n")
         chunks += literal("---\n\n")

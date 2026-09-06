@@ -272,6 +272,66 @@ final class IncrementalMarkdownParserExtensionsTests: XCTestCase {
         assertNoItalicTransient(forEveryPrefixOf: "__bold__")
     }
 
+    // MARK: - Backslash escapes (VelocityUI-i1xx.4)
+
+    func testInlineRuns_EscapedAsterisk_RenderLiterally() {
+        let runs = inlineRuns("\\*text\\*")
+        XCTAssertEqual(runs, [InlineRun(text: "*text*", style: [], url: nil)])
+    }
+
+    func testInlineRuns_EscapedUnderscore_RenderLiterally() {
+        let runs = inlineRuns("\\_text\\_")
+        XCTAssertEqual(runs, [InlineRun(text: "_text_", style: [], url: nil)])
+    }
+
+    func testInlineRuns_EscapedBacktick_RenderLiterally() {
+        let runs = inlineRuns("\\`code\\`")
+        XCTAssertEqual(runs, [InlineRun(text: "`code`", style: [], url: nil)])
+    }
+
+    func testInlineRuns_EscapedLinkBrackets_RenderLiterally() {
+        let runs = inlineRuns("\\[text\\](url)")
+        XCTAssertEqual(runs, [InlineRun(text: "[text](url)", style: [], url: nil)])
+    }
+
+    func testInlineRuns_AllCommonMarkEscapableChars_RenderLiterally() {
+        // '(' excluded: `\(` is claimed by the pre-existing inline-math opener syntax
+        // (`\(...\)`), which takes precedence over plain backslash-escaping for that one
+        // character — see testInlineRuns_EscapedOpenParen_IsInlineMathOpenerNotPlainEscape.
+        let escapableChars: [Character] = [
+            "!", "\"", "#", "$", "%", "&", "'", ")", "*", "+", ",", "-", ".", "/",
+            ":", ";", "<", "=", ">", "?", "@", "[", "\\", "]", "^", "_", "`", "{", "|", "}", "~"
+        ]
+        for char in escapableChars {
+            let input = "\\" + String(char)
+            let runs = inlineRuns(input)
+            XCTAssertEqual(runs, [InlineRun(text: String(char), style: [], url: nil)],
+                "escaping '\(char)' must render it literally")
+        }
+    }
+
+    func testInlineRuns_BackslashBeforeNonEscapableChar_PreservesBackslash() {
+        let runs = inlineRuns("\\a")
+        XCTAssertEqual(runs, [InlineRun(text: "\\a", style: [], url: nil)])
+    }
+
+    func testInlineRuns_TrailingLoneBackslash_IsDropped() {
+        let runs = inlineRuns("hello\\")
+        XCTAssertEqual(runs, [InlineRun(text: "hello", style: [], url: nil)],
+            "trailing lone backslash is a pending marker, not emitted")
+    }
+
+    func testInlineRuns_EscapedBackslash_RendersSingleLiteralBackslash() {
+        let runs = inlineRuns("\\\\")
+        XCTAssertEqual(runs, [InlineRun(text: "\\", style: [], url: nil)])
+    }
+
+    func testInlineRuns_EscapedOpenParen_IsInlineMathOpenerNotPlainEscape() {
+        let runs = inlineRuns("\\(")
+        XCTAssertEqual(runs, [InlineRun(text: "\\(", style: [], url: nil)],
+            "unclosed `\\(` stays literal per the existing inline-math streaming fallback, not the general escape rule")
+    }
+
     private func assertNoItalicTransient(forEveryPrefixOf source: String, file: StaticString = #filePath, line: UInt = #line) {
         for length in 1...source.count {
             let prefix = String(source.prefix(length))
