@@ -164,11 +164,12 @@ enum StreamDataset {
     /// Exercises the same block/inline shapes as before (VelocityUI-fzvf.1: ATX heading,
     /// ordered + nested list, thematic break, a language-tagged fence, inline emphasis) plus a
     /// GFM table (VelocityUI-8ge8), a blockquote (VelocityUI-i1xx.1), a task-list checklist
-    /// (VelocityUI-i1xx.3), and a backslash-escapes line (VelocityUI-i1xx.4) but framed as real
-    /// content instead of a "test" label, so the stream still reads as one answer end to end.
-    /// The blockquote and escapes lines both sit after both `imageAfterBlockIndices`/
-    /// `ruleAfterBlockIndex` anchors, so neither shifts them — see the "must be recounted" note
-    /// on `imageAfterBlockIndices`.
+    /// (VelocityUI-i1xx.3), a backslash-escapes line (VelocityUI-i1xx.4), and a bare-URL +
+    /// angle-bracket-autolink line (VelocityUI-i1xx.5) but framed as real content instead of a
+    /// "test" label, so the stream still reads as one answer end to end. The blockquote,
+    /// escapes, and autolink lines all sit after both `imageAfterBlockIndices`/
+    /// `ruleAfterBlockIndex` anchors, so none of them shifts those — see the "must be recounted"
+    /// note on `imageAfterBlockIndices`.
     private static func markdownFeatureShowcase() -> [String] {
         var chunks: [String] = []
         chunks += literal("## A few implementation details worth calling out\n\n")
@@ -183,6 +184,7 @@ enum StreamDataset {
         chunks += literal("| Structure | get | set | contains | Promote | Remove | Eviction | Space |\n| :-- | :-: | :-: | :-: | :-: | :-: | :-- | :-: |\n| Dictionary only | O(1) | O(1) | O(1) | unavailable | O(1) | no ordering, can't evict | O(n) |\n| Linked list only | O(n) | O(n) | O(n) | O(1) once found | O(1) once found | O(1) once found | O(n) |\n| Dictionary + linked list | O(1) | O(1) | O(1) | O(1) | O(1) | O(1) | O(n) |\n\n")
         chunks += literal("---\n\n")
         chunks += literal("```swift\nlet evicted = list.tail // about to be removed once count > capacity\n```\n\n")
+        chunks += literal("For further reading beyond this walkthrough: https://en.wikipedia.org/wiki/Cache_replacement_policies covers the wider family of eviction policies, and <https://developer.apple.com/documentation/foundation/nscache> is Apple's own built-in alternative if you'd rather not hand-roll one.\n\n")
         return chunks
     }
 

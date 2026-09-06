@@ -87,6 +87,30 @@ private func isEscapableMarkdownPunctuation(_ c: Character) -> Bool {
     }
 }
 
+/// Schemes `inlineRuns` recognizes for bare/angle-bracket autolinking. Longest-first so
+/// `matchedBareURLScheme` never stops at "http://" when the text actually reads "https://".
+private let bareURLSchemes = ["https://", "http://"]
+
+/// Returns the scheme prefix (if any) `s` starts with, from `bareURLSchemes`.
+private func matchedBareURLScheme(_ s: some StringProtocol) -> String? {
+    bareURLSchemes.first(where: { s.hasPrefix($0) })
+}
+
+private func isWordChar(_ c: Character) -> Bool {
+    c.isLetter || c.isNumber
+}
+
+/// Strips CommonMark's conservative trailing-punctuation set off a bare-URL match. No
+/// paren-balance heuristic (GFM's Wikipedia-style rule) -- out of scope, matches the bead's
+/// "stop at whitespace/trailing punctuation" wording.
+private func trimBareURLTrailingPunctuation(_ s: Substring) -> Substring {
+    var s = s
+    while let last = s.last, ".,;:!?)]}'\"".contains(last) {
+        s = s.dropLast()
+    }
+    return s
+}
+
 nonisolated func inlineRuns(_ text: String) -> [InlineRun] {
     var runs: [InlineRun] = []
     var buffer = ""
@@ -223,6 +247,49 @@ nonisolated func inlineRuns(_ text: String) -> [InlineRun] {
             buffer.append(contentsOf: chars.prefix(markerLen))
             chars = chars.dropFirst(markerLen)
             continue
+        }
+        if chars.first == "<" {
+            let afterOpen = chars.dropFirst()
+            if let closeIndex = afterOpen.firstIndex(of: ">") {
+                let inner = afterOpen[afterOpen.startIndex..<closeIndex]
+                if !inner.contains(where: { $0 == " " || $0 == "\n" || $0 == "<" }),
+                   let scheme = matchedBareURLScheme(inner), inner.count > scheme.count {
+                    flush()
+                    let url = String(inner)
+                    runs.append(InlineRun(text: url, style: flags.union(.link), url: url))
+                    chars = afterOpen[afterOpen.index(after: closeIndex)...]
+                    continue
+                }
+            }
+            // No '>' yet, or the span isn't a bare http(s) autolink -- literal '<'. The whole
+            // text is re-scanned from scratch on every append(), so a still-streaming autolink
+            // gets retried once its '>' actually lands (same discipline as an unclosed backtick).
+            buffer.append("<")
+            chars = chars.dropFirst()
+            continue
+        }
+        if chars.first == "h", let scheme = matchedBareURLScheme(chars) {
+            let precededByWordChar: Bool
+            if chars.startIndex > text.startIndex {
+                precededByWordChar = isWordChar(text[text.index(before: chars.startIndex)])
+            } else {
+                precededByWordChar = false
+            }
+            if !precededByWordChar {
+                let afterScheme = chars.dropFirst(scheme.count)
+                let rawBody = afterScheme.prefix { !$0.isWhitespace && $0 != "<" }
+                let body = trimBareURLTrailingPunctuation(rawBody)
+                if !body.isEmpty {
+                    flush()
+                    let url = scheme + String(body)
+                    runs.append(InlineRun(text: url, style: flags.union(.link), url: url))
+                    chars = chars.dropFirst(scheme.count + body.count)
+                    continue
+                }
+                // Scheme typed but no host char yet (hot tail literally ends in "https://") --
+                // still streaming, don't link. Falls through to the literal single-char append
+                // below; re-evaluated fresh once a host char streams in on a later append().
+            }
         }
         if chars.first == "[" {
             if let closeBracket = chars.dropFirst().firstIndex(of: "]") {
