@@ -204,6 +204,15 @@ public struct SpacerNode: RenderNode {
     public var appearanceHash: Int { 0 }
 }
 
+/// Pre-rounded background chrome for a text row's backing layer (e.g. a chat bubble). Mirrors
+/// `CodeBlockChrome` minus the `language` field — this text has no header. Rounding is baked at
+/// rasterization time via `CGContext` clip (reuses `CodeBlockBackgroundDescriptor`'s render
+/// path) — never `CALayer.cornerRadius`/`masksToBounds`.
+struct TextBackgroundChrome: Sendable, Hashable {
+    let cornerRadius: CGFloat
+    let color: VColorDescriptor
+}
+
 // MARK: - TextNode
 
 public struct TextNode: RenderNode {
@@ -246,6 +255,9 @@ public struct TextNode: RenderNode {
     /// Marks this node as one of `CodeBlockNode`'s expanded header/body leaves. Internal — only
     /// `CodeBlockNode.expandedChildren` sets this; the public init always defaults it to `nil`.
     let codeBlockRole: CodeBlockRole?
+    /// Pre-rounded background chrome for this text row's backing layer (e.g. a chat bubble).
+    /// `nil` (the default) draws no background. Internal — set via `.roundedBackground(cornerRadius:color:)`.
+    let backgroundChrome: TextBackgroundChrome?
 
     public init(
         _ content: String,
@@ -296,7 +308,8 @@ public struct TextNode: RenderNode {
         maxWidthFraction: Double = 1.0,
         blockID: BlockID? = nil,
         blockLifecycle: BlockLifecycle = .positional,
-        codeBlockRole: CodeBlockRole?
+        codeBlockRole: CodeBlockRole?,
+        backgroundChrome: TextBackgroundChrome? = nil
     ) {
         self.content = content
         self.blockID = blockID
@@ -317,6 +330,7 @@ public struct TextNode: RenderNode {
         self.alignment = alignment
         self.maxWidthFraction = maxWidthFraction
         self.codeBlockRole = codeBlockRole
+        self.backgroundChrome = backgroundChrome
     }
 
     /// layoutHash covers all properties that affect geometry: content, font metrics
@@ -355,6 +369,7 @@ public struct TextNode: RenderNode {
         h.combine(strikethroughStyle)
         h.combine(leadingBarColor)
         h.combine(ruleColor)
+        h.combine(backgroundChrome)
         for run in runs {
             h.combine(run.color)
             h.combine(run.underlineStyle)
@@ -410,6 +425,22 @@ public struct TextNode: RenderNode {
             content, font: font, color: color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
             underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
             kerning: kerning, lineSpacing: value, runs: runs, blockID: blockID, blockLifecycle: blockLifecycle
+        )
+    }
+
+    /// Gives this text row a pre-rounded backing layer (e.g. a chat bubble), baked at
+    /// rasterization time via `CGContext` clip — never `CALayer.cornerRadius`/`masksToBounds`.
+    /// Unlike the other modifiers above, this one preserves every field (including `alignment`/
+    /// `maxWidthFraction`/`codeBlockRole`) since it's meant to be chained after those are set.
+    public func roundedBackground(cornerRadius: CGFloat, color: VColorDescriptor) -> TextNode {
+        TextNode(
+            content, font: font, color: self.color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
+            underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
+            kerning: kerning, lineSpacing: lineSpacing, runs: runs,
+            leadingBarColor: leadingBarColor, leadingBarWidth: leadingBarWidth, leadingBarGap: leadingBarGap,
+            ruleColor: ruleColor, alignment: alignment, maxWidthFraction: maxWidthFraction,
+            blockID: blockID, blockLifecycle: blockLifecycle, codeBlockRole: codeBlockRole,
+            backgroundChrome: TextBackgroundChrome(cornerRadius: cornerRadius, color: color)
         )
     }
 }

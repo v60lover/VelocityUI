@@ -8,8 +8,10 @@ import CoreGraphics
 public enum FragmentContent: Sendable {
     case image(ImageDescriptor)
     case text(TextDescriptor)
-    /// A code block's container background — synthesized by `extractFragments`, not present in
-    /// `NodeTable`. See `CodeBlockBackgroundDescriptor`.
+    /// A pre-rounded container background — synthesized by `extractFragments`, not present in
+    /// `NodeTable`. Originally a code block's chrome; also reused for a plain text row's
+    /// `.roundedBackground(cornerRadius:color:)` (e.g. a chat bubble). See
+    /// `CodeBlockBackgroundDescriptor`.
     case codeBlockBackground(CodeBlockBackgroundDescriptor)
     /// A rasterized GFM table (grid lines + cell text baked into one `CGImage`). See
     /// `TableRasterDescriptor`.
@@ -121,10 +123,14 @@ private nonisolated func collectFragments(
 
     // Intersect against the inherited clip and drop the fragment if fully clipped —
     // an empty rect means "nothing to paint here", not a degenerate Fragment.
-    func appendLeaf(_ content: FragmentContent) {
+    func clippedFrame() -> CGRect? {
         var frame = drawFrame
         if let clip { frame = frame.intersection(clip) }
-        guard !frame.isNull, !frame.isEmpty else { return }
+        guard !frame.isNull, !frame.isEmpty else { return nil }
+        return frame
+    }
+    func appendLeaf(_ content: FragmentContent) {
+        guard let frame = clippedFrame() else { return }
         result.append(Fragment(id: nodeIndex, blockID: table.blockID(at: nodeIndex), content: content, frame: frame))
     }
 
@@ -147,6 +153,19 @@ private nonisolated func collectFragments(
     case .image(let d):
         appendLeaf(.image(d))
     case .text(let d):
+        // A row can carry its own pre-rounded backing layer (e.g. a chat bubble) -- synthesize
+        // it directly behind the text fragment, sharing the exact same clipped frame (no
+        // padding/inset, matching the code card's own header/body-flush-to-background layout).
+        // Reuses `.codeBlockBackground`'s content type and RenderCell's already-generic
+        // rasterize + 9-patch-stretch rendering verbatim -- nothing code-specific in that path.
+        if let chrome = d.backgroundChrome, let frame = clippedFrame() {
+            result.append(Fragment(
+                id: textBackgroundFragmentID(nodeIndex: nodeIndex),
+                blockID: codePartID(owner: table.blockID(at: nodeIndex), nodeIndex: nodeIndex, part: .textBackground),
+                content: .codeBlockBackground(CodeBlockBackgroundDescriptor(cornerRadius: chrome.cornerRadius, color: chrome.color)),
+                frame: frame
+            ))
+        }
         appendLeaf(.text(d))
     case .table(let descriptor):
         // `measureNode`'s `.table` case attaches the solved, possibly-overflowing natural
@@ -208,9 +227,12 @@ func codePartID(owner: BlockID?, nodeIndex: Int, part: RenderPartKind) -> BlockI
     return BlockID(PositionalCodeBlockPartID(nodeIndex: nodeIndex, part: part))
 }
 
-/// Synthetic ids are negative and disjoint from real `NodeTable` indices.
+/// Synthetic ids are negative and disjoint from real `NodeTable` indices. A given `nodeIndex` is
+/// never both a `.codeBlock` and a `.text` node, so `textBackgroundFragmentID` sharing the same
+/// `nodeIndex * 3 + n` scheme as the code-block ids below can't collide with them.
 func codeBackgroundFragmentID(nodeIndex: Int) -> Int { -(nodeIndex * 3 + 1) }
 func codeHeaderFragmentID(nodeIndex: Int) -> Int { -(nodeIndex * 3 + 2) }
+func textBackgroundFragmentID(nodeIndex: Int) -> Int { -(nodeIndex * 3 + 3) }
 
 /// Produces one atomic `[background, header, body]` code-card paint plan.
 /// A visible card keeps all three fragments even when an individual part is empty or clipped.

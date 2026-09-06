@@ -13,6 +13,9 @@ enum RenderPartKind: Sendable, Hashable {
     /// A math block's rasterized formula (or literal-fallback) natural content size — attached
     /// by `measureNode`'s `.mathBlock` case, mirroring `.tableBody`.
     case mathBody
+    /// A plain text row's synthesized rounded-background fragment (e.g. a chat bubble) — used
+    /// only to key `codePartID`'s stable `BlockID`; never attached to a `ResolvedLayout` child.
+    case textBackground
 }
 
 /// The output of measureNode for a single node.

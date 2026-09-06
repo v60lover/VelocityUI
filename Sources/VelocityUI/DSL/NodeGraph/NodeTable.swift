@@ -220,6 +220,12 @@ public struct TextDescriptor: Sendable {
     /// defaults it to `nil`. `extractFragments` pairs adjacent header+body descriptors carrying
     /// this to synthesize the container background fragment.
     let codeBlockRole: CodeBlockRole?
+    /// Pre-rounded background chrome for this text row's backing layer (e.g. a chat bubble).
+    /// Internal — only `Flattener` sets this (threaded from `TextNode.backgroundChrome`); the
+    /// public init always defaults it to `nil`. `extractFragments` synthesizes a
+    /// `.codeBlockBackground` fragment (same descriptor/render path `CodeBlockNode`'s chrome
+    /// uses) directly behind this text's own frame when set.
+    let backgroundChrome: TextBackgroundChrome?
 
     /// Public and memberwise on purpose: `rasterizeText(_:size:scale:)` and
     /// `TextMeasurementContext.measure(_:width:)` are public entry points taking a TextDescriptor,
@@ -251,7 +257,7 @@ public struct TextDescriptor: Sendable {
             kerning: kerning, lineSpacing: lineSpacing, contentSizeCategory: contentSizeCategory, runs: runs,
             leadingBarColor: leadingBarColor, leadingBarWidth: leadingBarWidth, leadingBarGap: leadingBarGap,
             ruleColor: ruleColor, alignment: alignment, maxWidthFraction: maxWidthFraction,
-            layoutHash: layoutHash, appearanceHash: appearanceHash, codeBlockRole: nil
+            layoutHash: layoutHash, appearanceHash: appearanceHash, codeBlockRole: nil, backgroundChrome: nil
         )
     }
 
@@ -275,7 +281,8 @@ public struct TextDescriptor: Sendable {
         maxWidthFraction: Double = 1.0,
         layoutHash: Int,
         appearanceHash: Int,
-        codeBlockRole: CodeBlockRole?
+        codeBlockRole: CodeBlockRole?,
+        backgroundChrome: TextBackgroundChrome? = nil
     ) {
         self.content = content
         self.font = font
@@ -297,13 +304,17 @@ public struct TextDescriptor: Sendable {
         self.layoutHash = layoutHash
         self.appearanceHash = appearanceHash
         self.codeBlockRole = codeBlockRole
+        self.backgroundChrome = backgroundChrome
     }
 }
 
-/// Background fill for a code block's container chrome. Sendable and content-only — geometry
-/// (the union of header + body frames) lives on the owning `Fragment`, not here. Cross-platform
-/// (no CGImage/UIKit dependency) — the CGContext rasterization itself lives in
-/// `CodeBlockRasterizer.swift`, which is UIKit-gated.
+/// Background fill for a pre-rounded container chrome. Originally a code block's container
+/// background; also reused verbatim for a plain text row's `.roundedBackground(cornerRadius:color:)`
+/// (e.g. a chat bubble) — the render path (rasterize + `contentsCenter` 9-patch stretch) is
+/// generic and has no code-specific assumptions. Sendable and content-only — geometry (the union
+/// of header + body frames for a code block, or the text's own frame for a text row) lives on
+/// the owning `Fragment`, not here. Cross-platform (no CGImage/UIKit dependency) — the CGContext
+/// rasterization itself lives in `CodeBlockRasterizer.swift`, which is UIKit-gated.
 public struct CodeBlockBackgroundDescriptor: Sendable, Equatable {
     public let cornerRadius: CGFloat
     public let color: VColorDescriptor

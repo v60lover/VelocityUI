@@ -69,10 +69,11 @@ func codeBlockRenderPartHash(_ descriptor: CodeBlockDescriptor, part: RenderPart
         hasher.combine(descriptor.rawCode)
         hasher.combine(descriptor.font)
         hasher.combine(descriptor.language)
-    case .tableBody, .mathBody:
+    case .tableBody, .mathBody, .textBackground:
         // Unreachable: this function is only ever called with a `part` derived from
-        // `codePartID`, which never produces `.tableBody`/`.mathBody` — neither a table nor a
-        // math block has a `CodeBlockDescriptor`.
+        // `codePartID`, which never produces `.tableBody`/`.mathBody`/`.textBackground` for a
+        // `CodeBlockDescriptor` — those parts belong to a table, a math block, and a plain
+        // text row's `.roundedBackground(...)` respectively, none of which have one.
         break
     }
     return hasher.finalize()
