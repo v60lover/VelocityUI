@@ -128,6 +128,7 @@ public func flatten<ID: Hashable & Sendable>(
                 runs: n.runs,
                 leadingBarColor: n.leadingBarColor, leadingBarWidth: n.leadingBarWidth, leadingBarGap: n.leadingBarGap,
                 ruleColor: n.ruleColor,
+                alignment: n.alignment, maxWidthFraction: n.maxWidthFraction,
                 layoutHash: combineHash(n.layoutHash, contentSizeCategory), appearanceHash: n.appearanceHash,
                 codeBlockRole: n.codeBlockRole)))
         case let n as AsyncImageNode:

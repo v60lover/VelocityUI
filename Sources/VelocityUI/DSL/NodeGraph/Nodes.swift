@@ -237,6 +237,12 @@ public struct TextNode: RenderNode {
     /// Fill for a horizontal rule drawn across the full raster width (e.g. a markdown thematic
     /// break). `nil` (the default) draws no rule. Mirrors `TextDescriptor.ruleColor`.
     public let ruleColor: VColorDescriptor?
+    /// Horizontal alignment of this text's row within its container. `.leading` (the default)
+    /// matches existing rows. A user-message bubble sets `.trailing`.
+    public let alignment: VHorizontalAlignment
+    /// Fraction (0...1) of the container's proposed width this row may occupy. `1.0` (the
+    /// default) matches existing rows. A user-message bubble narrows this to ~0.8.
+    public let maxWidthFraction: Double
     /// Marks this node as one of `CodeBlockNode`'s expanded header/body leaves. Internal — only
     /// `CodeBlockNode.expandedChildren` sets this; the public init always defaults it to `nil`.
     let codeBlockRole: CodeBlockRole?
@@ -256,6 +262,8 @@ public struct TextNode: RenderNode {
         leadingBarWidth: CGFloat = 0,
         leadingBarGap: CGFloat = 0,
         ruleColor: VColorDescriptor? = nil,
+        alignment: VHorizontalAlignment = .leading,
+        maxWidthFraction: Double = 1.0,
         blockID: BlockID? = nil,
         blockLifecycle: BlockLifecycle = .positional
     ) {
@@ -264,7 +272,8 @@ public struct TextNode: RenderNode {
             underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
             kerning: kerning, lineSpacing: lineSpacing, runs: runs,
             leadingBarColor: leadingBarColor, leadingBarWidth: leadingBarWidth, leadingBarGap: leadingBarGap,
-            ruleColor: ruleColor, blockID: blockID, blockLifecycle: blockLifecycle, codeBlockRole: nil
+            ruleColor: ruleColor, alignment: alignment, maxWidthFraction: maxWidthFraction,
+            blockID: blockID, blockLifecycle: blockLifecycle, codeBlockRole: nil
         )
     }
 
@@ -283,6 +292,8 @@ public struct TextNode: RenderNode {
         leadingBarWidth: CGFloat = 0,
         leadingBarGap: CGFloat = 0,
         ruleColor: VColorDescriptor? = nil,
+        alignment: VHorizontalAlignment = .leading,
+        maxWidthFraction: Double = 1.0,
         blockID: BlockID? = nil,
         blockLifecycle: BlockLifecycle = .positional,
         codeBlockRole: CodeBlockRole?
@@ -303,12 +314,15 @@ public struct TextNode: RenderNode {
         self.leadingBarWidth = leadingBarWidth
         self.leadingBarGap = leadingBarGap
         self.ruleColor = ruleColor
+        self.alignment = alignment
+        self.maxWidthFraction = maxWidthFraction
         self.codeBlockRole = codeBlockRole
     }
 
     /// layoutHash covers all properties that affect geometry: content, font metrics
     /// (size, weight, family, traits), line limit, line break mode, kerning, line spacing,
-    /// and each run's length + font (the run fields that affect glyph advances/wrapping).
+    /// alignment, maxWidthFraction, and each run's length + font (the run fields that affect
+    /// glyph advances/wrapping).
     public var layoutHash: Int {
         var h = Hasher()
         h.combine(content)
@@ -322,6 +336,8 @@ public struct TextNode: RenderNode {
         h.combine(lineSpacing)
         h.combine(leadingBarWidth)
         h.combine(leadingBarGap)
+        h.combine(alignment)
+        h.combine(maxWidthFraction)
         for run in runs {
             h.combine(run.length)
             h.combine(run.font)

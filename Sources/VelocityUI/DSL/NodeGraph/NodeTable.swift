@@ -206,6 +206,13 @@ public struct TextDescriptor: Sendable {
     /// block's width to the proposed container width instead of the text's own (near-zero,
     /// single-space) intrinsic width — see `LayoutEngine.swift`.
     public let ruleColor: VColorDescriptor?
+    /// Horizontal alignment of this text's row within its container. `.leading` (the default)
+    /// matches existing rows. Layout-affecting — folds into `layoutHash`. Mirrors `TextNode.alignment`.
+    public let alignment: VHorizontalAlignment
+    /// Fraction (0...1) of the container's proposed width this row may occupy. `1.0` (the
+    /// default) matches existing rows. Layout-affecting — folds into `layoutHash`. Mirrors
+    /// `TextNode.maxWidthFraction`.
+    public let maxWidthFraction: Double
     public let layoutHash: Int
     public let appearanceHash: Int
     /// Marks this descriptor as one of `CodeBlockNode`'s expanded header/body leaves. Internal —
@@ -233,6 +240,8 @@ public struct TextDescriptor: Sendable {
         leadingBarWidth: CGFloat = 0,
         leadingBarGap: CGFloat = 0,
         ruleColor: VColorDescriptor? = nil,
+        alignment: VHorizontalAlignment = .leading,
+        maxWidthFraction: Double = 1.0,
         layoutHash: Int,
         appearanceHash: Int
     ) {
@@ -241,7 +250,8 @@ public struct TextDescriptor: Sendable {
             underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
             kerning: kerning, lineSpacing: lineSpacing, contentSizeCategory: contentSizeCategory, runs: runs,
             leadingBarColor: leadingBarColor, leadingBarWidth: leadingBarWidth, leadingBarGap: leadingBarGap,
-            ruleColor: ruleColor, layoutHash: layoutHash, appearanceHash: appearanceHash, codeBlockRole: nil
+            ruleColor: ruleColor, alignment: alignment, maxWidthFraction: maxWidthFraction,
+            layoutHash: layoutHash, appearanceHash: appearanceHash, codeBlockRole: nil
         )
     }
 
@@ -261,6 +271,8 @@ public struct TextDescriptor: Sendable {
         leadingBarWidth: CGFloat = 0,
         leadingBarGap: CGFloat = 0,
         ruleColor: VColorDescriptor? = nil,
+        alignment: VHorizontalAlignment = .leading,
+        maxWidthFraction: Double = 1.0,
         layoutHash: Int,
         appearanceHash: Int,
         codeBlockRole: CodeBlockRole?
@@ -280,6 +292,8 @@ public struct TextDescriptor: Sendable {
         self.leadingBarWidth = leadingBarWidth
         self.leadingBarGap = leadingBarGap
         self.ruleColor = ruleColor
+        self.alignment = alignment
+        self.maxWidthFraction = maxWidthFraction
         self.layoutHash = layoutHash
         self.appearanceHash = appearanceHash
         self.codeBlockRole = codeBlockRole

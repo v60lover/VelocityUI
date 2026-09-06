@@ -234,6 +234,24 @@ final class FlattenTests: XCTestCase {
         XCTAssertEqual(d.runs, runs)
     }
 
+    /// VelocityUI-8otc.1: a plain TextNode() keeps existing rows unchanged — leading alignment,
+    /// full-width fraction.
+    @MainActor func testTextNode_alignmentAndMaxWidthFraction_defaultToLeadingAndFullWidth() {
+        let node = TextNode("abc")
+        XCTAssertEqual(node.alignment, .leading)
+        XCTAssertEqual(node.maxWidthFraction, 1.0)
+    }
+
+    /// VelocityUI-8otc.1: alignment/maxWidthFraction must round-trip from TextNode through
+    /// flatten() into TextDescriptor — the Layer 1/2 boundary this bead exists to carry them across.
+    @MainActor func testFlatten_textNode_mapsAlignmentAndMaxWidthFraction() {
+        let node = TextNode("abc", alignment: .trailing, maxWidthFraction: 0.8)
+        let table = flatten(VStackNode { node }, itemID: "i")
+        guard case .text(let d) = table.nodes[1] else { XCTFail(); return }
+        XCTAssertEqual(d.alignment, .trailing)
+        XCTAssertEqual(d.maxWidthFraction, 0.8)
+    }
+
     @MainActor func testFlatten_vstackDescriptor_mapsAlignmentSpacingAndHashes() {
         let node = VStackNode(alignment: .trailing, spacing: 12) { TextNode("x") }
         let table = flatten(node, itemID: "i")
