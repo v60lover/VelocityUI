@@ -592,6 +592,19 @@ public final class RenderCell {
         CATransaction.commit()
     }
 
+    /// Hides the full-cell gray gradient for an empty mount of a media-free item, so a brand-new
+    /// text message (e.g. a streaming chat reply) doesn't flash gray for the one async gap before
+    /// its first text raster lands. Only affects that empty window: the later real-content delivery
+    /// drives placeholder/content opacity itself (see `applyLayout`), and a cross-item recycle
+    /// re-raises the placeholder in `prepareForReuse`. Media items skip this — the gray box is their
+    /// intended loading affordance.
+    func suppressPlaceholderForEmptyMount() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        placeholderLayer.opacity = 0
+        CATransaction.commit()
+    }
+
     /// Reconciles only the ordered blocks intersecting `viewportInCell`.
     /// Returns blocks that became active and may need an async image request.
     @discardableResult

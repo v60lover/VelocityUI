@@ -178,6 +178,13 @@ extension FeedScrollView {
                 // Real fragments arrive via refineKnownFrames once the pipeline commits.
                 cell.layer.frame = frame
                 cell.applyLayout([])
+                // A media-free item (e.g. a streaming chat message) has no image to gray-box, so the
+                // full-cell gradient would just flash gray for the one async gap before the first
+                // text raster arrives. Suppress it; refineKnownFrames' real-content delivery reveals
+                // the text itself. Media items keep the gray box as the intended loading affordance.
+                if !tableContainsMedia(table) {
+                    cell.suppressPlaceholderForEmptyMount()
+                }
                 _pendingFragmentIndices.insert(index)
             }
 
@@ -226,6 +233,20 @@ extension FeedScrollView {
             }
         }
         return count
+    }
+
+    /// True if `table` contains a node that loads its pixels asynchronously (image/GIF/video) and
+    /// therefore wants the gray gradient as a loading affordance during an empty mount. Text, code,
+    /// tables, math, and host/custom layers rasterize without a network round-trip, so a media-free
+    /// item suppresses the gradient to avoid a gray flash before its first raster (see the
+    /// WorkingRange-miss branch in `updateVisibleCells`). O(nodes); the node list is small per item.
+    func tableContainsMedia(_ table: NodeTable) -> Bool {
+        table.nodes.contains { node in
+            switch node {
+            case .image, .gif, .video: return true
+            default:                   return false
+            }
+        }
     }
 
     /// The index range to keep warm (measured, mounted, prefetched) around the visible viewport —
