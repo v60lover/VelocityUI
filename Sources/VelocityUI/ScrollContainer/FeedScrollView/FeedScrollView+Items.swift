@@ -351,12 +351,14 @@ extension FeedScrollView {
         var syncMap = buildSyncMap(for: result.fragments, table: inputs.newTable, ordinals: inputs.newTable.leafOrdinals(), index: nextIdx)
         for (id, bitmap) in result.textBitmaps { syncMap[id] = bitmap }
         let codeMap = result.codeBodyContents
+        let revealRegions = revealRegions(previous: inputs.previousFragments, new: result.fragments)
         let entering = cell.updateBlockViewport(
             fragments: result.fragments,
             viewportInCell: blockViewport(for: cell.layer.frame),
             synchronousContent: syncMap,
             codeBodyContent: codeMap
         )
+        cell.applyRevealRegions(revealRegions)
         spawnMediaFetches(for: cell, fragments: entering, itemID: inputs.newTable.itemID, syncMap: syncMap)
 
         var workingRangeCommit: (layout: ResolvedLayout, fragments: [Fragment])?
@@ -367,6 +369,34 @@ extension FeedScrollView {
             workingRangeCommit = (syntheticLayout, result.fragments)
         }
         return .kept(nextIdx: nextIdx, blockDiffResolved: true, workingRangeCommit: workingRangeCommit)
+    }
+
+    /// Maps each plain-text fragment that grew taller between `previous` and `new` to the local
+    /// (from: previous height, to: new height) reveal window `RenderCell.applyRevealRegions`
+    /// animates -- see VelocityUI-gpex. Both heights are relative to that fragment's own local
+    /// frame (its top is always y=0 regardless of the block's vertical position in the cell), so
+    /// they translate directly into the fragment's sublayer's local Y-space.
+    ///
+    /// Only a fragment id present in both lists, whose height strictly grew, qualifies -- a first
+    /// mount (no previous entry) or an unrelated reflow (shrink, or code-body text which streams
+    /// through its own tail-tile mechanism, not a hot-block bitmap) is intentionally excluded.
+    private func revealRegions(previous: [Fragment], new: [Fragment]) -> [Int: (from: CGFloat, to: CGFloat)] {
+        var previousHeights: [Int: CGFloat] = [:]
+        for fragment in previous {
+            guard case .text(let descriptor) = fragment.content, descriptor.codeBlockRole == nil else { continue }
+            previousHeights[fragment.id] = fragment.frame.height
+        }
+        guard !previousHeights.isEmpty else { return [:] }
+
+        var regions: [Int: (from: CGFloat, to: CGFloat)] = [:]
+        for fragment in new {
+            guard case .text(let descriptor) = fragment.content, descriptor.codeBlockRole == nil,
+                  let previousHeight = previousHeights[fragment.id],
+                  previousHeight < fragment.frame.height
+            else { continue }
+            regions[fragment.id] = (from: previousHeight, to: fragment.frame.height)
+        }
+        return regions
     }
 
     /// Reset reachEnd gate if item count grew (new page arrived). On the fully-resolved fast

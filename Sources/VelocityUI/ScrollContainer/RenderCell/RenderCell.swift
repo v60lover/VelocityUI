@@ -77,6 +77,14 @@ public final class RenderCell {
     /// Object identities are enough to detect a new immutable raster without retaining it twice.
     private var appliedRasterIdentityByFragmentID: [Int: ObjectIdentifier] = [:]
     var layerIdentityByFragmentID: [Int: LayerIdentity] = [:]
+    /// Streaming-text reveal mask per hot block -- see `RenderCell+RevealMask.swift`. Removed
+    /// once a reveal finishes so a sealed block's sublayer goes back to unmasked (no permanent
+    /// offscreen-compositing cost on scroll).
+    var revealMaskLayers: [LayerIdentity: CAGradientLayer] = [:]
+    /// Bumped on every `applyRevealRegions` call for an identity so a stale animation-completion
+    /// closure (from a reveal a later token already superseded) can no-op instead of nil-ing out
+    /// a mask that a newer, still-running reveal owns.
+    var revealGeneration: [LayerIdentity: Int] = [:]
     private var codeBackgroundByIdentity: [LayerIdentity: CodeBlockBackgroundDescriptor] = [:]
     /// Ordered frame metadata survives while offscreen block layers are released.
     /// It lets the scroll path find the next resident span without recreating the full cell.
