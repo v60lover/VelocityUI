@@ -48,9 +48,9 @@ For a live-updating transcript, feed tokens into an `IncrementalMarkdownParser` 
 `renderNodes` to a cell. Sealed blocks are cached as bitmaps; only the open "hot" block
 re-rasterizes per token.
 
-- [Streaming demo video](https://github.com/user-attachments/assets/49c1d68f-1c9d-4076-a1c2-5c85d49b75d6
-)
-- [Scrolling demo video](https://github.com/user-attachments/assets/7c63f60a-e16c-4441-bc56-6eaadf282b9c)
+> ▶ **[Watch the Streaming Markdown demo](https://github.com/user-attachments/assets/49c1d68f-1c9d-4076-a1c2-5c85d49b75d6)**
+>
+> ▶ **[Watch the scrolling performance demo](https://github.com/user-attachments/assets/7c63f60a-e16c-4441-bc56-6eaadf282b9c)**
 
 ```swift
 struct MessageCell: RenderView {
