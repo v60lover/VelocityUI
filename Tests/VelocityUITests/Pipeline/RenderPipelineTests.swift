@@ -743,6 +743,95 @@ final class RenderPipelineTests: XCTestCase {
             "After markInvalidated() + re-spawn, WorkingRange must have all 5 entries; \(nilCount) nil slots")
     }
 
+    // MARK: - VelocityUI-8otc.6.1: atomic invalidate+boundary
+
+    /// Invariant: when `invalidate: true` is passed to `onIndexBoundary`, the invalidation reset
+    /// runs BEFORE the `warmRange == lastWarmRange` dedup guard, inside the same actor call.
+    /// This proves that a same-range notification carrying `invalidate: true` is NOT swallowed
+    /// by the dedup guard — bypassing it is part of the atomicity guarantee.
+    func testInvalidateParameterBypassesDedupGuard() async {
+        let tables = makeTables(count: 20)
+        let range = await WorkingRange(capacity: 60)
+        let pipeline = makePipeline()
+        let warmRange = boundaryRange(leadingIndex: 5, ahead: 10, behind: 3, count: tables.count)
+
+        // First call: spawn a task
+        await pipeline.onIndexBoundary(
+            warmRange: warmRange, leadingIndex: 5, workingRange: range,
+            tables: tables, availableWidth: 320, scale: 1)
+        await pipeline.waitForCurrentPrefetch()
+
+        let taskCountAfterFirst = await pipeline.taskStartCount
+        XCTAssertEqual(taskCountAfterFirst, 1)
+
+        // Second call: same warmRange, invalidate: false (default) → dedup guard blocks it
+        await pipeline.onIndexBoundary(
+            warmRange: warmRange, leadingIndex: 5, workingRange: range,
+            tables: tables, availableWidth: 320, scale: 1)
+        let taskCountAfterSecond = await pipeline.taskStartCount
+        XCTAssertEqual(taskCountAfterSecond, 1, "Same warmRange with invalidate: false must not spawn a task")
+
+        // Third call: same warmRange again, but invalidate: true → bypasses dedup guard, spawns new task
+        await pipeline.onIndexBoundary(
+            warmRange: warmRange, leadingIndex: 5, workingRange: range,
+            tables: tables, availableWidth: 320, scale: 1, invalidate: true)
+        let taskCountAfterInvalidate = await pipeline.taskStartCount
+        XCTAssertEqual(taskCountAfterInvalidate, 2,
+            "invalidate: true must bypass the dedup guard and spawn a new task even for an unchanged warmRange")
+        await pipeline.waitForCurrentPrefetch()
+    }
+
+    /// Invariant: when `WorkingRange` is wiped by `invalidateAll()` (e.g. on an item change)
+    /// and the pipeline is renotified for the SAME warm range via `onIndexBoundary(invalidate: true)`,
+    /// the replacement work completes and fully repopulates `WorkingRange`. This is the regression
+    /// test for VelocityUI-8otc.6.1 — two separate racing Tasks (`onIndexBoundary` then
+    /// `markInvalidated`) could leave `WorkingRange` permanently wiped because the dedup guard
+    /// silently swallowed the retrigger. Folding invalidate into `onIndexBoundary` itself removes
+    /// the race entirely — there is only one actor call, serialized, so the invalidation and the
+    /// replacement scheduling are atomic.
+    func testInvalidateParameterRepopulatesWorkingRangeAfterWipe() async {
+        let tables = makeTables(count: 5)
+        let range = await WorkingRange(capacity: 20)
+        let pipeline = makePipeline()
+        let warmRange = boundaryRange(leadingIndex: 0, ahead: 10, behind: 3, count: tables.count)
+
+        // First call: populate WorkingRange with all 5 entries
+        await pipeline.onIndexBoundary(
+            warmRange: warmRange, leadingIndex: 0, workingRange: range,
+            tables: tables, availableWidth: 320, scale: 1)
+        await pipeline.waitForCurrentPrefetch()
+
+        // Verify all entries are populated
+        for i in 0..<5 {
+            let entry = await range.entry(at: i)
+            XCTAssertNotNil(entry, "Index \(i) must be populated after first boundary")
+        }
+
+        // Wipe the WorkingRange (simulate what FeedScrollView.itemsDidChange does)
+        await MainActor.run { range.invalidateAll() }
+
+        // Verify all entries are now nil
+        for i in 0..<5 {
+            let entry = await range.entry(at: i)
+            XCTAssertNil(entry, "Index \(i) must be nil after invalidateAll()")
+        }
+
+        // Call onIndexBoundary with same warmRange, invalidate: true — this re-triggers
+        // the prefetch and repopulates WorkingRange in one atomic operation
+        await pipeline.onIndexBoundary(
+            warmRange: warmRange, leadingIndex: 0, workingRange: range,
+            tables: tables, availableWidth: 320, scale: 1, invalidate: true)
+        await pipeline.waitForCurrentPrefetch()
+
+        // Verify all entries are repopulated
+        for i in 0..<5 {
+            let entry = await range.entry(at: i)
+            XCTAssertNotNil(entry,
+                "Index \(i) must be repopulated after onIndexBoundary(invalidate: true) — " +
+                "invalidate: true must prevent the dedup guard from silently swallowing the replacement work")
+        }
+    }
+
     // MARK: - Test 6: Scroll-up resetRange preserves ring buffer invariants
 
     func testResetRangeRestoresCapacityInvariant() async {

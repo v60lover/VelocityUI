@@ -219,8 +219,7 @@ extension FeedScrollView {
     func handleWidthChange(isFirstLayout: Bool) {
         if !isFirstLayout {
             workingRange.invalidateAll()
-            let pipeline = self.pipeline
-            Task { await pipeline.markInvalidated() }
+            _pendingPipelineInvalidation = true
             // LayoutCache eviction is async. Between now and completion, a boundary-crossing
             // notifyPipelineIfNeeded misses on the new-width key harmlessly — old-width CacheKeys
             // never collide with new-width ones, so no stale data pollutes the lookup.

@@ -133,8 +133,7 @@ extension FeedScrollView {
 
             if !canDeferInvalidation {
                 workingRange.invalidateAll()
-                let pipeline = self.pipeline
-                Task { await pipeline.markInvalidated() }
+                _pendingPipelineInvalidation = true
             }
         }
 
@@ -288,8 +287,7 @@ extension FeedScrollView {
                 tookInPlaceFastPath = true
             } else {
                 workingRange.invalidateAll()
-                let pipeline = self.pipeline
-                Task { await pipeline.markInvalidated() }
+                _pendingPipelineInvalidation = true
             }
         }
 

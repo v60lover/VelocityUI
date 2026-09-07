@@ -248,6 +248,12 @@ extension FeedScrollView {
         let capturedScale  = max(1, traitCollection.displayScale)  // same guard as spawnMediaFetches
         let capturedDirection = scrollDirection
 
+        // Consumed synchronously, before the Task's await gap — a new invalidation that lands
+        // while this Task is in flight sets the flag again and rides the NEXT
+        // notifyPipelineIfNeeded call instead of being lost or double-consumed here.
+        let shouldInvalidate = _pendingPipelineInvalidation
+        _pendingPipelineInvalidation = false
+
         _testHooks.taskSpawnCount += 1
         environment.pipelineTaskSpawnObserver?()
 
@@ -260,7 +266,8 @@ extension FeedScrollView {
                 tables: capturedTables,
                 availableWidth: capturedWidth,
                 scale: capturedScale,
-                direction: capturedDirection
+                direction: capturedDirection,
+                invalidate: shouldInvalidate
             )
             await self.pipeline.waitForCurrentPrefetch()
             self.setNeedsLayout()

@@ -108,6 +108,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// Leading index sent to pipeline on last boundary crossing.
     var lastNotifiedLeadingIndex: Int = -1
 
+    /// Set when `workingRange.invalidateAll()` ran but the paired `RenderPipeline` invalidation
+    /// hasn't been delivered yet. Consumed (read + cleared) by `notifyPipelineIfNeeded`, which
+    /// passes it as `onIndexBoundary(invalidate:)` so invalidate-and-schedule-replacement is one
+    /// ordered actor op instead of two racing Tasks.
+    var _pendingPipelineInvalidation: Bool = false
+
     /// `.llmChat` tail-follow: index the reserved-height spacer's floor is measured from. `nil`
     /// only before the first `pinTailSpacer()` (or when `tailFollowMode == .off`). Once pinned it
     /// persists at that index until the next `pinTailSpacer()` re-pins it — it is not cleared when

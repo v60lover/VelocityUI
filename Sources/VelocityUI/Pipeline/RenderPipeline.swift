@@ -130,6 +130,11 @@ public actor RenderPipeline {
     ///   - scale: captured at the `@MainActor` call site so `ImageCacheKey` matches mount time's.
     ///   - direction: real scroll-travel direction from `contentOffset` deltas; determines
     ///     which side of `leadingIndex` is `.ahead` vs `.behind`.
+    ///   - invalidate: when `true`, runs the invalidation reset (same body as `markInvalidated()`)
+    ///     BEFORE the `warmRange == lastWarmRange` dedup guard below, inside this same actor
+    ///     call. Callers use this instead of a separate `markInvalidated()` Task so "invalidate"
+    ///     and "schedule the replacement" can never be reordered by the scheduler — the actor
+    ///     serializes them into one op.
     public func onIndexBoundary(
         warmRange: Range<Int>,
         leadingIndex: Int,
@@ -137,8 +142,13 @@ public actor RenderPipeline {
         tables: [NodeTable],
         availableWidth: CGFloat,
         scale: CGFloat,
-        direction: ScrollDirection = .down
+        direction: ScrollDirection = .down,
+        invalidate: Bool = false
     ) {
+        if invalidate {
+            performInvalidation()
+        }
+
         guard warmRange != lastWarmRange else { return }
         lastWarmRange = warmRange
         lastDirection = direction
@@ -342,7 +352,17 @@ public actor RenderPipeline {
     /// Resets dedup state and cancels any in-flight prefetch so the next `onIndexBoundary`
     /// call with the same warm range isn't skipped by the unchanged-range guard — needed
     /// after `WorkingRange.invalidateAll()` wipes entries without the range itself changing.
+    ///
+    /// Production callers should prefer `onIndexBoundary(invalidate: true)` instead of calling
+    /// this from a separate Task — two unstructured Tasks race, and a late invalidate can cancel
+    /// the replacement work it was meant to precede. Stays public and safe to call standalone
+    /// when there is no following boundary notification to race against (e.g. teardown), and
+    /// for tests.
     public func markInvalidated() {
+        performInvalidation()
+    }
+
+    private func performInvalidation() {
         lastWarmRange = nil
         prefetchTask?.cancel()
         prefetchTask = nil
