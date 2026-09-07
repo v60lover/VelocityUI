@@ -8,12 +8,52 @@ While the library is pre-1.0, minor (`0.x`) releases may include breaking API ch
 
 ## [Unreleased]
 
-### Planned
-- `StreamingChatFeed` high-level DSL surface (bubbles, roles, auto-scroll-to-bottom).
-- More tree-sitter grammars (C, Rust, Go, TypeScript; SQL deferred on a toolchain issue).
-- Inline Markdown links, images, and blockquotes.
-- Math display-mode block layout and baseline alignment in running text.
-- Accessibility pass for streaming content.
+### Planned priority
+- Shelf layouts.
+- Tap handling for rendered content (tap, select text, etc).
+- Hosting view API for custom views
+- Sectioned grids
+- Gifs/Video handling
+- 
+
+## [0.5.0] — 2026-09-08
+
+This release expands the streaming Markdown renderer and adds the lower-level layout and scroll
+behavior needed for LLM-style chat feeds.
+
+### Added
+- **Markdown tables** — a `MarkdownTableNode`, cell layout and column-width solving, single-image
+  table rasterization, and horizontal scrolling for tables wider than the viewport.
+- **Inline and display math** — parser support for math delimiters, inline math attachments, and
+  block math rasterization with horizontal scrolling for wide formulas.
+- **More Markdown syntax** — autolinks and bare URLs, backslash escapes, task-list checkboxes,
+  thematic rules, and styled blockquotes.
+- **Chat message layout** — `TextNode.messageRole(_:)`, horizontal alignment and maximum-width
+  controls, plus pre-rounded user-message backgrounds.
+- **LLM tail following** — `TailFollowMode.llmChat`, a pinned trailing spacer, automatic
+  scroll-to-bottom engagement, user-scroll disengagement and re-engagement, and display-paced
+  critically damped animation.
+- **Streaming reveal animation** — newly appended fragment tails fade in without restarting the
+  already visible part of a block, while Reduce Motion keeps updates instant.
+- **Raster diagnostics** — a feed-scoped observer for cache misses, repairs, evictions, and
+  repaint failures without exposing rendered text.
+
+### Changed
+- Frozen bitmap budgeting now tracks actual raster artifacts instead of logical block counts.
+- Raster reads, writes, promotion, repair, and eviction now share canonical `BlockKey`
+  construction.
+- Raster invalidation and replacement scheduling now happen atomically at the `RenderPipeline`
+  actor boundary.
+- The benchmark host now includes an LLM-chat mode and expanded streaming Markdown fixtures.
+- Updated the public runtime version and installation guidance to `0.5.0` and refreshed the
+  README with streaming-first examples and video-link placeholders.
+
+### Fixed
+- Detects missing raster artifacts and schedules asynchronous repair instead of leaving blank or
+  stale content on screen.
+- Prevents the loading placeholder from flashing on text-only streaming messages while keeping it
+  for image, GIF, and video cells.
+- Corrected table row heights, column widths, alignment, and math-block rendering edge cases.
 
 ## [0.4.0] — 2026-09-01
 
@@ -48,5 +88,6 @@ the public API is still moving.
 - Requires iOS 17+, Swift 6, Xcode 16+.
 - Licensed under Apache-2.0.
 
-[Unreleased]: https://github.com/v60lover/VelocityUI/compare/0.4.0...HEAD
+[Unreleased]: https://github.com/v60lover/VelocityUI/compare/0.5.0...HEAD
+[0.5.0]: https://github.com/v60lover/VelocityUI/compare/0.4.0...0.5.0
 [0.4.0]: https://github.com/v60lover/VelocityUI/releases/tag/0.4.0

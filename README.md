@@ -21,7 +21,7 @@ without dropping frames. The scroll path never touches the main-actor async mach
 runs off the main thread, and every cell is a pooled `CALayer` — no `UICollectionView`, no
 `UIView`-per-cell, no `CATextLayer`.
 
-> **Status: early beta (`0.4.0`).** The engine works end-to-end and is exercised by 130+
+> **Status: early beta (`0.5.0`).** The engine works end-to-end and is exercised by 130+
 > tests, but the public API is still moving and features land branch by branch. Not yet
 > recommended for production. See [Versioning](#versioning) below.
 
@@ -36,11 +36,37 @@ Add VelocityUI as a Swift Package dependency:
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/v60lover/VelocityUI.git", from: "0.4.0")
+    .package(url: "https://github.com/v60lover/VelocityUI.git", from: "0.5.0")
 ]
 ```
 
 Or in Xcode: **File → Add Package Dependencies…** and paste the repo URL.
+
+### Streaming Markdown (LLM chat)
+
+For a live-updating transcript, feed tokens into an `IncrementalMarkdownParser` and hand its
+`renderNodes` to a cell. Sealed blocks are cached as bitmaps; only the open "hot" block
+re-rasterizes per token.
+
+- [Streaming demo video](https://github.com/user-attachments/assets/49c1d68f-1c9d-4076-a1c2-5c85d49b75d6
+)
+- [Scrolling demo video](https://github.com/user-attachments/assets/7c63f60a-e16c-4441-bc56-6eaadf282b9c)
+
+```swift
+struct MessageCell: RenderView {
+    let parser: IncrementalMarkdownParser   // fed with streamed tokens
+
+    var renderBody: some RenderNode {
+        VStackNode(alignment: .leading, spacing: 8) {
+            parser.renderNodes(theme: .default)
+        }
+    }
+}
+```
+
+> The high-level `StreamingChatFeed` surface (bubbles, roles, auto-scroll) is
+> [in progress](#streaming-llm-style-chat--work-in-progress) — for now you wire the parser into
+> a cell yourself.
 
 ### A minimal feed
 
@@ -90,28 +116,6 @@ struct FeedScreen: View {
 `AsyncFeed` is a `UIViewRepresentable`, so it drops straight into any SwiftUI hierarchy. The
 default layout is a single vertical column (`.vertical()`); pass a `GridLayout` for multi-column
 grids.
-
-### Streaming Markdown (LLM chat)
-
-For a live-updating transcript, feed tokens into an `IncrementalMarkdownParser` and hand its
-`renderNodes` to a cell. Sealed blocks are cached as bitmaps; only the open "hot" block
-re-rasterizes per token.
-
-```swift
-struct MessageCell: RenderView {
-    let parser: IncrementalMarkdownParser   // fed with streamed tokens
-
-    var renderBody: some RenderNode {
-        VStackNode(alignment: .leading, spacing: 8) {
-            parser.renderNodes(theme: .default)
-        }
-    }
-}
-```
-
-> The high-level `StreamingChatFeed` surface (bubbles, roles, auto-scroll) is
-> [in progress](#streaming-llm-style-chat--work-in-progress) — for now you wire the parser into
-> a cell yourself.
 
 ---
 
@@ -199,7 +203,7 @@ in place; the remaining work is wiring them into a turnkey chat surface.
 - Inline Markdown links, images, and blockquotes styled to parity.
 - Math display-mode block layout and baseline alignment inside running text.
 - Accessibility pass for streaming content (VoiceOver on a mutating transcript).
-- Public API stabilization and documentation before a `0.5`/`1.0` line.
+- Public API stabilization and documentation before the `1.0` line.
 
 ---
 
@@ -228,7 +232,7 @@ See [Quick start](#quick-start) for the install snippet and a runnable example.
 
 ## Versioning
 
-Current estimate: **`0.4.0`.**
+Current estimate: **`0.5.0`.**
 
 Why pre-1.0 and why beta:
 
@@ -239,8 +243,8 @@ Why pre-1.0 and why beta:
   yet, and several planned features (grammars, links, accessibility) are open. That's squarely
   `0.x`, and the honest label is **beta**, not release-candidate.
 
-The version moves to `0.5` when the `StreamingChatFeed` surface lands, and toward `1.0` when the
-public API is frozen and documented.
+The `0.5` line reflects the working streaming Markdown stack. The version moves toward `1.0`
+when the high-level `StreamingChatFeed` surface lands and the public API is frozen and documented.
 
 Release notes live in [`CHANGELOG.md`](CHANGELOG.md). The current version is also readable at
 runtime via `VelocityUIVersion.current`. On each release, keep three things in sync: the git tag,
