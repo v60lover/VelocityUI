@@ -82,9 +82,10 @@ final class MediaDispatcher {
     ///
     /// Scale caveat: if preload ran at a different displayScale, cachedImage returns nil and the
     /// fragment silently falls back to the async path.
-    func buildSyncMap(for fragments: [Fragment], itemID: AnyHashable, scale: CGFloat) -> [Int: CGImage] {
+    func buildSyncMap(for fragments: [Fragment], table: NodeTable, ordinals: [Int: Int], scale: CGFloat) -> [Int: CGImage] {
         var map: [Int: CGImage] = [:]
-        for (position, fragment) in fragments.enumerated() {
+        let itemID = table.itemID
+        for fragment in fragments {
             switch fragment.content {
             case .image(let descriptor):
                 guard let url = descriptor.url else { continue }
@@ -98,11 +99,7 @@ final class MediaDispatcher {
                 }
             case .text(let descriptor):
                 if case .body = descriptor.codeBlockRole { continue }
-                let key = BlockKey(
-                    boxedItemID: itemID,
-                    index: position,
-                    blockID: fragment.blockID
-                )
+                let key = canonicalBlockKey(boxedItemID: itemID, fragment: fragment, logicalOrdinal: ordinals[fragment.id] ?? fragment.id)
                 if let image = visibleBlockStore.bitmap(for: key) {
                     map[fragment.id] = image
                 } else {
@@ -113,11 +110,7 @@ final class MediaDispatcher {
             case .table, .mathBlock:
                 // Same resident/frozen lookup shape as non-code-body `.text` above — a table or
                 // math-block raster is one flat `CGImage`, not a per-line chunk list.
-                let key = BlockKey(
-                    boxedItemID: itemID,
-                    index: position,
-                    blockID: fragment.blockID
-                )
+                let key = canonicalBlockKey(boxedItemID: itemID, fragment: fragment, logicalOrdinal: ordinals[fragment.id] ?? fragment.id)
                 if let image = visibleBlockStore.bitmap(for: key) {
                     map[fragment.id] = image
                 } else {

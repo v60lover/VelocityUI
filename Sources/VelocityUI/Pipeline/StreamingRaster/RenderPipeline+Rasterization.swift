@@ -70,14 +70,15 @@ nonisolated func rasterizeTextArtifacts(
     fontProvider: KaTeXFontProvider? = nil
 ) -> (artifacts: [TextBitmapArtifact], codeBodyRetokenizeCount: Int) {
     let itemID = table.itemID
+    let ordinals = table.leafOrdinals()
     let codeBodyIdentity = CodeBodyRasterIdentity(
         themeGeneration: themeSnapshot.generation,
         scale: scale
     )
     var retokenizeCount = 0
-    let artifacts: [TextBitmapArtifact] = fragments.enumerated().compactMap { position, fragment in
+    let artifacts: [TextBitmapArtifact] = fragments.compactMap { fragment in
         guard case .text(let descriptor) = fragment.content else { return nil }
-        let key = BlockKey(boxedItemID: itemID, index: position, blockID: fragment.blockID)
+        let key = canonicalBlockKey(boxedItemID: itemID, fragment: fragment, logicalOrdinal: ordinals[fragment.id] ?? fragment.id)
         let isCodeBody: Bool
         if case .body = descriptor.codeBlockRole { isCodeBody = true } else { isCodeBody = false }
         let existing: (image: CGImage, size: CGSize)? = isCodeBody
@@ -118,12 +119,13 @@ nonisolated func rasterizeTableArtifacts(
     fontProvider: KaTeXFontProvider? = nil
 ) -> [TextBitmapArtifact] {
     let itemID = table.itemID
-    return fragments.enumerated().compactMap { position, fragment -> TextBitmapArtifact? in
+    let ordinals = table.leafOrdinals()
+    return fragments.compactMap { fragment -> TextBitmapArtifact? in
         guard case .table = fragment.content,
               fragment.id >= 0, fragment.id < table.nodes.count,
               case .table(let descriptor) = table.nodes[fragment.id]
         else { return nil }
-        let key = BlockKey(boxedItemID: itemID, index: position, blockID: fragment.blockID)
+        let key = canonicalBlockKey(boxedItemID: itemID, fragment: fragment, logicalOrdinal: ordinals[fragment.id] ?? fragment.id)
         // Cells tokenize inline runs the same way paragraphs do (gojy.2), so a cell's `$...$`
         // gets the same cached typeset path as a paragraph's -- matches LayoutEngine's `.table`
         // measure case, which already threads `formulaCache` into this same `ctx.measure` call.
@@ -164,12 +166,13 @@ nonisolated func rasterizeMathArtifacts(
     fontProvider: KaTeXFontProvider
 ) -> [TextBitmapArtifact] {
     let itemID = table.itemID
-    return fragments.enumerated().compactMap { position, fragment -> TextBitmapArtifact? in
+    let ordinals = table.leafOrdinals()
+    return fragments.compactMap { fragment -> TextBitmapArtifact? in
         guard case .mathBlock = fragment.content,
               fragment.id >= 0, fragment.id < table.nodes.count,
               case .mathBlock(let descriptor) = table.nodes[fragment.id]
         else { return nil }
-        let key = BlockKey(boxedItemID: itemID, index: position, blockID: fragment.blockID)
+        let key = canonicalBlockKey(boxedItemID: itemID, fragment: fragment, logicalOrdinal: ordinals[fragment.id] ?? fragment.id)
         // `fragment.frame.width` is the card's pinned container width -- the same value
         // `LayoutEngine`'s `.mathBlock` case measured against, so the literal-fallback wrap
         // width and the formula/canvas centering base both agree with what was measured.

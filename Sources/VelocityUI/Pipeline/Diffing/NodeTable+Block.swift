@@ -3,9 +3,9 @@
 import Foundation
 
 public extension NodeTable {
-    func blockRenderContract<ID: Hashable & Sendable>(at index: Int, itemID: ID, positionalIndex: Int? = nil) -> BlockRenderContract? {
+    func blockRenderContract<ID: Hashable & Sendable>(at index: Int, itemID: ID, logicalOrdinal: Int? = nil) -> BlockRenderContract? {
         guard index >= 0, index < nodes.count else { return nil }
-        let key = blockID(at: index).map { BlockKey(itemID: itemID, blockID: $0) } ?? BlockKey(itemID: itemID, index: positionalIndex ?? index)
+        let key = canonicalBlockKey(itemID: itemID, blockID: blockID(at: index), logicalOrdinal: logicalOrdinal ?? index)
         let lifecycle = blockLifecycle(at: index)
         switch nodes[index] {
         case .text(let d): return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: .measured, presentation: .text(d), geometryHash: d.layoutHash, appearanceHash: d.appearanceHash)
@@ -51,6 +51,24 @@ public extension NodeTable {
         case .text, .codeBlock, .image, .spacer, .hosting, .gif, .video, .customLayer, .table, .mathBlock: return true
         case .vstack, .hstack, .zstack: return false
         }
+    }
+
+    /// Ordinal of every leaf among the table's flattened nodes, in node-index order — the single
+    /// source `BlockKey`'s positional fallback (used when a block has no stable `BlockID`) reads
+    /// from everywhere. Never derive that fallback from a raw index into an expanded `[Fragment]`
+    /// array: `extractFragments` also materializes synthetic chrome fragments alongside a leaf
+    /// (code/text backgrounds, code headers) that are not `NodeTable` nodes, so counting them
+    /// shifts the index and makes the write and read sides disagree on identity for the same
+    /// block. See `canonicalBlockKey`.
+    internal func leafOrdinals() -> [Int: Int] {
+        var result: [Int: Int] = [:]
+        result.reserveCapacity(nodes.count)
+        var ordinal = 0
+        for i in nodes.indices where isBlockLeaf(at: i) {
+            result[i] = ordinal
+            ordinal += 1
+        }
+        return result
     }
 }
 

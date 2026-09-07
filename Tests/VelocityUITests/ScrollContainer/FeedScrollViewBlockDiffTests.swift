@@ -1196,6 +1196,85 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
         await drainFeedWork(feed)
     }
 
+    // MARK: - VelocityUI-8otc.6.2: canonical BlockKey for a message-bubble's synthetic background
+
+    struct BubbleItem: Identifiable, Sendable {
+        let id: Int
+        let text: String
+    }
+
+    /// A `.messageRole(.user)` bubble with no stable `renderID` -- the exact shape that hits
+    /// `BlockKey`'s positional fallback. `extractFragments` inserts a synthetic
+    /// `.codeBlockBackground` fragment (the rounded bubble chrome) directly ahead of the text
+    /// fragment in the expanded `[Fragment]` array it produces, so any site that keyed off that
+    /// array's raw index (instead of `NodeTable.leafOrdinals()`) would place the text raster at
+    /// index 1, not 0 -- see VelocityUI-8otc.6.2.
+    private func makeBubbleFeed() -> FeedScrollView<BubbleItem> {
+        let feed = FeedScrollView<BubbleItem>(environment: makeEnvironment(), frame: CGRect(x: 0, y: 0, width: 375, height: 812))
+        feed.cellBuilder = { item in
+            VStackNode(spacing: 4) {
+                TextNode(item.text).messageRole(.user)
+            }
+        }
+        return feed
+    }
+
+    /// Regression test for VelocityUI-8otc.6.2: the write path (`RenderPipeline+Rasterization`)
+    /// and the read path (`MediaDispatcher.buildSyncMap`, on remount) used to key a bubble's text
+    /// raster by its raw index in the expanded `[Fragment]` array (which counts the synthetic
+    /// bubble-background fragment), while `flatBlocks`/`flatBlockKeys` (the block-diff write and
+    /// the scroll-out demotion source) keyed it by its LOGICAL position among `NodeTable`'s own
+    /// nodes. Those two indices disagreed (1 vs. 0) for a bubble whose only child is its text, so
+    /// a demote-then-remount cycle looked up the raster under a key nothing had ever promoted it
+    /// to, and the bubble's text painted blank on scroll-back.
+    func testScrollingPastMessageBubble_TextSurvivesRoundTripThroughFrozenStore() async {
+        let feed = makeBubbleFeed()
+        let itemCount = 30
+        let longText = Array(0..<40).map { Self.token($0) }.joined(separator: " ")
+        feed.items = [BubbleItem(id: 0, text: longText)]
+            + (1..<itemCount).map { BubbleItem(id: $0, text: "filler \($0)") }
+        feed.layoutSubviews()
+
+        let resident = feed.renderEnvironment.visibleBlockStore
+        let frozen = feed.renderEnvironment.frozenBitmapStore
+        // The bubble's text is item 0's sole child, no renderID -- BlockKey's positional
+        // fallback, logical ordinal 0 (NodeTable.leafOrdinals()'s definition, not the expanded
+        // fragment array's).
+        let textKey = BlockKey(itemID: 0, index: 0)
+
+        // `_workingRangeMissCount == 0` only anchors "WorkingRange committed a layout" -- the
+        // text raster is written to `visibleBlockStore` by a separate, later async rasterization
+        // pass, so waiting on the miss count alone races with that write. Poll the actual
+        // resident bitmap so the happens-before anchor matches what the precondition below checks.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < deadline, resident.bitmap(for: textKey) == nil {
+            await Task.yield()
+            feed.layoutSubviews()
+        }
+
+        guard resident.bitmap(for: textKey) != nil else {
+            return XCTFail("Precondition: the bubble's text raster must be resident, keyed by logical ordinal 0, while item 0 is visible")
+        }
+
+        // Scroll far enough that item 0 falls outside keepRange -- demotes via flatBlockKeys.
+        feed.contentOffset = CGPoint(x: 0, y: 100_000)
+        feed.layoutSubviews()
+
+        XCTAssertNil(resident.bitmap(for: textKey),
+            "Leaving the keep range must demote the bubble's text raster out of VisibleBlockStore")
+        XCTAssertNotNil(frozen.bitmap(for: textKey),
+            "The bubble's text raster must survive in FrozenBitmapStore, keyed by the same logical ordinal")
+
+        // Scroll back -- remounts via buildSyncMap, which must promote/read the SAME key.
+        feed.contentOffset = CGPoint(x: 0, y: 0)
+        feed.layoutSubviews()
+
+        XCTAssertNotNil(resident.bitmap(for: textKey),
+            "Scrolling the bubble back into view must promote its text raster back under the same key -- a key mismatch here is exactly the VelocityUI-8otc.6.2 regression (bubble text paints blank)")
+
+        await drainFeedWork(feed)
+    }
+
     // MARK: - VelocityUI-8ge8.6: reused table must not collapse through the in-place fast path
 
     struct TableChatItem: Identifiable, Sendable {

@@ -152,6 +152,37 @@ final class BlockRenderContractTests: XCTestCase {
         ))
     }
 
+    /// Regression test for VelocityUI-8otc.6.2: `leafOrdinals()` must be derived from `NodeTable`'s
+    /// own nodes, never from `extractFragments`'s expanded `[Fragment]` output. A `.text` node
+    /// with `backgroundChrome` set (a chat bubble) is `extractFragments`'s canonical case for
+    /// inserting a synthetic fragment (the rounded background) ahead of the real text fragment in
+    /// the expanded array -- if `leafOrdinals()` were computed from that array instead of from
+    /// `table.nodes` directly, the lone text leaf would land at ordinal 1, not 0.
+    func testLeafOrdinals_SoleBubbleTextNode_IsOrdinalZero_NotShiftedBySyntheticBackground() {
+        let descriptor = TextDescriptor(
+            content: "hi", font: VFontDescriptor(size: 17, weight: 0), color: VColorDescriptor(red: 0, green: 0, blue: 0, alpha: 1),
+            lineLimit: nil, lineBreakMode: 0,
+            layoutHash: 1, appearanceHash: 1, codeBlockRole: nil,
+            backgroundChrome: TextBackgroundChrome(cornerRadius: 12, color: .messageBubbleBackground)
+        )
+        let table = makeTable(nodes: [.text(descriptor)])
+
+        XCTAssertEqual(table.leafOrdinals(), [0: 0])
+    }
+
+    /// A leading `.spacer` sibling is a real `NodeTable` node (unlike a bubble's synthetic
+    /// background), so it legitimately advances the following leaf's ordinal by one -- confirms
+    /// `leafOrdinals()` counts real siblings while `extractFragments`'s synthetic chrome
+    /// (VelocityUI-8otc.6.2's regression) does not.
+    func testLeafOrdinals_CountsRealSiblingLeaves_InNodeOrder() {
+        let table = makeTable(nodes: [.spacer(8), .image(ImageDescriptor(
+            url: nil, aspectRatio: nil, contentMode: VContentMode.fit.rawValue,
+            cornerRadius: 0, layoutHash: 1, appearanceHash: 1
+        ))])
+
+        XCTAssertEqual(table.leafOrdinals(), [0: 0, 1: 1])
+    }
+
     private func makeTable(nodes: [NodeKind], blockIDs: [BlockID?]? = nil) -> NodeTable {
         NodeTable(
             itemID: "item",

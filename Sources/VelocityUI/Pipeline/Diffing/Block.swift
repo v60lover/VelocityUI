@@ -65,6 +65,22 @@ public struct BlockKey: Hashable, Sendable {
     }
 }
 
+/// Canonical `BlockKey` construction, shared by every raster write/read/promote/demote/evict path
+/// (`RenderPipeline+Rasterization.swift`, `MediaDispatcher`, `FeedScrollView+Items/Scroll/Frames/Media`).
+/// `logicalOrdinal` must come from `NodeTable.leafOrdinals()` — never from a raw index into an
+/// expanded `[Fragment]` array. That array also carries synthetic chrome fragments (code/text
+/// backgrounds, code headers) `extractFragments` materializes around a leaf; counting them shifts
+/// the fallback index and makes the write and read sides disagree on identity for the same block.
+func canonicalBlockKey(boxedItemID: AnyHashable, fragment: Fragment, logicalOrdinal: Int) -> BlockKey {
+    BlockKey(boxedItemID: boxedItemID, index: logicalOrdinal, blockID: fragment.blockID)
+}
+
+/// Same contract as the `boxedItemID` overload above, for call sites that still hold the caller's
+/// real, unboxed item id.
+func canonicalBlockKey<ID: Hashable & Sendable>(itemID: ID, blockID: BlockID?, logicalOrdinal: Int) -> BlockKey {
+    blockID.map { BlockKey(itemID: itemID, blockID: $0) } ?? BlockKey(itemID: itemID, index: logicalOrdinal)
+}
+
 // MARK: - Block
 
 /// Whether a block is still growing (`.hot`) or done (`.sealed`).

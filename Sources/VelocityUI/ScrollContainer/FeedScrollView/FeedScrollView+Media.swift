@@ -26,22 +26,26 @@ extension FeedScrollView {
     }
 
     /// Forwards to the owned `mediaDispatcher` with this feed's live display scale — see
-    /// `MediaDispatcher.buildSyncMap`.
-    func buildSyncMap(for fragments: [Fragment], itemID: AnyHashable) -> [Int: CGImage] {
+    /// `MediaDispatcher.buildSyncMap`. `ordinals` is `table.leafOrdinals()` — computed once by the
+    /// caller and shared with a sibling `buildCodeBodyContentMap` call over the same table, instead
+    /// of each call recomputing its own copy on the scroll path.
+    func buildSyncMap(for fragments: [Fragment], table: NodeTable, ordinals: [Int: Int]) -> [Int: CGImage] {
         mediaDispatcher.buildSyncMap(
             for: fragments,
-            itemID: itemID,
+            table: table,
+            ordinals: ordinals,
             scale: max(1, traitCollection.displayScale)
         )
     }
 
-    func buildCodeBodyContentMap(for fragments: [Fragment], itemID: AnyHashable) -> [Int: CodeBodyLayerContent] {
+    func buildCodeBodyContentMap(for fragments: [Fragment], table: NodeTable, ordinals: [Int: Int]) -> [Int: CodeBodyLayerContent] {
         var map: [Int: CodeBodyLayerContent] = [:]
-        for (position, fragment) in fragments.enumerated() {
+        let itemID = table.itemID
+        for fragment in fragments {
             guard case .text(let descriptor) = fragment.content,
                   case .body = descriptor.codeBlockRole
             else { continue }
-            let key = BlockKey(boxedItemID: itemID, index: position, blockID: fragment.blockID)
+            let key = canonicalBlockKey(boxedItemID: itemID, fragment: fragment, logicalOrdinal: ordinals[fragment.id] ?? fragment.id)
             if let content = environment.hotCodeStreamStore.content(for: key) {
                 map[fragment.id] = content
                 continue

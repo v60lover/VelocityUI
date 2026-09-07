@@ -348,7 +348,7 @@ extension FeedScrollView {
         // Merge image cache hits with the block-diff's freshly-resolved text bitmaps — fragment
         // ids never collide across content kinds within one item's NodeTable, so a plain
         // overwrite-merge is safe.
-        var syncMap = buildSyncMap(for: result.fragments, itemID: inputs.newTable.itemID)
+        var syncMap = buildSyncMap(for: result.fragments, table: inputs.newTable, ordinals: inputs.newTable.leafOrdinals())
         for (id, bitmap) in result.textBitmaps { syncMap[id] = bitmap }
         let codeMap = result.codeBodyContents
         let entering = cell.updateBlockViewport(
@@ -957,11 +957,12 @@ extension FeedScrollView {
         // nodes.count - 1, catching nesting without walking parentIndices for every node.
         guard !childIndices.isEmpty, childIndices.count == table.nodes.count - 1 else { return nil }
 
+        let ordinals = table.leafOrdinals()
         var blocks: [Block] = []
         blocks.reserveCapacity(childIndices.count)
-        for (position, nodeIndex) in childIndices.enumerated() {
+        for nodeIndex in childIndices {
             guard let contract = table.blockRenderContract(
-                at: nodeIndex, itemID: itemID, positionalIndex: position
+                at: nodeIndex, itemID: itemID, logicalOrdinal: ordinals[nodeIndex] ?? nodeIndex
             ) else { return nil }
             let frame = CGRect(x: 0, y: 0, width: width, height: 0)
             blocks.append(Block(contract: contract, id: nodeIndex, frame: frame))
@@ -989,10 +990,10 @@ extension FeedScrollView {
         // Validate the whole shape is flat first, without touching `keys` — a nested container
         // found partway through must bail without partially mutating the caller's accumulator.
         for nodeIndex in childIndices where !table.isBlockLeaf(at: nodeIndex) { return false }
-        for (position, nodeIndex) in childIndices.enumerated() {
+        let ordinals = table.leafOrdinals()
+        for nodeIndex in childIndices {
             let ownerBlockID = table.blockID(at: nodeIndex)
-            let key = ownerBlockID.map { BlockKey(itemID: itemID, blockID: $0) }
-                ?? BlockKey(itemID: itemID, index: position)
+            let key = canonicalBlockKey(itemID: itemID, blockID: ownerBlockID, logicalOrdinal: ordinals[nodeIndex] ?? nodeIndex)
             keys.insert(key)
             if case .codeBlock = table.nodes[nodeIndex] {
                 keys.insert(BlockKey(itemID: itemID, blockID: codePartID(owner: ownerBlockID, nodeIndex: nodeIndex, part: .codeHeader)))
@@ -1075,7 +1076,7 @@ extension FeedScrollView {
         applyContentHeightDelta(delta)
         cell.layer.frame = resolvedFrames[lastIdx]
 
-        var syncMap = buildSyncMap(for: result.fragments, itemID: newTable.itemID)
+        var syncMap = buildSyncMap(for: result.fragments, table: newTable, ordinals: newTable.leafOrdinals())
         for (id, bitmap) in result.textBitmaps { syncMap[id] = bitmap }
         let codeMap = result.codeBodyContents
         let entering = cell.updateBlockViewport(

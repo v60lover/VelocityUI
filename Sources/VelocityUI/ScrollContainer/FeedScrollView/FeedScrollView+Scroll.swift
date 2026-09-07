@@ -91,13 +91,14 @@ extension FeedScrollView {
                     layer.addSublayer(keptCell.layer)
                 }
                 if let entry = workingRange.entry(at: index) {
-                    let syncMap = buildSyncMap(for: entry.fragments, itemID: tables[index].itemID)
+                    let ordinals = tables[index].leafOrdinals()
+                    let syncMap = buildSyncMap(for: entry.fragments, table: tables[index], ordinals: ordinals)
                     // A code body scrolling into view inside an already-mounted (tall, streaming)
                     // cell enters here, not the fresh-mount branch below -- so it needs the same
                     // codeBodyContent map. Without it the body mounts with an empty chunk list and
                     // paints nothing (background + header still show), the "scroll to a sealed code
                     // block, see only the card and its header" bug.
-                    let codeMap = buildCodeBodyContentMap(for: entry.fragments, itemID: tables[index].itemID)
+                    let codeMap = buildCodeBodyContentMap(for: entry.fragments, table: tables[index], ordinals: ordinals)
                     let entering = keptCell.updateBlockViewport(
                         viewportInCell: blockViewport(for: keptCell.layer.frame),
                         synchronousContent: syncMap, codeBodyContent: codeMap
@@ -119,8 +120,9 @@ extension FeedScrollView {
 
             if let entry = workingRange.entry(at: index) {
                 cell.layer.frame = frame
-                let syncMap = buildSyncMap(for: entry.fragments, itemID: table.itemID)
-                let codeMap = buildCodeBodyContentMap(for: entry.fragments, itemID: table.itemID)
+                let ordinals = table.leafOrdinals()
+                let syncMap = buildSyncMap(for: entry.fragments, table: table, ordinals: ordinals)
+                let codeMap = buildCodeBodyContentMap(for: entry.fragments, table: table, ordinals: ordinals)
                 let entering = cell.updateBlockViewport(
                     fragments: entry.fragments,
                     viewportInCell: blockViewport(for: frame),
@@ -152,8 +154,9 @@ extension FeedScrollView {
                 }
 
                 cell.layer.frame = mountFrame
-                let syncMap = buildSyncMap(for: entry.fragments, itemID: table.itemID)
-                let codeMap = buildCodeBodyContentMap(for: entry.fragments, itemID: table.itemID)
+                let ordinals = table.leafOrdinals()
+                let syncMap = buildSyncMap(for: entry.fragments, table: table, ordinals: ordinals)
+                let codeMap = buildCodeBodyContentMap(for: entry.fragments, table: table, ordinals: ordinals)
                 let entering = cell.updateBlockViewport(
                     fragments: entry.fragments,
                     viewportInCell: blockViewport(for: mountFrame),

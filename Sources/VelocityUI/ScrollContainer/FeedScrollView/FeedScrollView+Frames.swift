@@ -109,8 +109,9 @@ extension FeedScrollView {
             // Check visibleCells first so the set is not mutated when no cell is present.
             if let cell = visibleCells[index], _pendingFragmentIndices.remove(index) != nil {
                 cell.layer.frame = resolvedFrames[index]
-                let syncMap = buildSyncMap(for: entry.fragments, itemID: tables[index].itemID)
-                let codeMap = buildCodeBodyContentMap(for: entry.fragments, itemID: tables[index].itemID)
+                let ordinals = tables[index].leafOrdinals()
+                let syncMap = buildSyncMap(for: entry.fragments, table: tables[index], ordinals: ordinals)
+                let codeMap = buildCodeBodyContentMap(for: entry.fragments, table: tables[index], ordinals: ordinals)
                 let entering = cell.updateBlockViewport(
                     fragments: entry.fragments,
                     viewportInCell: blockViewport(for: cell.layer.frame),
