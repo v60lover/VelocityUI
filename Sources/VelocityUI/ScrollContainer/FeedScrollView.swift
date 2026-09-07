@@ -127,6 +127,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// scroll back within reach of it. See `FeedScrollView+TailFollow.swift`.
     var _isFollowingTail = true
 
+    /// `.llmChat` tail-follow: per-feed spring state for the synchronous viewport follow path.
+    var _followAnimator = FollowAnimator()
+
     /// `contentOffset.y` observed on the previous `layoutSubviews` pass. Compared against
     /// the current value each pass to derive `scrollDirection` from a real scroll metric.
     private var lastScrollOffsetY: CGFloat = 0

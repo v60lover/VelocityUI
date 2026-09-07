@@ -3,6 +3,7 @@
 #if canImport(UIKit)
 import UIKit
 import CoreGraphics
+import QuartzCore
 
 /// How a `FeedScrollView` behaves at the tail of its content. `.off` (default) is unchanged
 /// top-down scrolling. `.llmChat` adds two behaviors for an LLM-chat transcript, on top of the
@@ -16,6 +17,59 @@ import CoreGraphics
 public enum TailFollowMode: Sendable, Equatable {
     case off
     case llmChat
+}
+
+struct FollowAnimator {
+    private static let angularFrequency: CGFloat = 12
+    private static let epsilon: CGFloat = 0.5
+    private static let maximumFrameInterval: CFTimeInterval = 1 / 30
+
+    private(set) var velocity: CGFloat = 0
+    private var lastTick: CFTimeInterval = 0
+
+    mutating func step(
+        current: CGFloat,
+        target: CGFloat,
+        now: CFTimeInterval
+    ) -> (offset: CGFloat, settled: Bool) {
+        let boundedTarget = max(0, target)
+        let boundedCurrent = min(max(0, current), boundedTarget)
+        let elapsed = lastTick == 0
+            ? Self.maximumFrameInterval
+            : min(max(0, now - lastTick), Self.maximumFrameInterval)
+        lastTick = now
+
+        guard abs(boundedTarget - boundedCurrent) > Self.epsilon else {
+            velocity = 0
+            return (boundedTarget, true)
+        }
+
+        let displacement = boundedCurrent - boundedTarget
+        let frequency = Self.angularFrequency
+        let decay = exp(-frequency * elapsed)
+        let velocityTerm = velocity + frequency * displacement
+        let nextDisplacement = (displacement + velocityTerm * elapsed) * decay
+        let nextVelocity = (velocity - frequency * velocityTerm * elapsed) * decay
+        let nextOffset = boundedTarget + nextDisplacement
+
+        guard nextOffset > 0, nextOffset < boundedTarget else {
+            velocity = 0
+            return (min(max(0, nextOffset), boundedTarget), true)
+        }
+
+        if abs(boundedTarget - nextOffset) <= Self.epsilon {
+            velocity = 0
+            return (boundedTarget, true)
+        }
+
+        velocity = nextVelocity
+        return (nextOffset, false)
+    }
+
+    mutating func reset() {
+        velocity = 0
+        lastTick = 0
+    }
 }
 
 extension FeedScrollView {
@@ -32,6 +86,7 @@ extension FeedScrollView {
         guard tailFollowMode != .off else { return }
         _tailSpacerPinIndex = items.isEmpty ? nil : items.count - 1
         _isFollowingTail = true
+        _followAnimator.reset()
         setNeedsLayout()
     }
 
@@ -53,15 +108,16 @@ extension FeedScrollView {
     /// floating-point settle so a rubber-band-perfect landing doesn't read as "scrolled away".
     private var tailFollowReengageThreshold: CGFloat { 24 }
 
-    /// Forces the viewport to the content bottom when tail-follow is engaged and nothing
+    /// Advances the viewport toward the content bottom when tail-follow is engaged and nothing
     /// user-driven is in flight. Called from `layoutSubviews`, after `refineKnownFrames` commits
     /// this pass's height growth and before `updateVisibleCells` reads `contentOffset.y` — so the
     /// same pass mounts cells at the followed position instead of lagging a frame behind.
-    func applyTailFollowIfNeeded() {
+    func applyTailFollowIfNeeded(now: CFTimeInterval = CACurrentMediaTime()) {
         guard tailFollowMode != .off, _isFollowingTail, isScrollAtRest else { return }
         let maxOffset = max(0, contentSize.height - bounds.height)
-        guard contentOffset.y != maxOffset else { return }
-        contentOffset.y = maxOffset
+        let result = _followAnimator.step(current: contentOffset.y, target: maxOffset, now: now)
+        contentOffset.y = result.offset
+        if !result.settled { setNeedsLayout() }
     }
 
     /// The `scrollViewDidScroll(_:)` delegate callback itself lives on `FeedScrollView` directly
@@ -73,6 +129,7 @@ extension FeedScrollView {
     /// every followed frame would immediately read itself as "user scrolled away".
     func updateTailFollowFromUserScroll() {
         guard tailFollowMode != .off, isUserScrollMotion else { return }
+        if isTracking { _followAnimator.reset() }
         let maxOffset = max(0, contentSize.height - bounds.height)
         let distanceFromBottom = maxOffset - contentOffset.y
         _isFollowingTail = distanceFromBottom <= tailFollowReengageThreshold

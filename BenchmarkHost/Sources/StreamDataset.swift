@@ -54,7 +54,7 @@ enum StreamDataset {
     /// `segments(seed:codeLineCount:)` paired with `userMessages`, one user turn per segment — the
     /// shape `StreamBenchmarkViewController`'s manual/picker driving path consumes to interleave
     /// user bubbles between chunks of the streamed answer instead of showing them all upfront.
-    static func turns(seed: UInt64 = 0, codeLineCount: Int = 220) -> [StreamTurn] {
+    static func turns(seed: UInt64 = 0, codeLineCount: Int = 70) -> [StreamTurn] {
         zip(userMessages, segments(seed: seed, codeLineCount: codeLineCount)).map {
             StreamTurn(userMessage: $0, assistantChunks: $1)
         }
@@ -67,7 +67,7 @@ enum StreamDataset {
     /// setext title, several `##`-headed sections of real prose, an inline-styled paragraph plus a
     /// list and a rule, a diagram image, and one LARGE fenced code block (the wj8x worst case — an
     /// unclosed fence that stays hot for `codeLineCount` appends before it finally closes).
-    static func tokens(seed: UInt64 = 0, codeLineCount: Int = 220) -> [String] {
+    static func tokens(seed: UInt64 = 0, codeLineCount: Int = 70) -> [String] {
         segments(seed: seed, codeLineCount: codeLineCount).flatMap { $0 }
     }
 

@@ -61,6 +61,92 @@ final class FeedScrollViewTailFollowTests: XCTestCase {
         }
     }
 
+    private func settleTailFollow(_ feed: FeedScrollView<ChatItem>, frameCount: Int = 180) {
+        feed._followAnimator.reset()
+        for frame in 0...frameCount {
+            feed.applyTailFollowIfNeeded(now: CFTimeInterval(frame) / 120)
+        }
+    }
+
+    // MARK: - FollowAnimator
+
+    func testFollowAnimator_SettlesMonotonicallyWithoutOvershoot() {
+        var animator = FollowAnimator()
+        var previous: CGFloat = 0
+        var result = animator.step(current: 0, target: 500, now: 0)
+        XCTAssertLessThan(result.offset, 250, "the first spring step must not jump most of the distance")
+
+        for frame in 1...240 {
+            result = animator.step(current: result.offset, target: 500, now: CFTimeInterval(frame) / 120)
+            XCTAssertGreaterThanOrEqual(result.offset, previous)
+            XCTAssertLessThanOrEqual(result.offset, 500)
+            previous = result.offset
+            if result.settled { break }
+        }
+
+        XCTAssertTrue(result.settled)
+        XCTAssertLessThanOrEqual(abs(result.offset - 500), 0.5)
+    }
+
+    func testFollowAnimator_60HzAnd120HzMatchAtEqualWallTime() {
+        var at60 = FollowAnimator()
+        var at120 = FollowAnimator()
+        var offset60: CGFloat = 0
+        var offset120: CGFloat = 0
+
+        for frame in 0...60 {
+            offset60 = at60.step(current: offset60, target: 500, now: CFTimeInterval(frame) / 60).offset
+        }
+        for frame in 0...120 {
+            offset120 = at120.step(current: offset120, target: 500, now: CFTimeInterval(frame) / 120).offset
+        }
+
+        XCTAssertEqual(offset60, offset120, accuracy: 0.5)
+    }
+
+    func testFollowAnimator_ClampsElapsedTimeAndLatchesAtEpsilon() {
+        var clamped = FollowAnimator()
+        var reference = FollowAnimator()
+        let firstClamped = clamped.step(current: 0, target: 500, now: 0)
+        let firstReference = reference.step(current: 0, target: 500, now: 1.0 / 30)
+        XCTAssertEqual(firstClamped.offset, firstReference.offset, accuracy: 0.001)
+
+        let secondClamped = clamped.step(current: firstClamped.offset, target: 500, now: 10)
+        let secondReference = reference.step(current: firstReference.offset, target: 500, now: 2.0 / 30)
+        XCTAssertEqual(secondClamped.offset, secondReference.offset, accuracy: 0.001)
+
+        var latch = FollowAnimator()
+        let result = latch.step(current: 499.8, target: 500, now: 0)
+        XCTAssertTrue(result.settled)
+        XCTAssertEqual(result.offset, 500, accuracy: 0.001)
+        XCTAssertEqual(latch.velocity, 0, accuracy: 0.001)
+    }
+
+    func testFollowAnimator_TargetShrinkStaysWithinNewBounds() {
+        var animator = FollowAnimator()
+        var offset: CGFloat = 0
+        for frame in 0...30 {
+            offset = animator.step(current: offset, target: 500, now: CFTimeInterval(frame) / 60).offset
+        }
+        XCTAssertGreaterThan(offset, 100, "Precondition: the old position must exceed the shrunken target")
+
+        let result = animator.step(current: offset, target: 100, now: 31.0 / 60)
+        XCTAssertGreaterThanOrEqual(result.offset, 0)
+        XCTAssertLessThanOrEqual(result.offset, 100)
+    }
+
+    func testFollowAnimator_ResetClearsMomentum() {
+        var reset = FollowAnimator()
+        _ = reset.step(current: 0, target: 500, now: 0)
+        reset.reset()
+
+        var fresh = FollowAnimator()
+        let resetResult = reset.step(current: 0, target: 500, now: 100)
+        let freshResult = fresh.step(current: 0, target: 500, now: 0)
+        XCTAssertEqual(reset.velocity, fresh.velocity, accuracy: 0.001)
+        XCTAssertEqual(resetResult.offset, freshResult.offset, accuracy: 0.001)
+    }
+
     // MARK: - 4. Top-down list — no inverted/bottom-anchored layout
 
     func testLLMChatMode_UsesDefaultTopDownVerticalLayoutProvider() {
@@ -85,6 +171,7 @@ final class FeedScrollViewTailFollowTests: XCTestCase {
         feed.pinTailSpacer()
         feed.layoutSubviews()
         await waitForWorkingRangeCommit(feed, index: 2)
+        settleTailFollow(feed)
 
         let newTurnFrame = try XCTUnwrap(feed._debugResolvedFrame(at: 2),
             "Precondition: the new turn must have a resolved frame")
@@ -152,6 +239,7 @@ final class FeedScrollViewTailFollowTests: XCTestCase {
         feed.items = [ChatItem(id: 0, blocks: ["seed", longText])]
         feed.layoutSubviews()
         await waitForWorkingRangeCommit(feed, index: 0)
+        settleTailFollow(feed)
 
         XCTAssertEqual(feed.contentOffset.y, max(0, feed.contentSize.height - feed.bounds.height), accuracy: 0.5,
             "while following, the viewport must keep tracking the bottom as content streams in")
@@ -186,6 +274,7 @@ final class FeedScrollViewTailFollowTests: XCTestCase {
         feed.items = [ChatItem(id: 0, blocks: ["seed", longText, "more streamed text"])]
         feed.layoutSubviews()
         await waitForWorkingRangeCommit(feed, index: 0)
+        settleTailFollow(feed)
 
         XCTAssertEqual(feed.contentOffset.y, offsetAfterDisengage, accuracy: 0.5,
             "disengaged follow must let the user keep reading history uninterrupted")
@@ -225,6 +314,7 @@ final class FeedScrollViewTailFollowTests: XCTestCase {
         feed.items = [ChatItem(id: 0, blocks: ["seed", longText, "more streamed text"])]
         feed.layoutSubviews()
         await waitForWorkingRangeCommit(feed, index: 0)
+        settleTailFollow(feed)
 
         XCTAssertEqual(feed.contentOffset.y, max(0, feed.contentSize.height - feed.bounds.height), accuracy: 0.5,
             "once re-engaged, growth must resume tracking the bottom")
