@@ -278,7 +278,10 @@ private struct StreamFeedView: View {
             let nodes: [any RenderNode]
             switch message.content {
             case .user(let text):
-                nodes = [TextNode(text).messageRole(.user)]
+                nodes = [
+                    TextNode(text)
+                        .messageRole(.user)
+                ]
             case .assistant:
                 let controller = store.controller(for: message.id)
                 nodes = StreamDataset.interleavedRenderNodes(
@@ -290,7 +293,7 @@ private struct StreamFeedView: View {
             return StreamBenchmarkCell(nodes: nodes)
         }
         .prefetchWindow(ahead: 10, behind: 3)
-//        .tailFollow(.llmChat, pinTrigger: store.pinToken)
+        .tailFollow(.llmChat, pinTrigger: store.pinToken)
         .padding(.horizontal, 8)
     }
 }

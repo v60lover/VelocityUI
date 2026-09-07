@@ -73,6 +73,12 @@ final class FeedScrollViewTestHooks {
     /// channel (VelocityUI-8otc.6.3). Stays at 1 across repeated layout passes while a repair is
     /// in flight — the coalescing invariant under test.
     var repairTaskSpawnCount = 0
+
+    /// Counts calls into `pinTailSpacer()`. `AsyncFeed.updateUIView`'s once-per-`pinTrigger`-
+    /// change contract (VelocityUI-8otc.6.5) is verified against this counter rather than
+    /// `_debugTailSpacerPinIndex`/`_debugIsFollowingTail`, since those record the pinned state,
+    /// not how many times pinning was invoked.
+    var pinTailSpacerCallCount = 0
 }
 
 #if canImport(XCTest)
@@ -219,6 +225,9 @@ extension FeedScrollView {
     /// Counts Task spawns from `requestRasterRepairIfNeeded()`. See
     /// `FeedScrollViewTestHooks.repairTaskSpawnCount`.
     var _repairTaskSpawnCount: Int { _testHooks.repairTaskSpawnCount }
+
+    /// Counts calls into `pinTailSpacer()`. See `FeedScrollViewTestHooks.pinTailSpacerCallCount`.
+    var _pinTailSpacerCallCount: Int { _testHooks.pinTailSpacerCallCount }
 }
 #endif
 #endif

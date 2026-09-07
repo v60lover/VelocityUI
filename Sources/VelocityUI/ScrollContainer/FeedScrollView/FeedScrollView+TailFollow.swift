@@ -28,6 +28,7 @@ extension FeedScrollView {
     /// next layout pass scrolls there. No-op when `tailFollowMode == .off`.
     @MainActor
     public func pinTailSpacer() {
+        _testHooks.pinTailSpacerCallCount += 1
         guard tailFollowMode != .off else { return }
         _tailSpacerPinIndex = items.isEmpty ? nil : items.count - 1
         _isFollowingTail = true

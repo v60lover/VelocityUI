@@ -18,6 +18,13 @@ extension AsyncFeed {
     func _testItemsDiffer(uiView: FeedScrollView<Item>) -> Bool {
         itemsDiffer(uiView.items, items, on: uiView)
     }
+
+    /// Test-only: exercises the same coordinator-refresh + pin-trigger-diff + items-diff path as
+    /// `updateUIView(_:context:)` without a SwiftUI `Context`. `animate` mirrors what
+    /// `shouldAnimate(context:)` would have returned.
+    func _testUpdateUIView(uiView: FeedScrollView<Item>, coordinator: Coordinator, animate: Bool = false) {
+        performUpdate(uiView: uiView, coordinator: coordinator, animate: animate)
+    }
 }
 #endif
 #endif

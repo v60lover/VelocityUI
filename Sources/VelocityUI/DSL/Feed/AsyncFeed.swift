@@ -26,6 +26,8 @@ public struct AsyncFeed<
     private var reachEndThreshold: Int = 3
     private var onTap: (@MainActor (Item, CGRect) -> Void)? = nil
     private var onReachEnd: (@MainActor () async -> Void)? = nil
+    private var tailFollowMode: TailFollowMode = .off
+    private var pinTrigger: Int = 0
 
     // MARK: - Init
 
@@ -97,6 +99,18 @@ public struct AsyncFeed<
         return copy
     }
 
+    /// Enables `FeedScrollView`'s reserved-height tail spacer + scroll-to-bottom follow (see
+    /// `TailFollowMode`), and threads a pin trigger through to `pinTailSpacer()`. Bump
+    /// `pinTrigger` once per new turn appended to `items` (e.g. an incrementing counter) — the
+    /// Coordinator calls `pinTailSpacer()` exactly once per value change, never on an unrelated
+    /// `updateUIView` pass. `.off`/`0` (default, no modifier) is source-compatible.
+    public func tailFollow(_ mode: TailFollowMode, pinTrigger: Int) -> Self {
+        var copy = self
+        copy.tailFollowMode = mode
+        copy.pinTrigger = pinTrigger
+        return copy
+    }
+
     // MARK: - Coordinator
 
     /// Internal trampoline target managed by SwiftUI. Holds the latest closure values from the parent
@@ -107,6 +121,11 @@ public struct AsyncFeed<
         var cellBuilder: (@MainActor (Item) -> Cell)?
         var onTap: (@MainActor (Item, CGRect) -> Void)?
         var onReachEnd: (@MainActor () async -> Void)?
+
+        /// Last `pinTrigger` value seen from the parent's `.tailFollow(_:pinTrigger:)` modifier.
+        /// Seeded from the value present at mount time; `updateUIView` calls `pinTailSpacer()`
+        /// only when a later value differs from this one, then updates it.
+        var lastPinTrigger: Int = 0
 
         func handleTap(_ item: Item, _ frame: CGRect) { onTap?(item, frame) }
         func handleReachEnd() async { await onReachEnd?() }
@@ -140,12 +159,14 @@ public struct AsyncFeed<
         coordinator.cellBuilder = cellBuilder
         coordinator.onTap = onTap
         coordinator.onReachEnd = onReachEnd
+        coordinator.lastPinTrigger = pinTrigger
 
         let view = FeedScrollView<Item>(
             environment: environment,
             warmWindow: warmWindow,
             reachEndThreshold: reachEndThreshold,
-            layoutProvider: layout.provider
+            layoutProvider: layout.provider,
+            tailFollowMode: tailFollowMode
         )
 
         // Route through coordinator rather than capturing self (a value type) in view-stored
@@ -158,8 +179,14 @@ public struct AsyncFeed<
     }
 
     public func updateUIView(_ uiView: FeedScrollView<Item>, context: Context) {
-        let coordinator = context.coordinator
+        performUpdate(uiView: uiView, coordinator: context.coordinator, animate: shouldAnimate(context: context))
+    }
 
+    /// Shared body of `updateUIView(_:context:)`, factored out so it can be exercised without a
+    /// SwiftUI `Context` (no public initializer, can't be constructed outside SwiftUI's runtime).
+    /// `internal`, not `private`: `_testUpdateUIView(uiView:coordinator:)` in
+    /// `AsyncFeed+TestHooks.swift` calls this.
+    func performUpdate(uiView: FeedScrollView<Item>, coordinator: Coordinator, animate: Bool) {
         // Always refresh Coordinator slots — they capture current SwiftUI state.
         coordinator.cellBuilder = cellBuilder
         coordinator.onTap = onTap
@@ -171,15 +198,27 @@ public struct AsyncFeed<
                "AsyncFeed.prefetchWindow/.prefetchScreens is init-time only — mutating it requires a .id() rebuild.")
         #endif
 
-        guard itemsDiffer(uiView.items, items, on: uiView) else { return }
+        // Decide whether to pin now, but pin AFTER items are assigned below: pinTailSpacer()
+        // reads `uiView.items.count - 1`, so it must see the new array or the pin lands on the
+        // previous last item (off by the number of turns appended). Detected independently of the
+        // items-diff guard: a caller could bump pinTrigger on a pass where items already match
+        // (e.g. re-render after items were set moments earlier), and the once-per-change contract
+        // must still hold — in that case uiView.items is already current, so the count is right.
+        let shouldPin = pinTrigger != coordinator.lastPinTrigger
+        if shouldPin { coordinator.lastPinTrigger = pinTrigger }
 
-        CATransaction.begin()
-        if !shouldAnimate(context: context) {
-            CATransaction.setDisableActions(true)
+        if itemsDiffer(uiView.items, items, on: uiView) {
+            CATransaction.begin()
+            if !animate {
+                CATransaction.setDisableActions(true)
+            }
+            uiView.items = items
+            CATransaction.commit()
         }
-        defer { CATransaction.commit() }
 
-        uiView.items = items
+        // uiView.items now reflects the new array (diff branch) or already matched it (no-diff
+        // branch) — either way its count is current, so the pin lands on the freshly sent turn.
+        if shouldPin { uiView.pinTailSpacer() }
     }
 
     public static func dismantleUIView(_ uiView: FeedScrollView<Item>, coordinator: Coordinator) {

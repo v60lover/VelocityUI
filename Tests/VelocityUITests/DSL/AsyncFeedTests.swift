@@ -150,5 +150,83 @@ final class AsyncFeedTests: XCTestCase {
             XCTAssertTrue(fired, "view #\(i)'s trampoline must route through the shared coordinator instance")
         }
     }
+
+    // MARK: - 4. tailFollow modifier surface (VelocityUI-8otc.6.5)
+
+    /// No `.tailFollow` modifier applied — `FeedScrollView.tailFollowMode` must stay `.off`, the
+    /// source-compatible default asserted by the bead's acceptance criteria.
+    func testTailFollow_noModifier_defaultsToOff() {
+        let feed = makeFeed()
+        let coordinator = feed.makeCoordinator()
+        let view = feed._testMakeUIView(coordinator: coordinator)
+
+        XCTAssertEqual(view.tailFollowMode, .off)
+    }
+
+    /// `.tailFollow(.llmChat, pinTrigger:)` must thread `mode` all the way into the
+    /// `FeedScrollView` init argument `AsyncFeed.buildUIView` passes through.
+    func testTailFollow_llmChatModifier_setsFeedScrollViewTailFollowMode() {
+        let feed = makeFeed().tailFollow(.llmChat, pinTrigger: 0)
+        let coordinator = feed.makeCoordinator()
+        let view = feed._testMakeUIView(coordinator: coordinator)
+
+        XCTAssertEqual(view.tailFollowMode, .llmChat)
+    }
+
+    /// A `pinTrigger` value change across two `updateUIView` passes must call `pinTailSpacer()`
+    /// exactly once — the once-per-user-turn contract in the bead's acceptance criteria. Uses
+    /// `_testUpdateUIView`, which runs the same coordinator-refresh + pin-trigger-diff body as
+    /// the real `updateUIView(_:context:)`.
+    func testTailFollow_pinTriggerChange_callsPinTailSpacerExactlyOnce() {
+        let seed = makeFeed().tailFollow(.llmChat, pinTrigger: 0)
+        let coordinator = seed.makeCoordinator()
+        let view = seed._testMakeUIView(coordinator: coordinator)
+
+        XCTAssertEqual(view._pinTailSpacerCallCount, 0, "no pin yet at mount time")
+
+        let updated = makeFeed().tailFollow(.llmChat, pinTrigger: 1)
+        updated._testUpdateUIView(uiView: view, coordinator: coordinator)
+
+        XCTAssertEqual(view._pinTailSpacerCallCount, 1,
+            "pinTrigger changed from 0 to 1 — pinTailSpacer() must fire exactly once")
+    }
+
+    /// A repeated `updateUIView` pass with the SAME `pinTrigger` value must NOT call
+    /// `pinTailSpacer()` again — otherwise every unrelated re-render (e.g. a streaming token
+    /// appended to the active assistant turn) would re-pin and fight the user's own scroll.
+    func testTailFollow_unchangedPinTrigger_doesNotCallPinTailSpacerAgain() {
+        let seed = makeFeed().tailFollow(.llmChat, pinTrigger: 1)
+        let coordinator = seed.makeCoordinator()
+        let view = seed._testMakeUIView(coordinator: coordinator)
+
+        let firstUpdate = makeFeed().tailFollow(.llmChat, pinTrigger: 1)
+        firstUpdate._testUpdateUIView(uiView: view, coordinator: coordinator)
+        XCTAssertEqual(view._pinTailSpacerCallCount, 0, "trigger unchanged since mount — no pin yet")
+
+        let secondUpdate = makeFeed().tailFollow(.llmChat, pinTrigger: 1)
+        secondUpdate._testUpdateUIView(uiView: view, coordinator: coordinator)
+
+        XCTAssertEqual(view._pinTailSpacerCallCount, 0,
+            "pinTrigger unchanged across repeated updateUIView passes — must not call pinTailSpacer()")
+    }
+
+    /// The pin must land on the turn the user just sent, not the previous last item. `pinTailSpacer()`
+    /// reads `items.count - 1`, so it has to run AFTER `updateUIView` assigns the grown array —
+    /// otherwise the pin lands on the old last item (off by the number of turns appended) and the
+    /// previous assistant answer sticks to the top instead of clearing for the new message.
+    func testTailFollow_pinTriggerChangeWithAppendedItems_pinsNewLastIndex() {
+        let seed = makeFeed(items: [FeedTestItem(id: 0), FeedTestItem(id: 1)])
+            .tailFollow(.llmChat, pinTrigger: 0)
+        let coordinator = seed.makeCoordinator()
+        let view = seed._testMakeUIView(coordinator: coordinator)
+
+        // User sends a new turn: items grow from 2 to 3, pinTrigger bumps in the same update.
+        let updated = makeFeed(items: [FeedTestItem(id: 0), FeedTestItem(id: 1), FeedTestItem(id: 2)])
+            .tailFollow(.llmChat, pinTrigger: 1)
+        updated._testUpdateUIView(uiView: view, coordinator: coordinator)
+
+        XCTAssertEqual(view._debugTailSpacerPinIndex, 2,
+            "pin must land on the freshly appended turn (index 2), not the previous last item (index 1)")
+    }
 }
 #endif
