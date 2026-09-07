@@ -34,70 +34,111 @@ enum StreamDataset {
     // picsum.photos has been down (503s) — pulled straight from Unsplash's CDN instead.
     static let imageURL = URL(string: "https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=800&h=450&fit=crop&q=80")!
 
+    /// The user turns spliced in **between** segments of the streamed assistant answer
+    /// (`.messageRole(.user)`, one bubble each) — turn `n` appears once the assistant finishes
+    /// streaming segment `n` of `segments(seed:codeLineCount:)`/`turns(seed:codeLineCount:)`, not
+    /// before the stream starts. `userMessages.count` must equal `segments(...).count`.
+    static let userMessages: [String] = [
+        "quick one — what's the cleanest way to build an LRU cache in Swift?",
+        "assume no external deps, just the standard library",
+        "and touch on when you'd reach for something else instead",
+    ]
+
+    /// One assistant turn: the user message that precedes it and the chunk list a `StreamDriver`
+    /// feeds into that turn's own `IncrementalMarkdownParser.append(_:)`, one chunk at a time.
+    struct StreamTurn: Sendable {
+        let userMessage: String
+        let assistantChunks: [String]
+    }
+
+    /// `segments(seed:codeLineCount:)` paired with `userMessages`, one user turn per segment — the
+    /// shape `StreamBenchmarkViewController`'s manual/picker driving path consumes to interleave
+    /// user bubbles between chunks of the streamed answer instead of showing them all upfront.
+    static func turns(seed: UInt64 = 0, codeLineCount: Int = 220) -> [StreamTurn] {
+        zip(userMessages, segments(seed: seed, codeLineCount: codeLineCount)).map {
+            StreamTurn(userMessage: $0, assistantChunks: $1)
+        }
+    }
+
     /// Ordered append chunks a `StreamDriver` feeds into `IncrementalMarkdownParser.append(_:)`
-    /// one at a time. Reads like an actual LLM chat answer to a real question ("how would you
-    /// implement an LRU cache in Swift, and when would you reach for something else instead"),
-    /// not a word-salad stress load: a setext title, several `##`-headed sections of real prose,
-    /// an inline-styled paragraph plus a list and a rule, a diagram image, and one LARGE fenced
-    /// code block (the wj8x worst case — an unclosed fence that stays hot for `codeLineCount`
-    /// appends before it finally closes).
+    /// one at a time — `segments(...)` flattened into a single continuous answer. Reads like an
+    /// actual LLM chat answer to a real question ("how would you implement an LRU cache in Swift,
+    /// and when would you reach for something else instead"), not a word-salad stress load: a
+    /// setext title, several `##`-headed sections of real prose, an inline-styled paragraph plus a
+    /// list and a rule, a diagram image, and one LARGE fenced code block (the wj8x worst case — an
+    /// unclosed fence that stays hot for `codeLineCount` appends before it finally closes).
     static func tokens(seed: UInt64 = 0, codeLineCount: Int = 220) -> [String] {
+        segments(seed: seed, codeLineCount: codeLineCount).flatMap { $0 }
+    }
+
+    /// `tokens(seed:codeLineCount:)`'s content, split at the same three points `turns(...)` hands
+    /// out to interleave with `userMessages` — each element is one assistant turn's chunk list.
+    /// Splitting here (rather than slicing the flat `tokens()` array after the fact) keeps a
+    /// single `LCG` sequence threading through all three, so `tokens()` and `turns()` read as the
+    /// same answer either flattened or broken up.
+    private static func segments(seed: UInt64, codeLineCount: Int) -> [[String]] {
         var rng = LCG(state: seed)
-        var chunks: [String] = []
+
         // Setext heading (`===` underline) — kept as the opening block for index stability
-        // (imageAfterBlockIndex/ruleAfterBlockIndex below count blocks from here). ATX (`#`)
-        // headings are also recognized now (VelocityUI-fzvf.1).
-        chunks += literal("Implementing an LRU cache in Swift\n")
-        chunks += literal("===\n")
-        chunks += literal("\n")
-        chunks += literal("## How an LRU cache works\n\n")
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 2, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += mathShowcase()
-        chunks += literal("\n\n")
-        chunks += markdownFeatureShowcase()
-        chunks += literal("Here's a diagram of the eviction order — the tail is always the least recently used entry:\n\n")
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 10, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += literal("## The implementation\n\n")
-        chunks += literal("A dictionary alone gets you O(1) lookups but no ordering, and a linked list alone gets you ordering but O(n) lookups. Combining the two — a hash map from key to node, plus a doubly linked list threading the nodes in recency order — gets O(1) for both:\n\n")
-        chunks += codeFence(lineCount: codeLineCount, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 15, rng: &rng)
-        chunks += literal("\n")
-        chunks += literal("## Walking through a `get`, step by step\n\n")
-        chunks += literal("Here's the shape of one `get(_:)` call — the node is found, unlinked from wherever it sits, and relinked at the front:\n\n")
-        chunks += literal("\n")
-        chunks += prose(sentenceCount: 20, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += literal("## Trade-offs\n\n")
-        chunks += prose(sentenceCount: 25, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 5, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 10, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += literal("## When you'd reach for something else\n\n")
-        chunks += prose(sentenceCount: 15, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 20, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += literal("## Summary\n\n")
-        chunks += prose(sentenceCount: 25, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 5, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 10, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 15, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 20, rng: &rng)
-        chunks += literal("\n\n")
-        chunks += prose(sentenceCount: 25, rng: &rng)
-        chunks += literal("\n\n")
-        return chunks
+        // (imageAfterBlockIndex/ruleAfterBlockIndex below count blocks from here, within whichever
+        // segment they land in). ATX (`#`) headings are also recognized now (VelocityUI-fzvf.1).
+        var segment1: [String] = []
+        segment1 += literal("Implementing an LRU cache in Swift\n")
+        segment1 += literal("===\n")
+        segment1 += literal("\n")
+        segment1 += literal("## How an LRU cache works\n\n")
+        segment1 += literal("\n\n")
+        segment1 += prose(sentenceCount: 2, rng: &rng)
+        segment1 += literal("\n\n")
+        segment1 += mathShowcase()
+        segment1 += literal("\n\n")
+        segment1 += markdownFeatureShowcase()
+        segment1 += literal("Here's a diagram of the eviction order — the tail is always the least recently used entry:\n\n")
+        segment1 += literal("\n\n")
+        segment1 += prose(sentenceCount: 2, rng: &rng)
+        segment1 += literal("\n\n")
+
+        var segment2: [String] = []
+        segment2 += literal("## The implementation\n\n")
+        segment2 += literal("A dictionary alone gets you O(1) lookups but no ordering, and a linked list alone gets you ordering but O(n) lookups. Combining the two — a hash map from key to node, plus a doubly linked list threading the nodes in recency order — gets O(1) for both:\n\n")
+        segment2 += codeFence(lineCount: codeLineCount, rng: &rng)
+        segment2 += literal("\n\n")
+        segment2 += prose(sentenceCount: 2, rng: &rng)
+        segment2 += literal("\n")
+        segment2 += literal("## Walking through a `get`, step by step\n\n")
+        segment2 += literal("Here's the shape of one `get(_:)` call — the node is found, unlinked from wherever it sits, and relinked at the front:\n\n")
+        segment2 += literal("\n")
+        segment2 += prose(sentenceCount: 2, rng: &rng)
+        segment2 += literal("\n\n")
+
+        var segment3: [String] = []
+        segment3 += literal("## Trade-offs\n\n")
+        segment3 += prose(sentenceCount: 2, rng: &rng)
+        segment3 += literal("\n\n")
+        segment3 += prose(sentenceCount: 2, rng: &rng)
+        segment3 += literal("\n\n")
+        segment3 += prose(sentenceCount: 2, rng: &rng)
+        segment3 += literal("\n\n")
+        segment3 += literal("## When you'd reach for something else\n\n")
+        segment3 += prose(sentenceCount: 2, rng: &rng)
+        segment3 += literal("\n\n")
+        segment3 += prose(sentenceCount: 2, rng: &rng)
+        segment3 += literal("\n\n")
+        segment3 += literal("## Summary\n\n")
+        segment3 += prose(sentenceCount: 2, rng: &rng)
+        segment3 += literal("\n\n")
+        segment3 += prose(sentenceCount: 2, rng: &rng)
+        segment3 += literal("\n\n")
+        segment3 += prose(sentenceCount: 2, rng: &rng)
+        segment3 += literal("\n\n")
+        segment3 += prose(sentenceCount: 2, rng: &rng)
+        segment3 += literal("\n\n")
+        segment3 += prose(sentenceCount: 2, rng: &rng)
+        segment3 += literal("\n\n")
+        segment3 += prose(sentenceCount: 2, rng: &rng)
+        segment3 += literal("\n\n")
+
+        return [segment1, segment2, segment3]
     }
 
     /// Every LaTeX shape the math pipeline (VelocityUI-gojy) needs to survive, appended after
