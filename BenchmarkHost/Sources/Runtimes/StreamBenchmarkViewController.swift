@@ -54,7 +54,12 @@ final class StreamBenchmarkViewController: UIViewController {
         self.tokensPerSecond = tokensPerSecond
         self.includeInterleavedBlocks = includeInterleavedBlocks
         self.gestureGatedDeferralEnabled = gestureGatedDeferralEnabled
-        self.environment = RenderEnvironment(hotBlockRasterizeEnabled: hotBlockRasterizeEnabled)
+        self.environment = RenderEnvironment(
+            hotBlockRasterizeEnabled: hotBlockRasterizeEnabled,
+            rasterDiagnosticsObserver: RasterDiagnosticsObserver { event in
+                print(rasterDiagnosticsConsoleLine(event))
+            }
+        )
         super.init(nibName: nil, bundle: nil)
         title = "VelocityUI — stream"
     }
@@ -143,6 +148,21 @@ final class StreamBenchmarkViewController: UIViewController {
                 self?.driveManualTurns(startingAt: index + 1)
             })
         }
+    }
+}
+
+private func rasterDiagnosticsConsoleLine(_ event: RasterDiagnosticsEvent) -> String {
+    switch event {
+    case let .rasterMiss(key, kind, visible, frozen):
+        return "[raster] miss item=\(key.itemID) key=\(key) kind=\(kind.rawValue) visible=\(visible) frozen=\(frozen)"
+    case let .repairStarted(indices, candidateKeys):
+        return "[raster] repair-start indices=\(indices) candidates=\(candidateKeys)"
+    case let .repairFinished(indices, candidateKeys, storedKeys, missingKeys):
+        return "[raster] repair-end indices=\(indices) candidates=\(candidateKeys) stored=\(storedKeys) missing=\(missingKeys)"
+    case let .frozenBitmapEvicted(key, cost, currentByteTotal, byteBudget):
+        return "[raster] lru-evict item=\(key.itemID) key=\(key) cost=\(cost) bytes=\(currentByteTotal)/\(byteBudget)"
+    case let .repaintMissing(key, kind):
+        return "[raster] repaint-missing item=\(key.itemID) key=\(key) kind=\(kind.rawValue)"
     }
 }
 

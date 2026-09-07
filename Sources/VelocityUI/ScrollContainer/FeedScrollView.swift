@@ -264,7 +264,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
             imageActor: environment.imageActor,
             visibleBlockStore: environment.visibleBlockStore,
             frozenBitmapStore: environment.frozenBitmapStore,
-            contentDeliveryObserver: environment.contentDeliveryObserver
+            contentDeliveryObserver: environment.contentDeliveryObserver,
+            rasterDiagnosticsObserver: environment.rasterDiagnosticsObserver
         )
         super.init(frame: frame)
         showsVerticalScrollIndicator = true

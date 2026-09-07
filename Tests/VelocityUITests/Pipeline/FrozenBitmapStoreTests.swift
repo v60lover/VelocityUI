@@ -3,6 +3,7 @@
 import XCTest
 import Foundation
 import CoreGraphics
+import os
 @testable import VelocityUI
 
 /// Deterministic PRNG (splitmix64-style) for the stress test below — fixed seed means the exact
@@ -194,6 +195,36 @@ final class FrozenBitmapStoreTests: XCTestCase {
         XCTAssertNotNil(store.bitmap(for: b))
         XCTAssertNotNil(store.bitmap(for: c))
         XCTAssertNotNil(store.bitmap(for: d))
+    }
+
+    func testStore_ExceedingBudget_EmitsFrozenBitmapEvictionDiagnostics() {
+        let events = OSAllocatedUnfairLock(initialState: [RasterDiagnosticsEvent]())
+        let observer = RasterDiagnosticsObserver { event in
+            events.withLock { $0.append(event) }
+        }
+        let store = FrozenBitmapStore(byteBudget: 300)
+        store.setRasterDiagnosticsObserver(observer)
+
+        let a = key(0)
+        let b = key(1)
+        store.store(makeFakeCGImage(width: 5, height: 5), size: .zero, cost: 200, for: a)
+        store.store(makeFakeCGImage(width: 5, height: 5), size: .zero, cost: 200, for: b)
+
+        let recorded = events.withLock { $0 }
+        XCTAssertEqual(recorded.count, 1, "Exactly one bitmap should be evicted")
+        guard recorded.count == 1 else { return }
+        guard case .frozenBitmapEvicted(
+            let evictedKey,
+            let cost,
+            let currentByteTotal,
+            let byteBudget
+        ) = recorded[0] else {
+            return XCTFail("Expected a frozen bitmap eviction event")
+        }
+        XCTAssertEqual(evictedKey, a)
+        XCTAssertEqual(cost, 200)
+        XCTAssertEqual(currentByteTotal, 200)
+        XCTAssertEqual(byteBudget, 300)
     }
 
     func testStore_SingleEntryLargerThanBudget_IsStillStored_NeverRejected() {

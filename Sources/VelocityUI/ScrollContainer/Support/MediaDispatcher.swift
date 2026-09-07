@@ -15,17 +15,20 @@ final class MediaDispatcher {
     private let visibleBlockStore: VisibleBlockStore
     private let frozenBitmapStore: FrozenBitmapStore
     private let contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)?
+    private let rasterDiagnosticsObserver: RasterDiagnosticsObserver?
 
     init(
         imageActor: ImageActor,
         visibleBlockStore: VisibleBlockStore,
         frozenBitmapStore: FrozenBitmapStore,
-        contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)?
+        contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)?,
+        rasterDiagnosticsObserver: RasterDiagnosticsObserver?
     ) {
         self.imageActor = imageActor
         self.visibleBlockStore = visibleBlockStore
         self.frozenBitmapStore = frozenBitmapStore
         self.contentDeliveryObserver = contentDeliveryObserver
+        self.rasterDiagnosticsObserver = rasterDiagnosticsObserver
     }
 
     /// For each image fragment with a non-nil URL, spawn a Task that fetches and decodes the
@@ -109,35 +112,43 @@ final class MediaDispatcher {
             case .text(let descriptor):
                 if case .body = descriptor.codeBlockRole { continue }
                 let key = canonicalBlockKey(boxedItemID: itemID, fragment: fragment, logicalOrdinal: ordinals[fragment.id] ?? fragment.id)
-                if let image = visibleBlockStore.bitmap(for: key) {
+                if let image = raster(for: key, kind: .text) {
                     map[fragment.id] = image
                 } else {
-                    visibleBlockStore.promote([key], from: frozenBitmapStore)
-                    if let image = visibleBlockStore.bitmap(for: key) {
-                        map[fragment.id] = image
-                    } else {
-                        missingRaster = true
-                    }
+                    missingRaster = true
                 }
             case .table, .mathBlock:
                 // Same resident/frozen lookup shape as non-code-body `.text` above — a table or
                 // math-block raster is one flat `CGImage`, not a per-line chunk list.
                 let key = canonicalBlockKey(boxedItemID: itemID, fragment: fragment, logicalOrdinal: ordinals[fragment.id] ?? fragment.id)
-                if let image = visibleBlockStore.bitmap(for: key) {
+                let kind: RasterDiagnosticFragmentKind = {
+                    if case .table = fragment.content { return .table }
+                    return .mathBlock
+                }()
+                if let image = raster(for: key, kind: kind) {
                     map[fragment.id] = image
                 } else {
-                    visibleBlockStore.promote([key], from: frozenBitmapStore)
-                    if let image = visibleBlockStore.bitmap(for: key) {
-                        map[fragment.id] = image
-                    } else {
-                        missingRaster = true
-                    }
+                    missingRaster = true
                 }
             case .codeBlockBackground, .geometry:
                 continue
             }
         }
         return (map, missingRaster)
+    }
+
+    private func raster(for key: BlockKey, kind: RasterDiagnosticFragmentKind) -> CGImage? {
+        if let image = visibleBlockStore.bitmap(for: key) { return image }
+        let wasFrozen = rasterDiagnosticsObserver.map { _ in frozenBitmapStore.bitmap(for: key) != nil } ?? false
+        visibleBlockStore.promote([key], from: frozenBitmapStore)
+        if let image = visibleBlockStore.bitmap(for: key) { return image }
+        rasterDiagnosticsObserver?.emit(.rasterMiss(
+            key: key,
+            kind: kind,
+            inVisibleStore: false,
+            inFrozenStore: wasFrozen
+        ))
+        return nil
     }
 }
 #endif

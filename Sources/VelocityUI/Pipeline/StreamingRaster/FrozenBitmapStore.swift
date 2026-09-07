@@ -63,6 +63,7 @@ public final class FrozenBitmapStore: Sendable {
         /// Most recently declared working-range window; drives `handleMemoryPressure()`.
         var window: Set<BlockKey> = []
         var byteBudget: Int
+        var rasterDiagnosticsObserver: RasterDiagnosticsObserver?
     }
 
     let state: OSAllocatedUnfairLock<State>
@@ -152,6 +153,10 @@ public final class FrozenBitmapStore: Sendable {
         state.withLock { $0.currentByteTotal }
     }
 
+    func setRasterDiagnosticsObserver(_ observer: RasterDiagnosticsObserver?) {
+        state.withLock { $0.rasterDiagnosticsObserver = observer }
+    }
+
     // MARK: - Insert
 
     /// Caches `bitmap` under `key` and evicts LRU entries until back within
@@ -169,7 +174,7 @@ public final class FrozenBitmapStore: Sendable {
         for key: BlockKey,
         codeBodyIdentity: CodeBodyRasterIdentity?
     ) {
-        state.withLock { st in
+        let emissions = state.withLock { st -> (RasterDiagnosticsObserver, [RasterDiagnosticsEvent])? in
             if let existing = st.entries[key] {
                 st.currentByteTotal -= existing.cost
                 existing.bitmap = bitmap
@@ -190,7 +195,19 @@ public final class FrozenBitmapStore: Sendable {
                 st.currentByteTotal += cost
                 Self.appendAtTail(&st, node)
             }
-            Self.evictLRUUntilWithinBudget(&st, budget: st.byteBudget, protecting: key)
+            guard let observer = st.rasterDiagnosticsObserver else {
+                Self.evictLRUUntilWithinBudget(&st, budget: st.byteBudget, protecting: key)
+                return nil
+            }
+            let evictions = Self.evictLRUUntilWithinBudgetReporting(
+                &st, budget: st.byteBudget, protecting: key
+            )
+            return (observer, evictions)
+        }
+        if let emissions {
+            for event in emissions.1 {
+                emissions.0.emit(event)
+            }
         }
     }
 
@@ -292,10 +309,31 @@ public final class FrozenBitmapStore: Sendable {
 
     /// `protecting` is the key just stored this call — never evicted, even if it alone
     /// exceeds `budget`.
-    private static func evictLRUUntilWithinBudget(_ st: inout State, budget: Int, protecting: BlockKey) {
+    private static func evictLRUUntilWithinBudget(
+        _ st: inout State, budget: Int, protecting: BlockKey
+    ) {
         while st.currentByteTotal > budget {
             guard let victim = st.head, victim.key != protecting else { break }
             remove(&st, victim.key)
         }
+    }
+
+    private static func evictLRUUntilWithinBudgetReporting(
+        _ st: inout State, budget: Int, protecting: BlockKey
+    ) -> [RasterDiagnosticsEvent] {
+        var events: [RasterDiagnosticsEvent] = []
+        while st.currentByteTotal > budget {
+            guard let victim = st.head, victim.key != protecting else { break }
+            let key = victim.key
+            let cost = victim.cost
+            remove(&st, victim.key)
+            events.append(.frozenBitmapEvicted(
+                key: key,
+                cost: cost,
+                currentByteTotal: st.currentByteTotal,
+                byteBudget: budget
+            ))
+        }
+        return events
     }
 }

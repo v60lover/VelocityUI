@@ -79,6 +79,10 @@ public final class RenderEnvironment: Sendable {
     /// production.
     public let codeStreamObserver: (@Sendable (CodeStreamEventKind) -> Void)?
 
+    /// Optional feed-local observer for cache and layer diagnostics. Events carry raster identity
+    /// and accounting only; node text is never inspected or emitted.
+    public let rasterDiagnosticsObserver: RasterDiagnosticsObserver?
+
     /// Compiled-grammar LRU + active theme for syntax-highlighted code blocks.
     /// No shared-identity contract with another collaborator, so it defaults freely in both inits.
     public let highlightRegistry: HighlightRegistry
@@ -126,6 +130,7 @@ public final class RenderEnvironment: Sendable {
         pipelineTaskSpawnObserver: (@Sendable () -> Void)? = nil,
         codeBodyRetokenizeObserver: (@Sendable () -> Void)? = nil,
         codeStreamObserver: (@Sendable (CodeStreamEventKind) -> Void)? = nil,
+        rasterDiagnosticsObserver: RasterDiagnosticsObserver? = nil,
         highlightRegistry: HighlightRegistry = .init(),
         formulaCache: FormulaCache = .init(),
         mathFontProvider: KaTeXFontProvider = .init()
@@ -155,6 +160,8 @@ public final class RenderEnvironment: Sendable {
         self.pipelineTaskSpawnObserver = pipelineTaskSpawnObserver
         self.codeBodyRetokenizeObserver = codeBodyRetokenizeObserver
         self.codeStreamObserver = codeStreamObserver
+        self.rasterDiagnosticsObserver = rasterDiagnosticsObserver
+        frozenBitmapStore.setRasterDiagnosticsObserver(rasterDiagnosticsObserver)
         self.highlightRegistry = highlightRegistry
         self.formulaCache = formulaCache
         self.mathFontProvider = mathFontProvider
@@ -186,6 +193,7 @@ public final class RenderEnvironment: Sendable {
         pipelineTaskSpawnObserver: (@Sendable () -> Void)? = nil,
         codeBodyRetokenizeObserver: (@Sendable () -> Void)? = nil,
         codeStreamObserver: (@Sendable (CodeStreamEventKind) -> Void)? = nil,
+        rasterDiagnosticsObserver: RasterDiagnosticsObserver? = nil,
         highlightRegistry: HighlightRegistry = .init(),
         formulaCache: FormulaCache = .init(),
         mathFontProvider: KaTeXFontProvider = .init()
@@ -210,6 +218,7 @@ public final class RenderEnvironment: Sendable {
             pipelineTaskSpawnObserver: pipelineTaskSpawnObserver,
             codeBodyRetokenizeObserver: codeBodyRetokenizeObserver,
             codeStreamObserver: codeStreamObserver,
+            rasterDiagnosticsObserver: rasterDiagnosticsObserver,
             highlightRegistry: highlightRegistry,
             formulaCache: formulaCache,
             mathFontProvider: mathFontProvider

@@ -47,6 +47,34 @@ extension FeedScrollView {
         return result.map
     }
 
+    func reportMissingRasterLayers(
+        in cell: RenderCell,
+        fragments: [Fragment],
+        table: NodeTable,
+        ordinals: [Int: Int]
+    ) {
+        guard let observer = environment.rasterDiagnosticsObserver else { return }
+        for fragment in cell.missingRasterFragments(in: fragments) {
+            let kind: RasterDiagnosticFragmentKind
+            switch fragment.content {
+            case .text:
+                kind = .text
+            case .table:
+                kind = .table
+            case .mathBlock:
+                kind = .mathBlock
+            default:
+                continue
+            }
+            let key = canonicalBlockKey(
+                boxedItemID: table.itemID,
+                fragment: fragment,
+                logicalOrdinal: ordinals[fragment.id] ?? fragment.id
+            )
+            observer.emit(.repaintMissing(key: key, kind: kind))
+        }
+    }
+
     func buildCodeBodyContentMap(for fragments: [Fragment], table: NodeTable, ordinals: [Int: Int]) -> [Int: CodeBodyLayerContent] {
         var map: [Int: CodeBodyLayerContent] = [:]
         let itemID = table.itemID

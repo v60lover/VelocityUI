@@ -103,6 +103,7 @@ extension FeedScrollView {
                         viewportInCell: blockViewport(for: keptCell.layer.frame),
                         synchronousContent: syncMap, codeBodyContent: codeMap
                     )
+                    reportMissingRasterLayers(in: keptCell, fragments: entry.fragments, table: tables[index], ordinals: ordinals)
                     spawnMediaFetches(for: keptCell, fragments: entering, itemID: tables[index].itemID, syncMap: syncMap)
                 }
                 continue
@@ -128,6 +129,7 @@ extension FeedScrollView {
                     viewportInCell: blockViewport(for: frame),
                     synchronousContent: syncMap, codeBodyContent: codeMap
                 )
+                reportMissingRasterLayers(in: cell, fragments: entry.fragments, table: table, ordinals: ordinals)
                 spawnMediaFetches(for: cell, fragments: entering, itemID: table.itemID,
                                   syncMap: syncMap)
             } else if let entry = environment.layoutCache.cachedEntry(
@@ -162,6 +164,7 @@ extension FeedScrollView {
                     viewportInCell: blockViewport(for: mountFrame),
                     synchronousContent: syncMap, codeBodyContent: codeMap
                 )
+                reportMissingRasterLayers(in: cell, fragments: entry.fragments, table: table, ordinals: ordinals)
                 spawnMediaFetches(for: cell, fragments: entering, itemID: table.itemID,
                                   syncMap: syncMap)
             } else {
@@ -293,6 +296,15 @@ extension FeedScrollView {
         let capturedScale = max(1, traitCollection.displayScale)
         let pipeline = self.pipeline
         let workingRange = self.workingRange
+        let observer = environment.rasterDiagnosticsObserver
+        let candidateKeys: [BlockKey]?
+        if let observer {
+            let keys = rasterDiagnosticCandidateKeys(for: indices, tables: capturedTables)
+            observer.emit(.repairStarted(indices: indices.sorted(), candidateKeys: keys))
+            candidateKeys = keys
+        } else {
+            candidateKeys = nil
+        }
 
         _testHooks.repairTaskSpawnCount += 1
         _repairTask = Task { [weak self] in
@@ -304,12 +316,45 @@ extension FeedScrollView {
                 scale: capturedScale
             )
             guard let self else { return }
+            if let observer, let candidateKeys {
+                let storedKeys = candidateKeys.filter { self.environment.frozenBitmapStore.bitmap(for: $0) != nil }
+                let storedSet = Set(storedKeys)
+                observer.emit(.repairFinished(
+                    indices: indices.sorted(),
+                    candidateKeys: candidateKeys,
+                    storedKeys: storedKeys,
+                    missingKeys: candidateKeys.filter { !storedSet.contains($0) }
+                ))
+            }
             // Repaint: the repaired bitmaps now live in FrozenBitmapStore. The next
             // updateVisibleCells pass re-runs buildSyncMap for every still-mounted cell, which
             // promotes and paints them — no separate delivery channel needed.
             self._pendingRasterRepairIndices.subtract(indices)
             self._repairTask = nil
             self.setNeedsLayout()
+        }
+    }
+
+    private func rasterDiagnosticCandidateKeys(for indices: Set<Int>, tables: [NodeTable]) -> [BlockKey] {
+        indices.sorted().flatMap { index -> [BlockKey] in
+            guard index < tables.count, let entry = workingRange.entry(at: index) else { return [] }
+            let table = tables[index]
+            let ordinals = table.leafOrdinals()
+            return entry.fragments.compactMap { fragment in
+                switch fragment.content {
+                case .text(let descriptor):
+                    guard case .none = descriptor.codeBlockRole else { return nil }
+                case .table, .mathBlock:
+                    break
+                default:
+                    return nil
+                }
+                return canonicalBlockKey(
+                    boxedItemID: table.itemID,
+                    fragment: fragment,
+                    logicalOrdinal: ordinals[fragment.id] ?? fragment.id
+                )
+            }
         }
     }
 

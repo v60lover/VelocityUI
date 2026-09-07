@@ -205,6 +205,21 @@ public final class RenderCell {
         applyLayout(fragments, synchronousContent: synchronousContent, codeBodyContent: [:])
     }
 
+    func missingRasterFragments(in fragments: [Fragment]) -> [Fragment] {
+        fragments.filter { fragment in
+            guard activeBlockFragmentIDs.contains(fragment.id) else { return false }
+            switch fragment.content {
+            case .text(let descriptor):
+                guard case .none = descriptor.codeBlockRole else { return false }
+            case .table, .mathBlock:
+                break
+            default:
+                return false
+            }
+            return sublayers[layerIdentity(for: fragment)]?.contents == nil
+        }
+    }
+
     func applyLayout(
         _ fragments: [Fragment],
         synchronousContent: [Int: CGImage],
