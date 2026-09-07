@@ -68,6 +68,11 @@ final class FeedScrollViewTestHooks {
     /// `updateTailFollowFromUserScroll()` — can't be set without a live touch. `nil` (default)
     /// falls back to the real UIKit signals.
     var userScrollMotionOverride: Bool?
+
+    /// Counts Task spawns from `requestRasterRepairIfNeeded()` — the async raster-repair side
+    /// channel (VelocityUI-8otc.6.3). Stays at 1 across repeated layout passes while a repair is
+    /// in flight — the coalescing invariant under test.
+    var repairTaskSpawnCount = 0
 }
 
 #if canImport(XCTest)
@@ -206,6 +211,14 @@ extension FeedScrollView {
         get { _testHooks.userScrollMotionOverride }
         set { _testHooks.userScrollMotionOverride = newValue }
     }
+
+    /// Indices `buildSyncMap` flagged as missing a raster on both stores, still awaiting an
+    /// async repair. See VelocityUI-8otc.6.3.
+    var _pendingRasterRepairIndicesCount: Int { _pendingRasterRepairIndices.count }
+
+    /// Counts Task spawns from `requestRasterRepairIfNeeded()`. See
+    /// `FeedScrollViewTestHooks.repairTaskSpawnCount`.
+    var _repairTaskSpawnCount: Int { _testHooks.repairTaskSpawnCount }
 }
 #endif
 #endif

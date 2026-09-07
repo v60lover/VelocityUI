@@ -82,8 +82,17 @@ final class MediaDispatcher {
     ///
     /// Scale caveat: if preload ran at a different displayScale, cachedImage returns nil and the
     /// fragment silently falls back to the async path.
-    func buildSyncMap(for fragments: [Fragment], table: NodeTable, ordinals: [Int: Int], scale: CGFloat) -> [Int: CGImage] {
+    ///
+    /// `missingRaster` is `true` when a raster-REQUIRED fragment (non-code-body `.text`, `.table`,
+    /// or `.mathBlock`) misses BOTH `VisibleBlockStore` and `FrozenBitmapStore` — a WorkingRange
+    /// hit proves layout/fragment metadata survived, not that the pixels did. The caller enqueues
+    /// an async repair for this signal (VelocityUI-8otc.6.3); this method itself stays a pure,
+    /// synchronous lookup — no rasterization, no `await`.
+    func buildSyncMap(
+        for fragments: [Fragment], table: NodeTable, ordinals: [Int: Int], scale: CGFloat
+    ) -> (map: [Int: CGImage], missingRaster: Bool) {
         var map: [Int: CGImage] = [:]
+        var missingRaster = false
         let itemID = table.itemID
         for fragment in fragments {
             switch fragment.content {
@@ -104,8 +113,11 @@ final class MediaDispatcher {
                     map[fragment.id] = image
                 } else {
                     visibleBlockStore.promote([key], from: frozenBitmapStore)
-                    guard let image = visibleBlockStore.bitmap(for: key) else { continue }
-                    map[fragment.id] = image
+                    if let image = visibleBlockStore.bitmap(for: key) {
+                        map[fragment.id] = image
+                    } else {
+                        missingRaster = true
+                    }
                 }
             case .table, .mathBlock:
                 // Same resident/frozen lookup shape as non-code-body `.text` above — a table or
@@ -115,14 +127,17 @@ final class MediaDispatcher {
                     map[fragment.id] = image
                 } else {
                     visibleBlockStore.promote([key], from: frozenBitmapStore)
-                    guard let image = visibleBlockStore.bitmap(for: key) else { continue }
-                    map[fragment.id] = image
+                    if let image = visibleBlockStore.bitmap(for: key) {
+                        map[fragment.id] = image
+                    } else {
+                        missingRaster = true
+                    }
                 }
             case .codeBlockBackground, .geometry:
                 continue
             }
         }
-        return map
+        return (map, missingRaster)
     }
 }
 #endif

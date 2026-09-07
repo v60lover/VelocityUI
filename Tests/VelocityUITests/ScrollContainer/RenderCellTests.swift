@@ -1115,5 +1115,150 @@ final class RenderCellTests: XCTestCase {
             XCTAssertEqual(tailLayer.frame.origin.y, sealed == nil ? 0 : 20)
         }
     }
+
+    // MARK: - Incremental viewport content delivery
+
+    func testViewportOnlyDeliveryPaintsLateBitmapWithoutEnteringFragments() {
+        let cell = makeCell()
+        let fragment = textFragment(id: 0, frame: CGRect(x: 0, y: 0, width: 320, height: 40))
+
+        let initiallyActive = cell.updateBlockViewport(
+            fragments: [fragment], viewportInCell: fragment.frame, synchronousContent: [:]
+        )
+        XCTAssertEqual(initiallyActive.map(\.id), [fragment.id])
+
+        let bitmap = makeCGImage(width: 320, height: 40)
+        let entering = cell.updateBlockViewport(
+            viewportInCell: fragment.frame, synchronousContent: [fragment.id: bitmap]
+        )
+
+        XCTAssertTrue(entering.isEmpty, "Late content must not be reported as a newly entering fragment")
+        guard let sublayer = contentLayer(of: cell)?.sublayers?.first else {
+            return XCTFail("Expected the text sublayer")
+        }
+        XCTAssertTrue((sublayer.contents as! CGImage?) === bitmap,
+            "Viewport-only content delivery must paint the supplied bitmap")
+    }
+
+    func testViewportOnlyPartialDeliveryPreservesOtherRasterContent() {
+        let cell = makeCell()
+        let fragments = [
+            textFragment(id: 0, frame: CGRect(x: 0, y: 0, width: 320, height: 40)),
+            textFragment(id: 1, frame: CGRect(x: 0, y: 40, width: 320, height: 40)),
+        ]
+        let first = makeCGImage(width: 320, height: 40)
+        let second = makeCGImage(width: 320, height: 40)
+        cell.updateBlockViewport(
+            fragments: fragments, viewportInCell: CGRect(x: 0, y: 0, width: 320, height: 80),
+            synchronousContent: [0: first, 1: second]
+        )
+
+        let replacement = makeCGImage(width: 320, height: 40)
+        let entering = cell.updateBlockViewport(
+            viewportInCell: CGRect(x: 0, y: 0, width: 320, height: 80),
+            synchronousContent: [0: replacement]
+        )
+
+        XCTAssertTrue(entering.isEmpty)
+        guard let sublayers = contentLayer(of: cell)?.sublayers, sublayers.count == 2 else {
+            return XCTFail("Expected two text sublayers")
+        }
+        XCTAssertTrue((sublayers[0].contents as! CGImage?) === replacement)
+        XCTAssertTrue((sublayers[1].contents as! CGImage?) === second,
+            "An omitted bitmap must remain painted on the incremental viewport path")
+    }
+
+    func testViewportOnlySameContentIsNoOpAndReusesLayers() {
+        let cell = makeCell()
+        let fragment = textFragment(id: 0, frame: CGRect(x: 0, y: 0, width: 320, height: 40))
+        let bitmap = makeCGImage(width: 320, height: 40)
+        cell.updateBlockViewport(
+            fragments: [fragment], viewportInCell: fragment.frame, synchronousContent: [0: bitmap]
+        )
+        guard let layer = contentLayer(of: cell)?.sublayers?.first else {
+            return XCTFail("Expected the text sublayer")
+        }
+        let identity = ObjectIdentifier(layer)
+
+        let entering = cell.updateBlockViewport(
+            viewportInCell: fragment.frame, synchronousContent: [0: bitmap]
+        )
+
+        XCTAssertTrue(entering.isEmpty, "Repeated content must not report duplicate entering fragments")
+        guard let currentLayer = contentLayer(of: cell)?.sublayers?.first else {
+            return XCTFail("Expected the text sublayer after the no-op update")
+        }
+        XCTAssertEqual(ObjectIdentifier(currentLayer), identity, "No-op delivery must not churn layers")
+        XCTAssertTrue((currentLayer.contents as! CGImage?) === bitmap)
+    }
+
+    func testViewportOnlyDeliveryRepaintsTableAndMathRasters() {
+        let cell = makeCell()
+        let table = Fragment(
+            id: 0,
+            content: .table(TableRasterDescriptor(
+                naturalContentSize: CGSize(width: 320, height: 40), layoutHash: 1, appearanceHash: 1
+            )),
+            frame: CGRect(x: 0, y: 0, width: 320, height: 40)
+        )
+        let math = Fragment(
+            id: 1,
+            content: .mathBlock(MathBlockRasterDescriptor(
+                naturalContentSize: CGSize(width: 320, height: 40), layoutHash: 2, appearanceHash: 2
+            )),
+            frame: CGRect(x: 0, y: 40, width: 320, height: 40)
+        )
+        cell.updateBlockViewport(
+            fragments: [table, math], viewportInCell: CGRect(x: 0, y: 0, width: 320, height: 80),
+            synchronousContent: [:]
+        )
+        let tableBitmap = makeCGImage(width: 320, height: 40)
+        let mathBitmap = makeCGImage(width: 320, height: 40)
+        XCTAssertTrue(cell.updateBlockViewport(
+            viewportInCell: CGRect(x: 0, y: 0, width: 320, height: 80),
+            synchronousContent: [0: tableBitmap, 1: mathBitmap]
+        ).isEmpty)
+
+        guard let content = contentLayer(of: cell),
+              let clips = content.sublayers?.filter({ $0.masksToBounds }),
+              clips.count == 2,
+              let tableClip = clips.first,
+              let mathClip = clips.last,
+              let tableContent = tableClip.sublayers?.first,
+              let mathContent = mathClip.sublayers?.first
+        else { return XCTFail("Expected nested table and math raster layers") }
+        XCTAssertTrue((tableContent.contents as! CGImage?) === tableBitmap)
+        XCTAssertTrue((mathContent.contents as! CGImage?) === mathBitmap)
+    }
+
+    func testViewportOnlyDeliveryRepaintsFreshCodeBodyContent() {
+        let cell = makeCell()
+        let fragment = codeTextFragment(
+            id: 0,
+            role: .body(CodeBlockChrome(cornerRadius: 0, backgroundColor: .codeBlockBackground, language: "swift")),
+            frame: CGRect(x: 0, y: 0, width: 320, height: 40)
+        )
+        let oldTail = makeCGImage(width: 100, height: 20)
+        let oldContent = CodeBodyLayerContent(
+            chunks: [], tailImage: oldTail, tailSize: CGSize(width: 100, height: 20)
+        )
+        cell.updateBlockViewport(
+            fragments: [fragment], viewportInCell: fragment.frame, synchronousContent: [:],
+            codeBodyContent: [0: oldContent]
+        )
+        let newTail = makeCGImage(width: 120, height: 20)
+        let newContent = CodeBodyLayerContent(
+            chunks: [], tailImage: newTail, tailSize: CGSize(width: 120, height: 20)
+        )
+
+        XCTAssertTrue(cell.updateBlockViewport(
+            viewportInCell: fragment.frame, synchronousContent: [:], codeBodyContent: [0: newContent]
+        ).isEmpty)
+        guard let clip = contentLayer(of: cell)?.sublayers?.first(where: { $0.masksToBounds }),
+              let tail = clip.sublayers?.first
+        else { return XCTFail("Expected code-body clip and tail layers") }
+        XCTAssertTrue((tail.contents as! CGImage?) === newTail,
+            "A fresh code-body payload must repaint on the incremental viewport path")
+    }
 }
 #endif

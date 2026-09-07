@@ -348,7 +348,7 @@ extension FeedScrollView {
         // Merge image cache hits with the block-diff's freshly-resolved text bitmaps — fragment
         // ids never collide across content kinds within one item's NodeTable, so a plain
         // overwrite-merge is safe.
-        var syncMap = buildSyncMap(for: result.fragments, table: inputs.newTable, ordinals: inputs.newTable.leafOrdinals())
+        var syncMap = buildSyncMap(for: result.fragments, table: inputs.newTable, ordinals: inputs.newTable.leafOrdinals(), index: nextIdx)
         for (id, bitmap) in result.textBitmaps { syncMap[id] = bitmap }
         let codeMap = result.codeBodyContents
         let entering = cell.updateBlockViewport(
@@ -1076,7 +1076,7 @@ extension FeedScrollView {
         applyContentHeightDelta(delta)
         cell.layer.frame = resolvedFrames[lastIdx]
 
-        var syncMap = buildSyncMap(for: result.fragments, table: newTable, ordinals: newTable.leafOrdinals())
+        var syncMap = buildSyncMap(for: result.fragments, table: newTable, ordinals: newTable.leafOrdinals(), index: lastIdx)
         for (id, bitmap) in result.textBitmaps { syncMap[id] = bitmap }
         let codeMap = result.codeBodyContents
         let entering = cell.updateBlockViewport(

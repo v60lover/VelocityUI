@@ -83,6 +83,13 @@ public actor RenderPipeline {
     }
     private var activePrefetchItems: [ActivePrefetchItem] = []
 
+    // MARK: - Raster repair state
+
+    /// Indices currently being repaired by an in-flight `repairArtifacts` call — see
+    /// VelocityUI-8otc.6.3. Guards against two overlapping calls (e.g. two coalesced
+    /// `FeedScrollView` layout passes) spawning duplicate raster work for the same index.
+    private var inFlightRepairIndices: Set<Int> = []
+
     public init(
         textPool: TextMeasurementPool,
         layoutCache: LayoutCache,
@@ -345,6 +352,86 @@ public actor RenderPipeline {
             // cancelling prefetchTask doesn't propagate to these unstructured Tasks.
             for task in spawnedPrefetches {
                 await task.value
+            }
+        }
+    }
+
+    /// Regenerates raster artifacts for indices whose `WorkingRange` entry is still valid but
+    /// whose bitmaps were evicted from BOTH `VisibleBlockStore` and `FrozenBitmapStore` — a
+    /// WorkingRange hit proves layout + fragment metadata survived, not that the raster pixels
+    /// did (VelocityUI-8otc.6.3). Reuses the committed `entry.layout`/`entry.fragments`; only
+    /// re-measures when the entry is missing or its layout collapsed to zero height.
+    ///
+    /// Coalesces: an index already covered by another in-flight call to this method is skipped,
+    /// so two racing callers (e.g. two `FeedScrollView` layout passes) never spawn duplicate
+    /// raster work for the same index. Callers must not `await` this from the scroll path itself
+    /// — it runs off `updateVisibleCells`, on the async repair side channel.
+    public func repairArtifacts(
+        indices: Set<Int>,
+        workingRange: WorkingRange,
+        tables: [NodeTable],
+        availableWidth: CGFloat,
+        scale: CGFloat
+    ) async {
+        let toRepair = indices.subtracting(inFlightRepairIndices)
+        guard !toRepair.isEmpty else { return }
+        inFlightRepairIndices.formUnion(toRepair)
+        defer { inFlightRepairIndices.subtract(toRepair) }
+
+        // Capture actor state before entering the TaskGroup — its closures are @Sendable
+        // nonisolated and cannot reference actor-isolated self directly (same reason
+        // onIndexBoundary captures locals above).
+        let themeSnapshot = highlightRegistry.themeSnapshot
+        let pool = textPool
+        let bitmapStore = frozenBitmapStore
+        let registry = highlightRegistry
+        let formulaCache = formulaCache
+        let fontProvider = mathFontProvider
+
+        await withTaskGroup(of: Void.self) { group in
+            for index in toRepair where index < tables.count {
+                let table = tables[index]
+                group.addTask {
+                    guard !Task.isCancelled else { return }
+
+                    let fragments: [Fragment]
+                    if let entry = await MainActor.run(body: { workingRange.entry(at: index) }),
+                       entry.layout.totalFrame.height > 0 {
+                        fragments = entry.fragments
+                    } else {
+                        guard !Task.isCancelled else { return }
+                        let layout = await measureNode(
+                            table, nodeIndex: 0, width: availableWidth,
+                            textPool: pool, formulaCache: formulaCache
+                        )
+                        let measuredFragments = extractFragments(table: table, layout: layout)
+                        await MainActor.run { workingRange.commit(layout, measuredFragments, at: index) }
+                        fragments = measuredFragments
+                    }
+
+                    guard !Task.isCancelled else { return }
+
+                    let (textArtifacts, _) = rasterizeTextArtifacts(
+                        table: table, fragments: fragments, layoutWidth: availableWidth, scale: scale,
+                        highlightRegistry: registry, themeSnapshot: themeSnapshot,
+                        reusableFrom: bitmapStore, formulaCache: formulaCache, fontProvider: fontProvider
+                    )
+                    let tableArtifacts = rasterizeTableArtifacts(
+                        table: table, fragments: fragments, scale: scale,
+                        formulaCache: formulaCache, fontProvider: fontProvider
+                    )
+                    let mathArtifacts = rasterizeMathArtifacts(
+                        table: table, fragments: fragments, scale: scale,
+                        formulaCache: formulaCache, fontProvider: fontProvider
+                    )
+                    for artifact in textArtifacts + tableArtifacts + mathArtifacts {
+                        bitmapStore.store(
+                            artifact.image, size: artifact.size,
+                            cost: artifact.image.bytesPerRow * artifact.image.height,
+                            for: artifact.key, codeBodyIdentity: artifact.codeBodyIdentity
+                        )
+                    }
+                }
             }
         }
     }

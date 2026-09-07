@@ -174,6 +174,16 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// refineKnownFrames delivers real fragments and spawns media fetches when entries arrive.
     var _pendingFragmentIndices: Set<Int> = []
 
+    /// Indices whose WorkingRange entry is valid but a raster-required fragment (text/table/math)
+    /// missed BOTH `VisibleBlockStore` and `FrozenBitmapStore` — populated synchronously by
+    /// `buildSyncMap(index:)`, drained by `requestRasterRepairIfNeeded()`. See VelocityUI-8otc.6.3.
+    var _pendingRasterRepairIndices: Set<Int> = []
+
+    /// The in-flight repair Task, if any — `requestRasterRepairIfNeeded()` won't spawn a second
+    /// one while this is non-nil, so repeated layout passes during one repair coalesce into a
+    /// single raster job per index instead of piling up duplicate work.
+    var _repairTask: Task<Void, Never>?
+
     var tableCache: [Item.ID: (sig: AnyHashable, table: NodeTable)] = [:]
 
     /// Placeholder height for items not yet measured by the pipeline.
@@ -370,6 +380,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
         applyTailFollowIfNeeded()
         let visRange = updateVisibleCells()
         notifyPipelineIfNeeded()
+        requestRasterRepairIfNeeded()
         checkReachEnd(visRange: visRange)
     }
 
@@ -467,6 +478,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
         codeBodyScrollAnimator.cancelInFlightWork()
         let pipeline = self.pipeline
         Task { await pipeline.markInvalidated() }
+        _repairTask?.cancel()
+        _repairTask = nil
     }
 }
 #endif

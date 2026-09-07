@@ -29,13 +29,22 @@ extension FeedScrollView {
     /// `MediaDispatcher.buildSyncMap`. `ordinals` is `table.leafOrdinals()` — computed once by the
     /// caller and shared with a sibling `buildCodeBodyContentMap` call over the same table, instead
     /// of each call recomputing its own copy on the scroll path.
-    func buildSyncMap(for fragments: [Fragment], table: NodeTable, ordinals: [Int: Int]) -> [Int: CGImage] {
-        mediaDispatcher.buildSyncMap(
+    ///
+    /// `index` is the item index this call is mounting/refreshing — on a raster miss (WorkingRange
+    /// entry valid, bitmap evicted from both stores) it's recorded into the bounded
+    /// `_pendingRasterRepairIndices` set so `requestRasterRepairIfNeeded()` can schedule an async
+    /// repair. Purely a Set insert — no rasterization, no `await`, on this synchronous call path.
+    func buildSyncMap(for fragments: [Fragment], table: NodeTable, ordinals: [Int: Int], index: Int) -> [Int: CGImage] {
+        let result = mediaDispatcher.buildSyncMap(
             for: fragments,
             table: table,
             ordinals: ordinals,
             scale: max(1, traitCollection.displayScale)
         )
+        if result.missingRaster {
+            _pendingRasterRepairIndices.insert(index)
+        }
+        return result.map
     }
 
     func buildCodeBodyContentMap(for fragments: [Fragment], table: NodeTable, ordinals: [Int: Int]) -> [Int: CodeBodyLayerContent] {

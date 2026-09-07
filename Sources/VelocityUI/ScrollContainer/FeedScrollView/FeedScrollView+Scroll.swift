@@ -92,7 +92,7 @@ extension FeedScrollView {
                 }
                 if let entry = workingRange.entry(at: index) {
                     let ordinals = tables[index].leafOrdinals()
-                    let syncMap = buildSyncMap(for: entry.fragments, table: tables[index], ordinals: ordinals)
+                    let syncMap = buildSyncMap(for: entry.fragments, table: tables[index], ordinals: ordinals, index: index)
                     // A code body scrolling into view inside an already-mounted (tall, streaming)
                     // cell enters here, not the fresh-mount branch below -- so it needs the same
                     // codeBodyContent map. Without it the body mounts with an empty chunk list and
@@ -121,7 +121,7 @@ extension FeedScrollView {
             if let entry = workingRange.entry(at: index) {
                 cell.layer.frame = frame
                 let ordinals = table.leafOrdinals()
-                let syncMap = buildSyncMap(for: entry.fragments, table: table, ordinals: ordinals)
+                let syncMap = buildSyncMap(for: entry.fragments, table: table, ordinals: ordinals, index: index)
                 let codeMap = buildCodeBodyContentMap(for: entry.fragments, table: table, ordinals: ordinals)
                 let entering = cell.updateBlockViewport(
                     fragments: entry.fragments,
@@ -155,7 +155,7 @@ extension FeedScrollView {
 
                 cell.layer.frame = mountFrame
                 let ordinals = table.leafOrdinals()
-                let syncMap = buildSyncMap(for: entry.fragments, table: table, ordinals: ordinals)
+                let syncMap = buildSyncMap(for: entry.fragments, table: table, ordinals: ordinals, index: index)
                 let codeMap = buildCodeBodyContentMap(for: entry.fragments, table: table, ordinals: ordinals)
                 let entering = cell.updateBlockViewport(
                     fragments: entry.fragments,
@@ -273,6 +273,42 @@ extension FeedScrollView {
                 invalidate: shouldInvalidate
             )
             await self.pipeline.waitForCurrentPrefetch()
+            self.setNeedsLayout()
+        }
+    }
+
+    // MARK: - Raster repair
+
+    /// Schedules an async repair for any indices `buildSyncMap` flagged this pass — see
+    /// VelocityUI-8otc.6.3. No-op while a repair is already in flight, so repeated layout passes
+    /// during one repair coalesce into a single raster job per index. Called from
+    /// `layoutSubviews`, after `updateVisibleCells`/`notifyPipelineIfNeeded` — itself
+    /// `await`-free, so it doesn't touch the zero-await scroll-path contract.
+    func requestRasterRepairIfNeeded() {
+        guard _repairTask == nil, !_pendingRasterRepairIndices.isEmpty else { return }
+
+        let indices = _pendingRasterRepairIndices
+        let capturedTables = tables
+        let capturedWidth = measureWidth(for: bounds.width)
+        let capturedScale = max(1, traitCollection.displayScale)
+        let pipeline = self.pipeline
+        let workingRange = self.workingRange
+
+        _testHooks.repairTaskSpawnCount += 1
+        _repairTask = Task { [weak self] in
+            await pipeline.repairArtifacts(
+                indices: indices,
+                workingRange: workingRange,
+                tables: capturedTables,
+                availableWidth: capturedWidth,
+                scale: capturedScale
+            )
+            guard let self else { return }
+            // Repaint: the repaired bitmaps now live in FrozenBitmapStore. The next
+            // updateVisibleCells pass re-runs buildSyncMap for every still-mounted cell, which
+            // promotes and paints them — no separate delivery channel needed.
+            self._pendingRasterRepairIndices.subtract(indices)
+            self._repairTask = nil
             self.setNeedsLayout()
         }
     }

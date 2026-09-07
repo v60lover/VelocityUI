@@ -74,6 +74,8 @@ public final class RenderCell {
     /// the running spring. Set on `beginDrag`, cleared on `settle` -- see `setCodeBodyAnimating`.
     private var animatingCodeBodyIdentities: Set<LayerIdentity> = []
     private var codeBodyContentByFragmentID: [Int: CodeBodyLayerContent] = [:]
+    /// Object identities are enough to detect a new immutable raster without retaining it twice.
+    private var appliedRasterIdentityByFragmentID: [Int: ObjectIdentifier] = [:]
     var layerIdentityByFragmentID: [Int: LayerIdentity] = [:]
     private var codeBackgroundByIdentity: [LayerIdentity: CodeBlockBackgroundDescriptor] = [:]
     /// Ordered frame metadata survives while offscreen block layers are released.
@@ -98,6 +100,11 @@ public final class RenderCell {
     /// full id-diff prune unconditionally, since a same-count id-set change (e.g. an image-only
     /// cell recycled into an image+text cell) can't be caught by a count comparison alone.
     private var needsSublayerReconcile = false
+
+    enum ContentUpdatePolicy {
+        case authoritative
+        case incremental
+    }
 
     public init(kind: CellKind = .standard, placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer()) {
         self.kind = kind
@@ -168,6 +175,7 @@ public final class RenderCell {
             activeBlockFragmentIDs.removeAll(keepingCapacity: true)
             codeBackgroundByIdentity.removeAll(keepingCapacity: true)
             codeBodyContentByFragmentID.removeAll(keepingCapacity: true)
+            appliedRasterIdentityByFragmentID.removeAll(keepingCapacity: true)
             // Belt-and-suspenders: `returnToPool` already stops any animator targeting this cell
             // (via `cancelInFlightWork` -> `settle`) before it's dequeued for a new item, but a
             // stale flag here would silently disable reclamp for the new item's code body forever.
@@ -200,7 +208,8 @@ public final class RenderCell {
     func applyLayout(
         _ fragments: [Fragment],
         synchronousContent: [Int: CGImage],
-        codeBodyContent: [Int: CodeBodyLayerContent]
+        codeBodyContent: [Int: CodeBodyLayerContent],
+        contentUpdatePolicy: ContentUpdatePolicy = .authoritative
     ) {
         let cellBounds = CGRect(origin: .zero, size: layer.bounds.size)
 
@@ -231,6 +240,7 @@ public final class RenderCell {
                     layerIdentityByFragmentID.removeValue(forKey: id)
                     mediaFragmentIDs.remove(id)
                     placeholderPaintedFragmentIDs.remove(id)
+                    appliedRasterIdentityByFragmentID.removeValue(forKey: id)
                 }
             }
             let inactiveIDs = layerIdentityByFragmentID.keys.filter { !incomingIDs.contains($0) }
@@ -238,6 +248,7 @@ public final class RenderCell {
                 layerIdentityByFragmentID.removeValue(forKey: id)
                 mediaFragmentIDs.remove(id)
                 placeholderPaintedFragmentIDs.remove(id)
+                appliedRasterIdentityByFragmentID.removeValue(forKey: id)
             }
             needsSublayerReconcile = false
         }
@@ -269,6 +280,7 @@ public final class RenderCell {
                     // Sync paint: image is already decoded — set contents inline.
                     // No gray tint (image is present), no CATransition (no delay to mask).
                     sub.contents = image
+                    appliedRasterIdentityByFragmentID[fragment.id] = ObjectIdentifier(image)
                     sub.backgroundColor = nil
                     placeholderPaintedFragmentIDs.remove(fragment.id)
                 } else if sub.contents == nil {
@@ -290,6 +302,7 @@ public final class RenderCell {
                 codeBodyClipLayer.removeValue(forKey: identity)?.removeFromSuperlayer()
                 codeBodyContentWidth.removeValue(forKey: identity)
                 codeBodyContentByFragmentID.removeValue(forKey: fragment.id)
+                appliedRasterIdentityByFragmentID.removeValue(forKey: fragment.id)
                 if codeBackgroundByIdentity[identity] != descriptor || sub.contents == nil {
                     sub.contents = rasterizeCodeBlockBackground(cornerRadius: descriptor.cornerRadius, color: descriptor.color)
                     sub.contentsCenter = codeBlockBackgroundContentsCenter(cornerRadius: descriptor.cornerRadius)
@@ -300,8 +313,11 @@ public final class RenderCell {
                 placeholderPaintedFragmentIDs.remove(fragment.id)
             } else if case .text(let descriptor) = fragment.content {
                 if case .body = descriptor.codeBlockRole {
+                    appliedRasterIdentityByFragmentID.removeValue(forKey: fragment.id)
                     if let incoming = codeBodyContent[fragment.id] {
                         codeBodyContentByFragmentID[fragment.id] = incoming
+                    } else if contentUpdatePolicy == .authoritative {
+                        codeBodyContentByFragmentID.removeValue(forKey: fragment.id)
                     }
                     let delivery = codeBodyContentByFragmentID[fragment.id]
                     let chunks = delivery?.chunks ?? []
@@ -375,14 +391,20 @@ public final class RenderCell {
                 codeBodyClipLayer.removeValue(forKey: identity)?.removeFromSuperlayer()
                 codeBodyContentWidth.removeValue(forKey: identity)
                 codeBodyContentByFragmentID.removeValue(forKey: fragment.id)
-                // Text has no async delivery path — set unconditionally so a cache miss can't
-                // retain a previous fragment's pixels after reclassification at the same id.
+                if let image = synchronousContent[fragment.id] {
+                    sub.contents = image
+                    appliedRasterIdentityByFragmentID[fragment.id] = ObjectIdentifier(image)
+                } else if contentUpdatePolicy == .authoritative {
+                    sub.contents = nil
+                    appliedRasterIdentityByFragmentID.removeValue(forKey: fragment.id)
+                }
+                // An authoritative layout clears an absent bitmap after reclassification at the
+                // same id; incremental viewport maps deliberately preserve absent entries.
                 // INVARIANT: for text, `fragment.frame.size` MUST equal the bitmap's point size.
                 // `contentsGravity` is unset → defaults to `.resize`, so any width/height mismatch
                 // silently stretches the glyphs instead of failing (this was the "heading in a
                 // stretched font" bug; producers keep them equal — see FeedScrollView.recordTextResult).
                 // If a future mismatch slips in, set an explicit gravity or assert size-equality here.
-                sub.contents = synchronousContent[fragment.id]
                 sub.backgroundColor = nil
                 mediaFragmentIDs.remove(fragment.id)
                 placeholderPaintedFragmentIDs.remove(fragment.id)
@@ -422,7 +444,13 @@ public final class RenderCell {
                     content = l
                 }
                 content.frame = CGRect(origin: .zero, size: descriptor.naturalContentSize)
-                content.contents = synchronousContent[fragment.id]
+                if let image = synchronousContent[fragment.id] {
+                    content.contents = image
+                    appliedRasterIdentityByFragmentID[fragment.id] = ObjectIdentifier(image)
+                } else if contentUpdatePolicy == .authoritative {
+                    content.contents = nil
+                    appliedRasterIdentityByFragmentID.removeValue(forKey: fragment.id)
+                }
                 content.backgroundColor = nil
 
                 let contentWidth = descriptor.naturalContentSize.width
@@ -473,7 +501,13 @@ public final class RenderCell {
                     content = l
                 }
                 content.frame = CGRect(origin: .zero, size: descriptor.naturalContentSize)
-                content.contents = synchronousContent[fragment.id]
+                if let image = synchronousContent[fragment.id] {
+                    content.contents = image
+                    appliedRasterIdentityByFragmentID[fragment.id] = ObjectIdentifier(image)
+                } else if contentUpdatePolicy == .authoritative {
+                    content.contents = nil
+                    appliedRasterIdentityByFragmentID.removeValue(forKey: fragment.id)
+                }
                 content.backgroundColor = nil
 
                 let contentWidth = descriptor.naturalContentSize.width
@@ -496,6 +530,7 @@ public final class RenderCell {
                 codeBodyClipLayer.removeValue(forKey: identity)?.removeFromSuperlayer()
                 codeBodyContentWidth.removeValue(forKey: identity)
                 codeBodyContentByFragmentID.removeValue(forKey: fragment.id)
+                appliedRasterIdentityByFragmentID.removeValue(forKey: fragment.id)
                 sub.backgroundColor = nil
                 sub.contents = nil  // image→geometry reclassification must not leave stale image visible
                 mediaFragmentIDs.remove(fragment.id)
@@ -582,7 +617,10 @@ public final class RenderCell {
         }
         activeBlockFragmentIDs.removeAll(keepingCapacity: true)
         return updateBlockViewport(
-            viewportInCell: viewportInCell, synchronousContent: synchronousContent, codeBodyContent: codeBodyContent
+            viewportInCell: viewportInCell,
+            synchronousContent: synchronousContent,
+            codeBodyContent: codeBodyContent,
+            contentUpdatePolicy: .authoritative
         )
     }
 
@@ -603,6 +641,20 @@ public final class RenderCell {
         synchronousContent: [Int: CGImage],
         codeBodyContent: [Int: CodeBodyLayerContent]
     ) -> [Fragment] {
+        updateBlockViewport(
+            viewportInCell: viewportInCell,
+            synchronousContent: synchronousContent,
+            codeBodyContent: codeBodyContent,
+            contentUpdatePolicy: .incremental
+        )
+    }
+
+    private func updateBlockViewport(
+        viewportInCell: CGRect,
+        synchronousContent: [Int: CGImage],
+        codeBodyContent: [Int: CodeBodyLayerContent],
+        contentUpdatePolicy: ContentUpdatePolicy
+    ) -> [Fragment] {
         guard !blockFragments.isEmpty else { return [] }
 
         let groupRange = BlockViewportRange.activeRange(in: blockFrames, window: viewportInCell)
@@ -611,17 +663,78 @@ public final class RenderCell {
             : blockFragmentRanges[groupRange.lowerBound].lowerBound..<blockFragmentRanges[groupRange.upperBound - 1].upperBound
         let active = Array(blockFragments[range])
         let nextIDs = Set(active.map(\.id))
-        guard nextIDs != activeBlockFragmentIDs else { return [] }
+        let idsChanged = nextIDs != activeBlockFragmentIDs
+        let hasNewContent = hasUnappliedContent(
+            activeIDs: nextIDs,
+            synchronousContent: synchronousContent,
+            codeBodyContent: codeBodyContent
+        )
+        guard idsChanged || hasNewContent else { return [] }
 
-        let enteringIDs = nextIDs.subtracting(activeBlockFragmentIDs)
-        let leavingIDs = activeBlockFragmentIDs.subtracting(nextIDs)
-        cancelPendingMedia(for: leavingIDs)
-        activeBlockFragmentIDs = nextIDs
+        let enteringIDs: Set<Int>
+        if idsChanged {
+            enteringIDs = nextIDs.subtracting(activeBlockFragmentIDs)
+            let leavingIDs = activeBlockFragmentIDs.subtracting(nextIDs)
+            cancelPendingMedia(for: leavingIDs)
+            activeBlockFragmentIDs = nextIDs
 
-        // The active set can change without changing its count, so force the exact id diff.
-        needsSublayerReconcile = true
-        applyLayout(active, synchronousContent: synchronousContent, codeBodyContent: codeBodyContent)
+            // The active set can change without changing its count, so force the exact id diff.
+            needsSublayerReconcile = true
+        } else {
+            enteringIDs = []
+        }
+        applyLayout(
+            active,
+            synchronousContent: synchronousContent,
+            codeBodyContent: codeBodyContent,
+            contentUpdatePolicy: contentUpdatePolicy
+        )
         return active.filter { enteringIDs.contains($0.id) }
+    }
+
+    private func hasUnappliedContent(
+        activeIDs: Set<Int>,
+        synchronousContent: [Int: CGImage],
+        codeBodyContent: [Int: CodeBodyLayerContent]
+    ) -> Bool {
+        for (id, image) in synchronousContent where activeIDs.contains(id) {
+            if appliedRasterIdentityByFragmentID[id] != ObjectIdentifier(image) {
+                return true
+            }
+        }
+        for (id, content) in codeBodyContent where activeIDs.contains(id) {
+            guard let applied = codeBodyContentByFragmentID[id], codeBodyContentMatches(applied, content) else {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func codeBodyContentMatches(_ lhs: CodeBodyLayerContent, _ rhs: CodeBodyLayerContent) -> Bool {
+        guard lhs.chunks.count == rhs.chunks.count,
+              lhs.tailSize == rhs.tailSize,
+              lhs.sealedSize == rhs.sealedSize,
+              sameImage(lhs.tailImage, rhs.tailImage)
+        else { return false }
+        for index in lhs.chunks.indices {
+            let left = lhs.chunks[index]
+            let right = rhs.chunks[index]
+            if left.size != right.size || !sameImage(left.image, right.image) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func sameImage(_ lhs: CGImage?, _ rhs: CGImage?) -> Bool {
+        switch (lhs, rhs) {
+        case let (left?, right?):
+            return left === right
+        case (nil, nil):
+            return true
+        default:
+            return false
+        }
     }
 
     // MARK: - Content
@@ -659,6 +772,7 @@ public final class RenderCell {
         fade.duration = 0.2
         sub.add(fade, forKey: "contents-fade")
         sub.contents = image  // explicit animation is unaffected by setDisableActions
+        appliedRasterIdentityByFragmentID[id] = ObjectIdentifier(image)
 
         // Clear placeholder tint without animating it
         CATransaction.begin()

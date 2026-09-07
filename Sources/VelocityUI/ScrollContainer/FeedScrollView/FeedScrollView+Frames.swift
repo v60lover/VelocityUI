@@ -110,7 +110,7 @@ extension FeedScrollView {
             if let cell = visibleCells[index], _pendingFragmentIndices.remove(index) != nil {
                 cell.layer.frame = resolvedFrames[index]
                 let ordinals = tables[index].leafOrdinals()
-                let syncMap = buildSyncMap(for: entry.fragments, table: tables[index], ordinals: ordinals)
+                let syncMap = buildSyncMap(for: entry.fragments, table: tables[index], ordinals: ordinals, index: index)
                 let codeMap = buildCodeBodyContentMap(for: entry.fragments, table: tables[index], ordinals: ordinals)
                 let entering = cell.updateBlockViewport(
                     fragments: entry.fragments,
