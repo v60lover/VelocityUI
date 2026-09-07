@@ -79,6 +79,9 @@ public final class FrozenBitmapStore: Sendable {
 
     /// Sizes `byteBudget` from the real working-range footprint instead of the 16 MB
     /// default, so a still-visible block never gets evicted and force a re-freeze.
+    /// `windowCount` is a raster-bearing ARTIFACT count, not a feed item count — one item
+    /// (e.g. an assistant markdown message) can own many artifacts (paragraphs, a code block's
+    /// header and body, tables, math), so callers must count artifacts, not items.
     public convenience init(windowCount: Int, perBitmapCost: Int = FrozenBitmapStore.defaultPerBitmapCost, headroom: Double = 1.5) {
         self.init(byteBudget: Self.budget(forWindowCount: windowCount, perBitmapCost: perBitmapCost, headroom: headroom))
     }
@@ -88,7 +91,8 @@ public final class FrozenBitmapStore: Sendable {
 
     /// `windowCount` bitmaps at `perBitmapCost` bytes, times `headroom` slack — a
     /// hot-tail re-freeze briefly holds two bitmaps for the same key, so the raw
-    /// footprint alone isn't safe.
+    /// footprint alone isn't safe. `windowCount` is a raster-bearing artifact count (see
+    /// `init(windowCount:)`), not a feed item count.
     public static func budget(forWindowCount windowCount: Int, perBitmapCost: Int = defaultPerBitmapCost, headroom: Double = 1.5) -> Int {
         guard windowCount > 0, perBitmapCost > 0, headroom > 0 else { return 0 }
         return Int((Double(windowCount) * Double(perBitmapCost) * headroom).rounded(.up))

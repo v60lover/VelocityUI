@@ -161,9 +161,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// Pre-allocated scratch buffer for the recycle loop — avoids a per-frame Array allocation.
     var _recycleBuffer: [Int] = []
 
-    /// Largest `keepRange.count` seen so far; resizes `FrozenBitmapStore`'s byte budget once it
-    /// grows. Tracked monotonically-up so a transient shrink (e.g. rotation) never shrinks the
-    /// live budget mid-scroll and thrash-evicts blocks still inside the window.
+    /// Largest raster-bearing-artifact count seen so far across a keep range (not item count —
+    /// one item can own many artifacts); resizes `FrozenBitmapStore`'s byte budget once it grows.
+    /// Tracked monotonically-up so a transient shrink (e.g. rotation) never shrinks the live
+    /// budget mid-scroll and thrash-evicts blocks still inside the window.
     var _frozenBudgetWindowCount: Int = 0
 
     /// Pre-allocated scratch buffer for `refineKnownFrames` — avoids a fresh Set.union +

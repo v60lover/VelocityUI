@@ -971,11 +971,13 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
 
     // MARK: - FrozenBitmapStore budget: driver-sized, GROW-ONLY above the constructed floor
     //
-    // `updateVisibleCells` sizes the budget from `keepRange.count` (ITEMS), but the flagship
-    // scenario is one streaming message — ONE item holding many frozen BLOCKS — so a small
-    // item-count window computes a budget far below the 16 MB default. `sizeBudget` is grow-only
-    // (see its docstring) so this never starves a real message's live blocks: below, a small
-    // window's budget must stay AT the floor, and only RAISE when a real window's budget exceeds it.
+    // `updateVisibleCells` sizes the budget from `rasterArtifactCount(in: keepRange)` (raster-
+    // bearing ARTIFACTS: text/code-body/table/math fragments), not from `keepRange.count`
+    // (ITEMS) — the flagship scenario is one streaming message — ONE item holding many frozen
+    // BLOCKS — so an item-count window would compute a budget far below the 16 MB default.
+    // `sizeBudget` is grow-only (see its docstring) so this never starves a real message's live
+    // blocks: below, a small window's budget must stay AT the floor, and only RAISE when a real
+    // window's budget exceeds it.
 
     /// With the default 16 MB floor, a small (3-item) window's computed budget is far below it —
     /// `updateVisibleCells`' `sizeBudget` call must be a no-op here. Proves the driver wiring
@@ -1024,12 +1026,150 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
         feed.items = (0..<knownWindowCount).map { ChatItem(id: $0, blocks: ["short block \($0)"]) }
         feed.layoutSubviews()
 
+        // The budget is sized from committed WorkingRange fragments (an artifact count), not raw
+        // geometry -- so unlike a pure item-count budget, it only reflects the real window once
+        // the async pipeline has committed each index at least once.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < deadline, feed._workingRangeMissCount(from: 0, to: knownWindowCount) > 0 {
+            await Task.yield()
+            feed.layoutSubviews()
+        }
+        feed.layoutSubviews()
+
         let sizedBudget = feed.renderEnvironment.frozenBitmapStore.byteBudget
+        // Each of the 3 items owns exactly 1 text block -> 3 raster-bearing artifacts.
         let expectedBudget = FrozenBitmapStore.budget(forWindowCount: knownWindowCount)
 
         XCTAssertEqual(sizedBudget, expectedBudget,
-            "byteBudget must be raised to exactly budget(forWindowCount:) for the real keepRange item count")
+            "byteBudget must be raised to exactly budget(forWindowCount:) for the real keepRange artifact count")
         XCTAssertGreaterThan(sizedBudget, 1, "Sanity: the budget must actually have been raised above the tiny floor")
+
+        await drainFeedWork(feed)
+    }
+
+    // MARK: - VelocityUI-8otc.6.4: budget sized from raster-bearing ARTIFACT count, not item count
+
+    /// The flagship regression this bead fixes: a single streaming assistant message is ONE
+    /// item that owns many raster-bearing text blocks. `keepRange.count` (an item count) would
+    /// size the budget as if there were 1 artifact; the real driver must count the 12 text
+    /// fragments this one item actually owns.
+    func testFirstLayout_SingleItemManyBlocks_BudgetScalesWithArtifactCountNotItemCount() async {
+        let dc = DimensionCache()
+        let videoPrep = VideoPreparationActor()
+        let env = RenderEnvironment(
+            textPool: TextMeasurementPool(),
+            layoutCache: LayoutCache(),
+            dimensionCache: dc,
+            imageActor: ImageActor(dimensionCache: dc),
+            gifActor: GIFActor(),
+            videoController: VideoController(videoPreparation: videoPrep),
+            videoPreparation: videoPrep,
+            frozenBitmapStore: FrozenBitmapStore(byteBudget: 1),
+            hotBlockRasterizerStore: HotBlockRasterizerStore(),
+            hotCodeStreamStore: HotCodeStreamStore()
+        )
+        let feed = makeChatFeed(environment: env)
+
+        let blockCount = 12
+        feed.items = [ChatItem(id: 0, blocks: (0..<blockCount).map { "short block \($0)" })]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+        feed.layoutSubviews()
+
+        let sizedBudget = feed.renderEnvironment.frozenBitmapStore.byteBudget
+        let expectedBudget = FrozenBitmapStore.budget(forWindowCount: blockCount)
+        let itemCountBudget = FrozenBitmapStore.budget(forWindowCount: 1)
+
+        XCTAssertEqual(sizedBudget, expectedBudget,
+            "byteBudget must be sized from the 12 raster-bearing text fragments this ONE item "
+            + "owns, not from keepRange.count (1 item)")
+        XCTAssertGreaterThan(sizedBudget, itemCountBudget,
+            "Sanity: the artifact-count budget must exceed what an item-count budget of 1 would give")
+
+        await drainFeedWork(feed)
+    }
+
+    /// Grow-only preserved under artifact counting too: a later keep range with fewer artifacts
+    /// must never lower `byteBudget` below what a prior larger window already raised it to.
+    func testArtifactCountBudget_GrowOnly_LaterSmallerWindowNeverLowersIt() async {
+        let dc = DimensionCache()
+        let videoPrep = VideoPreparationActor()
+        let env = RenderEnvironment(
+            textPool: TextMeasurementPool(),
+            layoutCache: LayoutCache(),
+            dimensionCache: dc,
+            imageActor: ImageActor(dimensionCache: dc),
+            gifActor: GIFActor(),
+            videoController: VideoController(videoPreparation: videoPrep),
+            videoPreparation: videoPrep,
+            frozenBitmapStore: FrozenBitmapStore(byteBudget: 1),
+            hotBlockRasterizerStore: HotBlockRasterizerStore(),
+            hotCodeStreamStore: HotCodeStreamStore()
+        )
+        let feed = makeChatFeed(environment: env)
+
+        let bigBlockCount = 12
+        feed.items = [ChatItem(id: 0, blocks: (0..<bigBlockCount).map { "short block \($0)" })]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+        feed.layoutSubviews()
+
+        let budgetAfterBigItem = feed.renderEnvironment.frozenBitmapStore.byteBudget
+        XCTAssertEqual(budgetAfterBigItem, FrozenBitmapStore.budget(forWindowCount: bigBlockCount))
+
+        // Replace with a single small item -- 1 artifact, far fewer than the prior window's 12.
+        feed.items = [ChatItem(id: 1, blocks: ["short"])]
+        feed.layoutSubviews()
+        await waitForWorkingRangeCommit(feed, index: 0)
+        feed.layoutSubviews()
+
+        XCTAssertEqual(feed.renderEnvironment.frozenBitmapStore.byteBudget, budgetAfterBigItem,
+            "A smaller keep range's artifact count must never lower byteBudget below the prior peak")
+
+        await drainFeedWork(feed)
+    }
+
+    /// A code block's synchronous `.codeBlockBackground` fragment must not inflate the artifact
+    /// count. `extractFragments` emits 3 fragments per code block (background, header text, body
+    /// text) -- only the two TEXT fragments are raster-bearing (frozen into `FrozenBitmapStore`
+    /// by `rasterizeTextArtifacts`); the background is a synchronously-drawn rounded rect that
+    /// `RenderPipeline` never stores there.
+    func testCodeBlock_BackgroundFragmentExcluded_OnlyHeaderAndBodyCountAsArtifacts() async {
+        let dc = DimensionCache()
+        let videoPrep = VideoPreparationActor()
+        let env = RenderEnvironment(
+            textPool: TextMeasurementPool(),
+            layoutCache: LayoutCache(),
+            dimensionCache: dc,
+            imageActor: ImageActor(dimensionCache: dc),
+            gifActor: GIFActor(),
+            videoController: VideoController(videoPreparation: videoPrep),
+            videoPreparation: videoPrep,
+            frozenBitmapStore: FrozenBitmapStore(byteBudget: 1),
+            hotBlockRasterizerStore: HotBlockRasterizerStore(),
+            hotCodeStreamStore: HotCodeStreamStore()
+        )
+        let feed = FeedScrollView<CodeOrPlainItem>(environment: env, frame: CGRect(x: 0, y: 0, width: 375, height: 812))
+        feed.cellBuilder = { item in
+            VStackNode(spacing: 4) {
+                CodeBlockNode(language: "swift", rawCode: item.code ?? "", blockID: BlockID("code"), blockLifecycle: .sealed)
+            }
+        }
+        feed.items = [CodeOrPlainItem(id: 0, code: "let x = 1")]
+        feed.layoutSubviews()
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < deadline, feed._workingRangeMissCount(from: 0, to: 1) > 0 {
+            await Task.yield()
+            feed.layoutSubviews()
+        }
+        feed.layoutSubviews()
+
+        let sizedBudget = feed.renderEnvironment.frozenBitmapStore.byteBudget
+        let expectedBudget = FrozenBitmapStore.budget(forWindowCount: 2)
+        XCTAssertEqual(sizedBudget, expectedBudget,
+            "codeBlockBackground must be excluded from the artifact count -- a single code block "
+            + "owns exactly 2 raster-bearing artifacts (header + body), not 3")
 
         await drainFeedWork(feed)
     }

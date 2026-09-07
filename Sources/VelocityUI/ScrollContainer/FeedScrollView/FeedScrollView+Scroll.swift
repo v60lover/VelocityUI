@@ -34,9 +34,15 @@ extension FeedScrollView {
         // store's LRU ceiling can never fall below the visible window's own bitmap footprint
         // (a budget that small would evict a still-visible block and force a re-freeze). Purely
         // a lock-guarded synchronous call — no `await`, safe on the scroll path.
-        if keepRange.count > _frozenBudgetWindowCount {
-            _frozenBudgetWindowCount = keepRange.count
-            environment.frozenBitmapStore.sizeBudget(forWindowCount: keepRange.count)
+        //
+        // Sized from the raster-bearing ARTIFACT count, not `keepRange.count` (an item count) —
+        // one assistant markdown item can own dozens of raster-bearing blocks (paragraphs, code
+        // header+body, tables, math), so an item-count budget is far too small and evicts
+        // still-visible rasters.
+        let artifactCount = rasterArtifactCount(in: keepRange)
+        if artifactCount > _frozenBudgetWindowCount {
+            _frozenBudgetWindowCount = artifactCount
+            environment.frozenBitmapStore.sizeBudget(forWindowCount: artifactCount)
         }
 
         // Collect out-of-range indices into the pre-allocated scratch buffer, then remove.
@@ -194,6 +200,32 @@ extension FeedScrollView {
 
         syncContentSize()
         return visRange
+    }
+
+    /// Counts raster-bearing fragments — `.text` (any `codeBlockRole`, including a code body),
+    /// `.table`, and `.mathBlock` — across `range`, using whatever `WorkingRange` entries are
+    /// already committed. These are exactly the fragment kinds `RenderPipeline` rasterizes into
+    /// `FrozenBitmapStore` (see `rasterizeTextArtifacts`/`rasterizeTableArtifacts`/
+    /// `rasterizeMathArtifacts`); `.image`, `.codeBlockBackground` (a synchronous rounded-rect,
+    /// never frozen), and `.geometry` fragments don't own a bitmap there and are skipped.
+    ///
+    /// An index still a `WorkingRange` miss contributes 0 — this is only a starting-size
+    /// estimate, and the store already tracks real cost at store time, so undercounting an
+    /// unresolved index just means the budget catches up on the next boundary crossing.
+    func rasterArtifactCount(in range: Range<Int>) -> Int {
+        var count = 0
+        for index in range {
+            guard let entry = workingRange.entry(at: index) else { continue }
+            for fragment in entry.fragments {
+                switch fragment.content {
+                case .text, .table, .mathBlock:
+                    count += 1
+                case .image, .codeBlockBackground, .geometry:
+                    continue
+                }
+            }
+        }
+        return count
     }
 
     /// The index range to keep warm (measured, mounted, prefetched) around the visible viewport —
