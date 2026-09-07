@@ -25,6 +25,7 @@ struct FollowAnimator {
     private static let maximumFrameInterval: CFTimeInterval = 1 / 30
 
     private(set) var velocity: CGFloat = 0
+    private var position: CGFloat?
     private var lastTick: CFTimeInterval = 0
 
     mutating func step(
@@ -33,7 +34,7 @@ struct FollowAnimator {
         now: CFTimeInterval
     ) -> (offset: CGFloat, settled: Bool) {
         let boundedTarget = max(0, target)
-        let boundedCurrent = min(max(0, current), boundedTarget)
+        let boundedCurrent = min(max(0, position ?? current), boundedTarget)
         let elapsed = lastTick == 0
             ? Self.maximumFrameInterval
             : min(max(0, now - lastTick), Self.maximumFrameInterval)
@@ -41,6 +42,7 @@ struct FollowAnimator {
 
         guard abs(boundedTarget - boundedCurrent) > Self.epsilon else {
             velocity = 0
+            position = nil
             return (boundedTarget, true)
         }
 
@@ -54,21 +56,74 @@ struct FollowAnimator {
 
         guard nextOffset > 0, nextOffset < boundedTarget else {
             velocity = 0
+            position = nil
             return (min(max(0, nextOffset), boundedTarget), true)
         }
 
         if abs(boundedTarget - nextOffset) <= Self.epsilon {
             velocity = 0
+            position = nil
             return (boundedTarget, true)
         }
 
         velocity = nextVelocity
+        position = nextOffset
         return (nextOffset, false)
     }
 
     mutating func reset() {
         velocity = 0
+        position = nil
         lastTick = 0
+    }
+}
+
+@MainActor
+final class TailFollowDisplayLinkDriver {
+    private var displayLink: CADisplayLink?
+    private var proxy: TailFollowDisplayLinkProxy?
+    private var onTick: (@MainActor (CFTimeInterval) -> Void)?
+
+    var isRunning: Bool { displayLink != nil }
+
+    func start(onTick: @escaping @MainActor (CFTimeInterval) -> Void) {
+        guard displayLink == nil else { return }
+        self.onTick = onTick
+        let proxy = TailFollowDisplayLinkProxy(driver: self)
+        let link = CADisplayLink(target: proxy, selector: #selector(TailFollowDisplayLinkProxy.tick(_:)))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
+        link.add(to: .main, forMode: .common)
+        self.proxy = proxy
+        displayLink = link
+    }
+
+    func cancel() {
+        displayLink?.invalidate()
+        displayLink = nil
+        proxy = nil
+        onTick = nil
+    }
+
+    fileprivate func tick(_ link: CADisplayLink) {
+        onTick?(link.timestamp)
+    }
+}
+
+@MainActor
+private final class TailFollowDisplayLinkProxy: NSObject {
+    private weak var driver: TailFollowDisplayLinkDriver?
+
+    init(driver: TailFollowDisplayLinkDriver) {
+        self.driver = driver
+        super.init()
+    }
+
+    @objc func tick(_ link: CADisplayLink) {
+        guard let driver else {
+            link.invalidate()
+            return
+        }
+        driver.tick(link)
     }
 }
 
@@ -86,7 +141,7 @@ extension FeedScrollView {
         guard tailFollowMode != .off else { return }
         _tailSpacerPinIndex = items.isEmpty ? nil : items.count - 1
         _isFollowingTail = true
-        _followAnimator.reset()
+        cancelTailFollowAnimation(resetAnimator: true)
         setNeedsLayout()
     }
 
@@ -108,16 +163,50 @@ extension FeedScrollView {
     /// floating-point settle so a rubber-band-perfect landing doesn't read as "scrolled away".
     private var tailFollowReengageThreshold: CGFloat { 24 }
 
-    /// Advances the viewport toward the content bottom when tail-follow is engaged and nothing
-    /// user-driven is in flight. Called from `layoutSubviews`, after `refineKnownFrames` commits
-    /// this pass's height growth and before `updateVisibleCells` reads `contentOffset.y` — so the
-    /// same pass mounts cells at the followed position instead of lagging a frame behind.
+    /// Starts a display-paced arc after this layout pass has committed the latest content height.
+    /// Repeated layout passes only expose a fresher target; they do not drive extra spring steps.
     func applyTailFollowIfNeeded(now: CFTimeInterval = CACurrentMediaTime()) {
-        guard tailFollowMode != .off, _isFollowingTail, isScrollAtRest else { return }
+        guard tailFollowMode != .off, _isFollowingTail, isScrollAtRest else {
+            cancelTailFollowAnimation(resetAnimator: false)
+            return
+        }
+        guard _tailFollowDisplayLink?.isRunning != true else { return }
+        let result = stepTailFollow(now: now)
+        guard !result.settled else { return }
+        startTailFollowDisplayLink()
+    }
+
+    /// One spring step per display refresh keeps layout work bounded by the screen cadence.
+    func advanceTailFollowFromDisplayLink(now: CFTimeInterval) {
+        guard tailFollowMode != .off, _isFollowingTail, isScrollAtRest else {
+            cancelTailFollowAnimation(resetAnimator: false)
+            return
+        }
+        let oldOffset = contentOffset.y
+        let result = stepTailFollow(now: now)
+        if result.settled { cancelTailFollowAnimation(resetAnimator: false) }
+        if contentOffset.y != oldOffset { setNeedsLayout() }
+    }
+
+    private func stepTailFollow(now: CFTimeInterval) -> (offset: CGFloat, settled: Bool) {
         let maxOffset = max(0, contentSize.height - bounds.height)
         let result = _followAnimator.step(current: contentOffset.y, target: maxOffset, now: now)
         contentOffset.y = result.offset
-        if !result.settled { setNeedsLayout() }
+        return result
+    }
+
+    private func startTailFollowDisplayLink() {
+        let driver = _tailFollowDisplayLink ?? TailFollowDisplayLinkDriver()
+        _tailFollowDisplayLink = driver
+        driver.start { [weak self] timestamp in
+            self?.advanceTailFollowFromDisplayLink(now: timestamp)
+        }
+    }
+
+    private func cancelTailFollowAnimation(resetAnimator: Bool) {
+        _tailFollowDisplayLink?.cancel()
+        _tailFollowDisplayLink = nil
+        if resetAnimator { _followAnimator.reset() }
     }
 
     /// The `scrollViewDidScroll(_:)` delegate callback itself lives on `FeedScrollView` directly
@@ -129,10 +218,11 @@ extension FeedScrollView {
     /// every followed frame would immediately read itself as "user scrolled away".
     func updateTailFollowFromUserScroll() {
         guard tailFollowMode != .off, isUserScrollMotion else { return }
-        if isTracking { _followAnimator.reset() }
+        if isUserTracking { cancelTailFollowAnimation(resetAnimator: true) }
         let maxOffset = max(0, contentSize.height - bounds.height)
         let distanceFromBottom = maxOffset - contentOffset.y
         _isFollowingTail = distanceFromBottom <= tailFollowReengageThreshold
+        if !_isFollowingTail { cancelTailFollowAnimation(resetAnimator: false) }
     }
 
     /// `isDragging || isDecelerating`, overridable for tests — see
@@ -140,6 +230,11 @@ extension FeedScrollView {
     private var isUserScrollMotion: Bool {
         if let override = _testHooks.userScrollMotionOverride { return override }
         return isDragging || isDecelerating
+    }
+
+    private var isUserTracking: Bool {
+        if let override = _testHooks.userTrackingOverride { return override }
+        return isTracking
     }
 }
 #endif

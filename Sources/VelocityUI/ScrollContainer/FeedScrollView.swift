@@ -130,6 +130,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// `.llmChat` tail-follow: per-feed spring state for the synchronous viewport follow path.
     var _followAnimator = FollowAnimator()
 
+    /// Allocated lazily; its display link is invalidated on settle, touch, or teardown.
+    var _tailFollowDisplayLink: TailFollowDisplayLinkDriver?
+
     /// `contentOffset.y` observed on the previous `layoutSubviews` pass. Compared against
     /// the current value each pass to derive `scrollDirection` from a real scroll metric.
     private var lastScrollOffsetY: CGFloat = 0
@@ -321,6 +324,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
             // the run loop past this view's lifetime — the proxy is the only thing it retains
             // (see CodeBodyScrollDisplayLinkProxy), but the run loop itself keeps ticking.
             codeBodyScrollAnimator.cancelInFlightWork()
+            _tailFollowDisplayLink?.cancel()
         }
     }
 

@@ -62,10 +62,22 @@ final class FeedScrollViewTailFollowTests: XCTestCase {
     }
 
     private func settleTailFollow(_ feed: FeedScrollView<ChatItem>, frameCount: Int = 180) {
+        feed._tailFollowDisplayLink?.cancel()
         feed._followAnimator.reset()
-        for frame in 0...frameCount {
-            feed.applyTailFollowIfNeeded(now: CFTimeInterval(frame) / 120)
+        feed.applyTailFollowIfNeeded(now: 1)
+        for frame in 1...frameCount where feed._tailFollowDisplayLink != nil {
+            feed.advanceTailFollowFromDisplayLink(now: 1 + CFTimeInterval(frame) / 120)
         }
+    }
+
+    private func makeDisplayDrivenTailFollowFeed() -> FeedScrollView<ChatItem> {
+        let feed = makeChatFeed()
+        feed._debugScrollAtRestOverride = true
+        feed._debugIsFollowingTail = true
+        feed.contentSize = CGSize(width: feed.bounds.width, height: feed.bounds.height + 500)
+        feed.contentOffset = .zero
+        feed._followAnimator.reset()
+        return feed
     }
 
     // MARK: - FollowAnimator
@@ -145,6 +157,71 @@ final class FeedScrollViewTailFollowTests: XCTestCase {
         let freshResult = fresh.step(current: 0, target: 500, now: 0)
         XCTAssertEqual(reset.velocity, fresh.velocity, accuracy: 0.001)
         XCTAssertEqual(resetResult.offset, freshResult.offset, accuracy: 0.001)
+    }
+
+    // MARK: - Display-link tail-follow driver
+
+    func testTailFollow_LayoutEntryDoesNotAdvanceAnActiveDisplayDrivenArc() {
+        let feed = makeDisplayDrivenTailFollowFeed()
+
+        feed.applyTailFollowIfNeeded(now: 1)
+        let offsetAfterStart = feed.contentOffset.y
+        let velocityAfterStart = feed._followAnimator.velocity
+        XCTAssertTrue(feed._tailFollowDisplayLink?.isRunning == true)
+
+        feed.applyTailFollowIfNeeded(now: 1 + 1.0 / 60)
+        feed.applyTailFollowIfNeeded(now: 1 + 2.0 / 60)
+
+        XCTAssertEqual(feed.contentOffset.y, offsetAfterStart, accuracy: 0.001,
+            "layout entry must expose a fresh target without taking another spring step")
+        XCTAssertEqual(feed._followAnimator.velocity, velocityAfterStart, accuracy: 0.001,
+            "layout entry must not mutate the active spring while the display link is running")
+
+        feed._tailFollowDisplayLink?.cancel()
+    }
+
+    func testTailFollow_DisplayLinkAdvanceMovesTheActiveArc() {
+        let feed = makeDisplayDrivenTailFollowFeed()
+
+        feed.applyTailFollowIfNeeded(now: 1)
+        let offsetAfterStart = feed.contentOffset.y
+        XCTAssertTrue(feed._tailFollowDisplayLink?.isRunning == true)
+
+        feed.advanceTailFollowFromDisplayLink(now: 1 + 1.0 / 120)
+
+        XCTAssertGreaterThan(feed.contentOffset.y, offsetAfterStart,
+            "a later display-link timestamp must advance the spring toward the bottom")
+
+        feed._tailFollowDisplayLink?.cancel()
+    }
+
+    func testTailFollow_SettlingCancelsTheDisplayLinkDriver() {
+        let feed = makeDisplayDrivenTailFollowFeed()
+
+        feed.applyTailFollowIfNeeded(now: 1)
+        XCTAssertTrue(feed._tailFollowDisplayLink?.isRunning == true)
+
+        for frame in 1...600 where feed._tailFollowDisplayLink != nil {
+            feed.advanceTailFollowFromDisplayLink(now: 1 + CFTimeInterval(frame) / 120)
+        }
+
+        XCTAssertNil(feed._tailFollowDisplayLink,
+            "settling must invalidate the display-link driver")
+        XCTAssertEqual(feed.contentOffset.y, 500, accuracy: 0.5)
+    }
+
+    func testTailFollow_UserTrackingCancelsDriverAndClearsMomentum() {
+        let feed = makeDisplayDrivenTailFollowFeed()
+        feed.applyTailFollowIfNeeded(now: 1)
+        XCTAssertTrue(feed._tailFollowDisplayLink?.isRunning == true)
+        XCTAssertNotEqual(feed._followAnimator.velocity, 0)
+
+        feed._debugUserScrollMotionOverride = true
+        feed._debugUserTrackingOverride = true
+        feed.updateTailFollowFromUserScroll()
+
+        XCTAssertNil(feed._tailFollowDisplayLink)
+        XCTAssertEqual(feed._followAnimator.velocity, 0, accuracy: 0.001)
     }
 
     // MARK: - 4. Top-down list — no inverted/bottom-anchored layout

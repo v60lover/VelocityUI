@@ -69,6 +69,9 @@ final class FeedScrollViewTestHooks {
     /// falls back to the real UIKit signals.
     var userScrollMotionOverride: Bool?
 
+    /// Overrides `isTracking` for the tail-follow grab path. `nil` uses UIKit state.
+    var userTrackingOverride: Bool?
+
     /// Counts Task spawns from `requestRasterRepairIfNeeded()` — the async raster-repair side
     /// channel (VelocityUI-8otc.6.3). Stays at 1 across repeated layout passes while a repair is
     /// in flight — the coalescing invariant under test.
@@ -116,6 +119,10 @@ extension FeedScrollView {
     var _debugScrollAtRestOverride: Bool? {
         get { _testHooks.scrollAtRestOverride }
         set { _testHooks.scrollAtRestOverride = newValue }
+    }
+    var _debugUserTrackingOverride: Bool? {
+        get { _testHooks.userTrackingOverride }
+        set { _testHooks.userTrackingOverride = newValue }
     }
 
     /// Mirrors the `visRange` computed at the top of `updateVisibleCells()` — the range actually
