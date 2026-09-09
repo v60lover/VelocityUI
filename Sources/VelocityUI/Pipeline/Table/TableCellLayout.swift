@@ -91,12 +91,13 @@ nonisolated func makeTableCellDescriptors(
         let rowFont = rowIndex == 0 ? headerFont : font
         return row.map { cell in
             let runs = cell.runs.map { IncrementalMarkdownParser.textRun(for: $0, baseFont: rowFont, baseColor: color) }
+            let content = cell.runs.isEmpty ? cell.text : cell.runs.map(\.text).joined()
             var hasher = Hasher()
-            hasher.combine(cell.text)
+            hasher.combine(content)
             hasher.combine(runs)
             let hash = hasher.finalize()
             return TextDescriptor(
-                content: cell.text,
+                content: content,
                 font: rowFont,
                 color: color,
                 lineLimit: nil,

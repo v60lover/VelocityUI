@@ -65,6 +65,38 @@ final class TableCellLayoutTests: XCTestCase {
         XCTAssertEqual(descriptors[1][0].font.weight, VFontDescriptor.regularWeight)
     }
 
+    // MARK: - Test 2b: `**bold**` cell strips markers and bolds the whole word
+
+    /// Regression: a `**bold**` table cell must render its content WITHOUT the literal `**`
+    /// markers, and the bold run must cover the entire word — not stop short, leaving the last
+    /// characters unstyled. The bug: `content` used the raw `cell.text` (`"**Eviction metric**"`)
+    /// while `runs` were tokenized from the stripped text, so the bold run (length 15) applied to
+    /// the first 15 UTF-16 units of a 19-unit string, unstyling the `ic**` tail.
+    func testBoldCellStripsMarkersAndBoldsWholeWord() {
+        let font = VFontDescriptor(size: 16, weight: VFontDescriptor.regularWeight)
+
+        let raw = "**Eviction metric**"
+        let tableRows: [[TableCell]] = [
+            [TableCell(text: raw, runs: inlineRuns(raw))]
+        ]
+
+        let descriptors = makeTableCellDescriptors(tableRows: tableRows, font: font)
+        let descriptor = descriptors[0][0]
+
+        // Content has no literal markers.
+        XCTAssertEqual(descriptor.content, "Eviction metric")
+        XCTAssertFalse(descriptor.content.contains("*"))
+
+        // The run lengths cover exactly the content — nothing left over to fall back to base style.
+        let totalRunLength = descriptor.runs.reduce(0) { $0 + $1.length }
+        XCTAssertEqual(totalRunLength, descriptor.content.utf16.count)
+
+        // Every run carries the bold weight (the whole word is emphasized, no unstyled tail).
+        for run in descriptor.runs {
+            XCTAssertEqual(run.font.weight, VFontDescriptor.boldWeight)
+        }
+    }
+
     // MARK: - Test 3: Left alignment flushes text to cell's left padding edge
 
     func testLeftAlignmentFlushesTextLeft() {
