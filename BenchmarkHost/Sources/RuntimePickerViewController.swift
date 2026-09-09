@@ -25,7 +25,18 @@ final class RuntimePickerViewController: UITableViewController {
     /// VelocityUI-0tbi: a second "Scenarios" row so the user can flip gesture-gated deferral
     /// ON/OFF in one on-device session (dragging under each) without relaunching the app.
     private static let streamDeferralRowTitle = "VelocityUI — Streaming Text (gesture-gated deferral)"
-    private static let streamRowCount = 2
+    /// VelocityUI-25q7: a third row — same transcript UI as the two rows above, but the assistant
+    /// side streams from a real OpenAI-compatible endpoint (`LiveLLMClient`) instead of a canned
+    /// token list, and the user drives it by typing (`LiveLLMViewController`'s input bar) rather
+    /// than the scenario auto-playing scripted turns.
+    private static let liveLLMRowTitle = "VelocityUI — Live LLM"
+    private static let streamRowCount = 3
+    private static let streamRowSubtitles = [
+        "Canned transcript, auto-plays",
+        "Same, with scroll-gated update deferral",
+        "Real network reply, you type the prompt",
+    ]
+    private static let streamRowIcons = ["text.append", "hand.draw", "bolt.fill"]
 
     /// VelocityUI-0c5's `.grid(columns:spacing:)` DSL — same shape as the `Scenarios` section
     /// above (live-only, not part of the `runtimes` matrix `makeRuntimeVC` drives generically):
@@ -47,6 +58,9 @@ final class RuntimePickerViewController: UITableViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
+        tableView.rowHeight = UITableView.automaticDimension
+        tableView.estimatedRowHeight = 60
+        navigationController?.navigationBar.prefersLargeTitles = true
     }
 
     override func numberOfSections(in tableView: UITableView) -> Int { 3 }
@@ -69,14 +83,28 @@ final class RuntimePickerViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath)
+        var content = UIListContentConfiguration.subtitleCell()
+        content.textProperties.font = .preferredFont(forTextStyle: .headline)
+        content.secondaryTextProperties.font = .preferredFont(forTextStyle: .footnote)
+        content.secondaryTextProperties.color = .secondaryLabel
+        content.imageProperties.tintColor = .systemBlue
+
         switch indexPath.section {
         case 0:
-            cell.textLabel?.text = runtimes[indexPath.row].title
+            content.text = runtimes[indexPath.row].title
+            content.secondaryText = "Scroll benchmark"
+            content.image = UIImage(systemName: "square.stack.3d.up")
         case 1:
-            cell.textLabel?.text = indexPath.row == 0 ? Self.streamRowTitle : Self.streamDeferralRowTitle
+            let row = indexPath.row
+            content.text = [Self.streamRowTitle, Self.streamDeferralRowTitle, Self.liveLLMRowTitle][row]
+            content.secondaryText = Self.streamRowSubtitles[row]
+            content.image = UIImage(systemName: Self.streamRowIcons[row])
         default:
-            cell.textLabel?.text = Self.gridRowTitle
+            content.text = Self.gridRowTitle
+            content.secondaryText = "Masonry-style grid, live-only"
+            content.image = UIImage(systemName: "square.grid.2x2")
         }
+        cell.contentConfiguration = content
         cell.accessoryType = .disclosureIndicator
         return cell
     }
@@ -87,6 +115,9 @@ final class RuntimePickerViewController: UITableViewController {
         case 0:
             let runtime = runtimes[indexPath.row].runtime
             let vc = makeRuntimeVC(runtime: runtime)
+            navigationController?.pushViewController(vc, animated: true)
+        case 1 where indexPath.row == 2:
+            let vc = LiveLLMViewController()
             navigationController?.pushViewController(vc, animated: true)
         case 1:
             // VelocityUI-0tbi: hot-rasterize/rate/text-only now read from LaunchArguments (were
