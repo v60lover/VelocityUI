@@ -2,6 +2,16 @@
 
 import Foundation
 import CoreGraphics
+#if canImport(os)
+import os
+#endif
+
+#if canImport(os) && DEBUG
+/// Temporary diagnostic for VelocityUI-pojd: logs every line seen by `parseTail` that contains
+/// `![`, matched or not, so real LLM output can be checked against `isImageLine`'s syntax
+/// coverage (title-attribute images, reference-style `![alt][ref]`, multiple images per line, …).
+private let markdownImageDiagnosticLog = Logger(subsystem: "com.velocityui", category: "MarkdownImageParse")
+#endif
 
 // MARK: - MarkdownBlockKind
 
@@ -12,9 +22,9 @@ public enum TableColumnAlignment: Sendable, Equatable, Hashable {
 }
 
 /// The markdown block shapes this parser recognizes. Drives which `TextDescriptor` style
-/// `IncrementalMarkdownParser.blocks(itemID:width:)` picks — there is no dedicated
-/// `FragmentContent` case per kind; everything renders as styled text (`Block` only wraps
-/// `.text`/`.image`/`.geometry` — see `Block.swift`).
+/// `IncrementalMarkdownParser.blocks(itemID:width:)` picks — with one exception (`.image`,
+/// which maps to `FragmentContent.image` instead), everything else renders as styled text
+/// (`Block` only wraps `.text`/`.image`/`.geometry` — see `Block.swift`).
 public enum MarkdownBlockKind: Sendable, Equatable, Hashable {
     case paragraph
     case heading(level: Int)
@@ -38,6 +48,12 @@ public enum MarkdownBlockKind: Sendable, Equatable, Hashable {
     /// `style()`) holds the raw TeX with delimiter lines stripped, same convention as
     /// `.codeFence` stripping its fence markers.
     case mathBlock
+    /// A markdown image (`![alt](url)`) alone on its own line. Block-level only — an image
+    /// mixed into running paragraph text is out of scope (`Fragment` carries one
+    /// `FragmentContent` per block, and adding mixed text+image content per block is a
+    /// materially bigger change). Alt text is parsed to validate the syntax but not stored:
+    /// nothing in the codebase consumes an image alt/accessibility label today.
+    case image(url: URL)
 }
 
 /// A styled span within a text block's content, produced by `inlineRuns(_:)`. `url` is only
@@ -428,14 +444,40 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         _ parsed: ParsedMDBlock, itemID: ID, index: Int, blockID: BlockID, width: CGFloat,
         lifecycle: BlockLifecycle, theme: MarkdownTheme, isPendingTableHeader: Bool = false
     ) -> Block {
-        let descriptor = makeDescriptor(parsed, theme: theme, isPendingTableHeader: isPendingTableHeader)
         let frame = CGRect(x: 0, y: 0, width: width, height: 0)
-        let fragment = Fragment(id: index, blockID: blockID, content: .text(descriptor), frame: frame)
+        let content: FragmentContent
+        if case .image(let url) = parsed.kind {
+            content = .image(imageDescriptor(url: url))
+        } else {
+            content = .text(makeDescriptor(parsed, theme: theme, isPendingTableHeader: isPendingTableHeader))
+        }
+        let fragment = Fragment(id: index, blockID: blockID, content: content, frame: frame)
         return Block(
             key: BlockKey(itemID: itemID, blockID: blockID),
             fragment: fragment,
             layout: ResolvedLayout(totalFrame: frame),
             lifecycle: lifecycle
+        )
+    }
+
+    /// Builds an `ImageDescriptor` for a markdown image block by constructing the same
+    /// `AsyncImageNode` the production `StreamingMarkdownText.renderNode` path returns, then
+    /// copying its own `layoutHash`/`appearanceHash` — reuses the one hash formula
+    /// `AsyncImageNode` already owns instead of re-deriving a second one here (Section 3
+    /// cross-site consistency: the same defaults, the same hashes, only one call site
+    /// disagreeing with itself is impossible by construction).
+    private static func imageDescriptor(url: URL) -> ImageDescriptor {
+        let node = AsyncImageNode(url: url)
+        return ImageDescriptor(
+            url: node.url,
+            aspectRatio: node.aspectRatio,
+            contentMode: node.contentMode.rawValue,
+            cornerRadius: node.cornerRadius,
+            layoutHash: node.layoutHash,
+            appearanceHash: node.appearanceHash,
+            thumbnailData: node.thumbnailData,
+            blurHash: node.blurHash,
+            customPlaceholderPayload: node.customPlaceholderPayload
         )
     }
 
@@ -509,6 +551,12 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             font = theme.body
         case .paragraph:
             font = theme.body
+        case .image:
+            // Dead in practice: both call sites (`makeBlock` and `StreamingMarkdownText.
+            // renderNode`) branch away to build an `.image` fragment/`AsyncImageNode` before
+            // ever reaching `style()`. Kept only so this switch stays exhaustive.
+            font = theme.body
+            content = ""
         case .thematicBreak:
             font = theme.body
             // A single invisible space, not the raw "---"/"***"/"___" source: the rule itself is
@@ -709,7 +757,7 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             return inlineRuns(text)
         case .listItem:
             return inlineRuns(Self.stripListMarker(text))
-        case .codeFence, .table, .thematicBreak, .mathBlock:
+        case .codeFence, .table, .thematicBreak, .mathBlock, .image:
             return []
         }
     }
@@ -916,6 +964,25 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
             }
             return (level, String(text))
         }
+        // Recognizes a line that consists of exactly `![alt](url)`, alone — same strictness
+        // as `isATXHeading`/`isThematicBreak` (leading spaces == 0). Alt text is only used to
+        // find the closing `]`; the URL substring is everything between the matching `(` and
+        // the line's final `)`, so a URL containing its own parentheses still round-trips.
+        // Returns nil while the line is still streaming (no closing `)` yet, or malformed),
+        // so a not-yet-complete image line degrades to ordinary paragraph text meanwhile
+        // instead of misparsing.
+        func isImageLine(_ line: Substring) -> URL? {
+            guard leadingSpaces(line) == 0 else { return nil }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("!["), trimmed.hasSuffix(")"), trimmed.count > 3 else { return nil }
+            let body = trimmed.dropFirst(2).dropLast()
+            guard let closeBracket = body.firstIndex(of: "]") else { return nil }
+            let afterBracket = body.index(after: closeBracket)
+            guard afterBracket < body.endIndex, body[afterBracket] == "(" else { return nil }
+            let urlString = String(body[body.index(after: afterBracket)...])
+            guard !urlString.isEmpty, let url = URL(string: urlString) else { return nil }
+            return url
+        }
         func isThematicBreak(_ line: Substring) -> Bool {
             guard leadingSpaces(line) == 0 else { return false }
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -1044,6 +1111,22 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
                 inContainer = false
                 containerBlankSeen = false
                 openKind = .thematicBreak
+                openLines = [line]
+                finalizeOpenBlock()
+                continue
+            }
+
+            let imageLineMatch = isImageLine(line)
+            #if canImport(os) && DEBUG
+            if line.contains("![") {
+                markdownImageDiagnosticLog.debug("line contains '![': \(String(line), privacy: .public) matched=\(imageLineMatch != nil)")
+            }
+            #endif
+            if let url = imageLineMatch {
+                finalizeOpenBlock()
+                inContainer = false
+                containerBlankSeen = false
+                openKind = .image(url: url)
                 openLines = [line]
                 finalizeOpenBlock()
                 continue

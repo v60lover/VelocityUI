@@ -1,5 +1,16 @@
 // StreamingMarkdownText.swift
 
+#if canImport(os)
+import os
+#endif
+
+#if canImport(os) && DEBUG
+/// Temporary diagnostic for VelocityUI-pojd: compares the raw markdown line the model streamed
+/// against the URL our image-line parser extracted from it, to catch any real-world image
+/// syntax our parser mishandles (vs. the model simply hallucinating a dead/non-image URL).
+private let markdownImageLog = Logger(subsystem: "com.velocityui", category: "MarkdownImage")
+#endif
+
 extension IncrementalMarkdownParser {
 
     /// One block's identity/lifecycle plus its parsed content, so a caching owner can decide
@@ -43,6 +54,12 @@ extension IncrementalMarkdownParser {
     /// sequence — see `isPendingTableCandidate`. A non-trailing block matching that text shape
     /// has already been resolved as a plain paragraph by whatever followed it.
     static func renderNode(for block: RenderableBlock, theme: MarkdownTheme, isPendingTableHeader: Bool = false) -> any RenderNode {
+        if case .image(let url) = block.parsed.kind {
+            #if canImport(os) && DEBUG
+            markdownImageLog.debug("raw line: \(block.parsed.text, privacy: .public) -> parsed url: \(url.absoluteString, privacy: .public)")
+            #endif
+            return AsyncImageNode(url: url)
+        }
         let styled = Self.style(block.parsed, theme: theme, isPendingTableHeader: isPendingTableHeader)
         let lifecycle: BlockLifecycle = block.isSealed ? .sealed : .hot
         if case .codeFence(let language) = block.parsed.kind {

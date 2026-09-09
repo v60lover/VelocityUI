@@ -428,6 +428,9 @@ public actor ImageActor {
                 ]
 
                 guard let src = CGImageSourceCreateWithData(capturedData as CFData, nil) else {
+                    #if DEBUG
+                    log.error("CGImageSourceCreateWithData failed to parse \(capturedData.count) bytes")
+                    #endif
                     Task { await sem.signal() }
                     cont.resume(returning: DecodeResult(image: nil, rawSourceSize: nil))
                     return
@@ -446,6 +449,9 @@ public actor ImageActor {
                 }()
 
                 guard let thumb = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else {
+                    #if DEBUG
+                    log.error("CGImageSourceCreateThumbnailAtIndex failed (rawSize=\(String(describing: rawSize)))")
+                    #endif
                     Task { await sem.signal() }
                     // rawSourceSize intentionally nil: a cached dimension with no paintable image would let
                     // classify() size a row that can never be filled.
@@ -485,10 +491,20 @@ public actor ImageActor {
         #if DEBUG
         let networkStart = CFAbsoluteTimeGetCurrent()
         #endif
-        guard let (data, response) = try? await session.data(from: url) else {
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(from: url)
+        } catch {
+            #if DEBUG
+            log.error("network fetch failed for \(url.absoluteString, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            #endif
             return DecodeResult(image: nil, rawSourceSize: nil)
         }
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            #if DEBUG
+            log.error("network fetch for \(url.absoluteString, privacy: .public) returned status \(http.statusCode)")
+            #endif
             return DecodeResult(image: nil, rawSourceSize: nil)
         }
         #if DEBUG
