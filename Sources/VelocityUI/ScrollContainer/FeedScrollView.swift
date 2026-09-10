@@ -39,9 +39,16 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// `warmWindow`, so tuning the prefetch window can't silently move the page-load trigger.
     public let reachEndThreshold: Int
 
-    /// Called when a user taps a cell. Receives the tapped item and its frame in
-    /// scroll-content coordinates.
+    /// Called when a user taps a cell. Receives the tapped item and its frame converted to
+    /// **window coordinates** (`convert(_:to: nil)`, computed once at tap time) — ready to
+    /// drive a zoom/preview transition without a caller-side coordinate conversion.
     public var onTap: (@MainActor (Item, CGRect) -> Void)?
+
+    /// VoiceOver label source for a visible cell's `UIAccessibilityElement`. `nil` (default)
+    /// falls back to `String(describing:)`. Phase 1 only — full node-level labeling is out of
+    /// scope here (see VelocityUI-ye8a.2). Named distinctly from `UIView.accessibilityLabel`
+    /// (a plain `String?`, inherited via `UIScrollView`), which this does not override.
+    public var cellAccessibilityLabel: ((Item) -> String)?
 
     /// Called when the visible trailing edge nears the end of the item list.
     /// Fired at most once per page; resets when `items.count` grows.
@@ -98,6 +105,27 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     var estimatedIndices: Set<Int> = []
 
     var visibleCells: [Int: RenderCell] = [:]
+
+    /// Transparent view above the cell layers hosting the tap gesture recognizer and VoiceOver
+    /// accessibility elements — bare CALayer cells carry neither on their own. Bare CALayers
+    /// added via `layer.addSublayer` never participate in UIView hit-testing, so the overlay's
+    /// z-order relative to them is cosmetically irrelevant (it paints nothing).
+    let interactionOverlay = InteractionOverlay()
+
+    /// Content-coordinate frame for each currently mounted index, snapshotted at the same
+    /// mount/unmount/reposition sites `updateVisibleCells()` already has — not derived from
+    /// live `resolvedFrames` at tap time. See `FeedScrollView+Accessibility.swift`.
+    var frameMap: [Int: CGRect] = [:]
+
+    /// One reused `UIAccessibilityElement` per mounted index. Only added/removed on
+    /// mount/unmount; its frame is refreshed in place every layout pass in
+    /// `syncInteractionOverlayFrame()`.
+    var accessibilityElementsByIndex: [Int: UIAccessibilityElement] = [:]
+
+    /// Set when a mount/unmount changed the accessible SET this pass — the next
+    /// `flushAccessibilityElementsIfNeeded()` rebuilds `interactionOverlay.accessibilityElements`
+    /// once instead of every frame.
+    var _accessibilityElementsDirty = false
 
     /// Owns cell recycling (dequeue/returnToPool) — see `CellPool`.
     let cellPool: CellPool
@@ -280,8 +308,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
         // Self-delegate purely to catch bounce/deceleration end (the deferred-contentSize flush,
         // below). VelocityUI otherwise makes no use of the scroll delegate.
         delegate = self
-        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
-        addGestureRecognizer(tap)
+        addSubview(interactionOverlay)
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTapGesture(_:)))
+        interactionOverlay.addGestureRecognizer(tap)
 
         let codePan = HorizontalCodePanRecognizer(target: self, action: #selector(handleCodePan(_:)))
         codePan.hitTest = { [weak self] point in self?.resolveCodeBodyTarget(at: point) != nil }
@@ -388,6 +417,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
         refineKnownFrames()
         applyTailFollowIfNeeded()
         let visRange = updateVisibleCells()
+        syncInteractionOverlayFrame()
         notifyPipelineIfNeeded()
         requestRasterRepairIfNeeded()
         checkReachEnd(visRange: visRange)
@@ -417,16 +447,18 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
 
     // MARK: - Tap handling
 
-    @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
+    @objc private func handleTapGesture(_ gesture: UITapGestureRecognizer) {
         // UIScrollView: bounds.origin = contentOffset, so gesture.location(in:) is already content-space.
-        let contentPt = gesture.location(in: self)
-        for (index, _) in visibleCells {
-            guard index < resolvedFrames.count, index < items.count else { continue }
-            if resolvedFrames[index].contains(contentPt) {
-                onTap?(items[index], resolvedFrames[index])
-                return
-            }
-        }
+        handleTap(at: gesture.location(in: self))
+    }
+
+    /// Non-`@objc` body of the tap handler — a plain internal method so tests can drive tap
+    /// resolution without synthesizing a real `UITapGestureRecognizer`.
+    func handleTap(at contentPoint: CGPoint) {
+        guard let index = resolveTappedIndex(at: contentPoint), index < items.count,
+              let contentFrame = frameMap[index] else { return }
+        let windowFrame = convert(contentFrame, to: nil)
+        onTap?(items[index], windowFrame)
     }
 
     // MARK: - Code body horizontal scroll

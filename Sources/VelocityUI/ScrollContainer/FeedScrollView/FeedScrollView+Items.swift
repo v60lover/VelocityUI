@@ -83,6 +83,7 @@ extension FeedScrollView {
             if let cell = visibleCells.removeValue(forKey: r.prevIdx) {
                 returnToPool(cell)
             }
+            unmountAccessibilityElement(for: r.prevIdx)
         }
         return (oldFrames, survivors)
     }
@@ -237,6 +238,14 @@ extension FeedScrollView {
         let width = measureWidth(for: containerWidth)
         let scale = max(1, traitCollection.displayScale)
 
+        // frameMap/accessibilityElementsByIndex are keyed the same way as visibleCells — a
+        // survivor's index shift (e.g. a prepend) must remap them too, or a stale prevIdx entry
+        // would misreport an unrelated item's frame/label after the reindex.
+        var keptFrameMap: [Int: CGRect] = [:]
+        keptFrameMap.reserveCapacity(visibleCells.count)
+        var keptAccessibilityElements: [Int: UIAccessibilityElement] = [:]
+        keptAccessibilityElements.reserveCapacity(visibleCells.count)
+
         for (prevIdx, cell) in visibleCells {
             switch reconcileCell(
                 prevIdx: prevIdx, cell: cell, survivorByPrevIdx: survivorByPrevIdx,
@@ -244,9 +253,12 @@ extension FeedScrollView {
                 width: width, scale: scale
             ) {
             case .recycled:
+                unmountAccessibilityElement(for: prevIdx)
                 continue
             case .kept(let nextIdx, let blockDiffResolved, let workingRangeCommit):
                 keptCells[nextIdx] = cell
+                if let frame = frameMap[prevIdx] { keptFrameMap[nextIdx] = frame }
+                if let element = accessibilityElementsByIndex[prevIdx] { keptAccessibilityElements[nextIdx] = element }
                 if blockDiffResolved {
                     blockDiffResolvedIndices.insert(nextIdx)
                     if let workingRangeCommit {
@@ -256,6 +268,8 @@ extension FeedScrollView {
             }
         }
         visibleCells = keptCells
+        frameMap = keptFrameMap
+        accessibilityElementsByIndex = keptAccessibilityElements
 
         return resolveDeferredInvalidation(
             changeSet: changeSet, plan: plan, keptCells: keptCells,
@@ -345,6 +359,7 @@ extension FeedScrollView {
         applyContentHeightDelta(delta)
         estimatedIndices.remove(nextIdx)
         cell.layer.frame = resolvedFrames[nextIdx]
+        mountAccessibilityElement(for: nextIdx, frame: resolvedFrames[nextIdx], item: items[nextIdx])
         // Merge image cache hits with the block-diff's freshly-resolved text bitmaps — fragment
         // ids never collide across content kinds within one item's NodeTable, so a plain
         // overwrite-merge is safe.
@@ -1105,6 +1120,7 @@ extension FeedScrollView {
         let delta = VerticalLayoutProvider.refineFrames(&resolvedFrames, at: lastIdx, newHeight: result.height)
         applyContentHeightDelta(delta)
         cell.layer.frame = resolvedFrames[lastIdx]
+        mountAccessibilityElement(for: lastIdx, frame: resolvedFrames[lastIdx], item: item)
 
         var syncMap = buildSyncMap(for: result.fragments, table: newTable, ordinals: newTable.leafOrdinals(), index: lastIdx)
         for (id, bitmap) in result.textBitmaps { syncMap[id] = bitmap }

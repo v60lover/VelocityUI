@@ -73,6 +73,7 @@ extension FeedScrollView {
                 cell.layer.removeFromSuperlayer()
                 returnToPool(cell)
             }
+            unmountAccessibilityElement(for: index)
         }
 
         // Set when a LayoutCache-hit mount below refines resolvedFrames for an index whose real
@@ -95,6 +96,9 @@ extension FeedScrollView {
                 if keptCell.layer.superlayer == nil {
                     keptCell.layer.frame = resolvedFrames[index]
                     layer.addSublayer(keptCell.layer)
+                    if index < items.count {
+                        mountAccessibilityElement(for: index, frame: resolvedFrames[index], item: items[index])
+                    }
                 }
                 if let entry = workingRange.entry(at: index) {
                     let ordinals = tables[index].leafOrdinals()
@@ -190,6 +194,9 @@ extension FeedScrollView {
 
             layer.addSublayer(cell.layer)
             visibleCells[index] = cell
+            if index < items.count {
+                mountAccessibilityElement(for: index, frame: cell.layer.frame, item: items[index])
+            }
         }
 
         if !enteringKeys.isEmpty {
@@ -202,10 +209,14 @@ extension FeedScrollView {
             for (i, cell) in visibleCells {
                 guard i < resolvedFrames.count else { continue }
                 cell.layer.frame = resolvedFrames[i]
+                if i < items.count {
+                    mountAccessibilityElement(for: i, frame: resolvedFrames[i], item: items[i])
+                }
             }
         }
 
         syncContentSize()
+        flushAccessibilityElementsIfNeeded()
         return visRange
     }
 
