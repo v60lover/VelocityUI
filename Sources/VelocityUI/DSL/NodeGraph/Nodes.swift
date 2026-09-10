@@ -211,6 +211,16 @@ public struct SpacerNode: RenderNode {
 struct TextBackgroundChrome: Sendable, Hashable {
     let cornerRadius: CGFloat
     let color: VColorDescriptor
+    /// Inset between the background's edge and the text it backs. Layout-affecting — folds into
+    /// `TextNode.layoutHash`, not `appearanceHash` (unlike `cornerRadius`/`color`, which are
+    /// paint-only).
+    let padding: VEdgeInsets
+
+    init(cornerRadius: CGFloat, color: VColorDescriptor, padding: VEdgeInsets = .zero) {
+        self.cornerRadius = cornerRadius
+        self.color = color
+        self.padding = padding
+    }
 }
 
 // MARK: - TextNode
@@ -352,6 +362,7 @@ public struct TextNode: RenderNode {
         h.combine(leadingBarGap)
         h.combine(alignment)
         h.combine(maxWidthFraction)
+        h.combine(backgroundChrome?.padding)
         for run in runs {
             h.combine(run.length)
             h.combine(run.font)
@@ -361,7 +372,9 @@ public struct TextNode: RenderNode {
 
     /// appearanceHash covers color and decoration ink (underline/strikethrough) — none of these
     /// affect glyph advances or line wrapping — plus each run's paint-only fields (color,
-    /// underline/strikethrough style, background color, link URL).
+    /// underline/strikethrough style, background color, link URL). `backgroundChrome`'s
+    /// `cornerRadius`/`color` are paint-only too; its `padding` is layout-affecting and folds into
+    /// `layoutHash` instead (above).
     public var appearanceHash: Int {
         var h = Hasher()
         h.combine(color)
@@ -369,7 +382,8 @@ public struct TextNode: RenderNode {
         h.combine(strikethroughStyle)
         h.combine(leadingBarColor)
         h.combine(ruleColor)
-        h.combine(backgroundChrome)
+        h.combine(backgroundChrome?.cornerRadius)
+        h.combine(backgroundChrome?.color)
         for run in runs {
             h.combine(run.color)
             h.combine(run.underlineStyle)
@@ -432,7 +446,7 @@ public struct TextNode: RenderNode {
     /// rasterization time via `CGContext` clip — never `CALayer.cornerRadius`/`masksToBounds`.
     /// Unlike the other modifiers above, this one preserves every field (including `alignment`/
     /// `maxWidthFraction`/`codeBlockRole`) since it's meant to be chained after those are set.
-    public func roundedBackground(cornerRadius: CGFloat, color: VColorDescriptor) -> TextNode {
+    public func roundedBackground(cornerRadius: CGFloat, color: VColorDescriptor, padding: VEdgeInsets = .zero) -> TextNode {
         TextNode(
             content, font: font, color: self.color, lineLimit: lineLimit, lineBreakMode: lineBreakMode,
             underlineStyle: underlineStyle, strikethroughStyle: strikethroughStyle,
@@ -440,7 +454,7 @@ public struct TextNode: RenderNode {
             leadingBarColor: leadingBarColor, leadingBarWidth: leadingBarWidth, leadingBarGap: leadingBarGap,
             ruleColor: ruleColor, alignment: alignment, maxWidthFraction: maxWidthFraction,
             blockID: blockID, blockLifecycle: blockLifecycle, codeBlockRole: codeBlockRole,
-            backgroundChrome: TextBackgroundChrome(cornerRadius: cornerRadius, color: color)
+            backgroundChrome: TextBackgroundChrome(cornerRadius: cornerRadius, color: color, padding: padding)
         )
     }
 }

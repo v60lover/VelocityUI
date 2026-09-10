@@ -99,23 +99,40 @@ private func measureContent(
             // user bubble (fraction ~0.8) wraps narrower than the assistant's full-width text
             // (fraction 1.0), same width-in/size-out contract as the grid's per-column
             // measurement (GridTextMeasurementTests).
-            let measureWidth = width * CGFloat(d.maxWidthFraction)
+            let availableWidth = width * CGFloat(d.maxWidthFraction)
+            // backgroundChrome.padding insets the text within its bubble -- subtract it from the
+            // measure width so wrapping respects the inset, matching the outer/inner frame split
+            // applied below. `.zero` (no chrome, or roundedBackground's default) keeps this a
+            // no-op, so unchromed rows measure exactly as before.
+            let padding = d.backgroundChrome?.padding ?? .zero
+            let measureWidth = max(0, availableWidth - padding.leading - padding.trailing)
             let size = ctx.measure(d, width: measureWidth, formulaCache: formulaCache)
             // A rule (markdown thematic break) must span the full proposed width, not the
             // near-zero intrinsic width of its single-space content -- same "pin to container
             // width" contract `.codeBlock`/`.table`/`.mathBlock` use below, just in the other
             // direction (widening a too-narrow leaf instead of clamping a too-wide one). This
             // overrides maxWidthFraction intentionally: a rule always spans the row.
-            let resolvedWidth = d.ruleColor != nil ? width : size.width
-            // x is placed against the undivided column `width`, not `measureWidth` -- a trailing
-            // row is flush with the column's right edge, not the fraction's own right edge.
+            let resolvedTextWidth = d.ruleColor != nil ? availableWidth : size.width
+            let outerWidth = resolvedTextWidth + padding.leading + padding.trailing
+            let outerHeight = size.height + padding.top + padding.bottom
+            // x is placed against the undivided column `width`, not `measureWidth`/`availableWidth`
+            // -- a trailing row (bubble included) is flush with the column's right edge.
             let x: CGFloat
             switch d.alignment {
             case .leading: x = 0
-            case .center: x = (width - resolvedWidth) / 2
-            case .trailing: x = width - resolvedWidth
+            case .center: x = (width - outerWidth) / 2
+            case .trailing: x = width - outerWidth
             }
-            return ResolvedLayout(totalFrame: CGRect(x: x, y: 0, width: resolvedWidth, height: size.height), nodeIndex: nodeIndex)
+            let totalFrame = CGRect(x: x, y: 0, width: outerWidth, height: outerHeight)
+            guard padding != .zero else {
+                return ResolvedLayout(totalFrame: totalFrame, nodeIndex: nodeIndex)
+            }
+            // contentFrame lives in the same local coordinate frame as totalFrame (both get
+            // shifted together by a parent stack's `offsetBy`), so it must carry totalFrame's own
+            // `x` offset (the alignment placement) in addition to the padding inset -- not just
+            // the padding alone.
+            let contentFrame = CGRect(x: x + padding.leading, y: padding.top, width: resolvedTextWidth, height: size.height)
+            return ResolvedLayout(totalFrame: totalFrame, contentFrame: contentFrame, nodeIndex: nodeIndex)
         }
 
     case .codeBlock(let descriptor):

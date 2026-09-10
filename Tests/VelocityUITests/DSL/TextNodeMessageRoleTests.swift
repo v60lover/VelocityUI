@@ -34,9 +34,19 @@ final class TextNodeMessageRoleTests: XCTestCase {
         XCTAssertLessThanOrEqual(fragments[0].frame.maxX, 320 + 0.5,
             "user message must be flush-right / trailing-aligned within column bounds")
 
-        // Background frame must exactly match text frame.
-        XCTAssertEqual(fragments[0].frame, fragments[1].frame,
-            "background and text fragments must have identical frames")
+        // Background is the outer bubble box; text sits inset within it by the default
+        // .messageBubblePadding (horizontal: 14, vertical: 10) -- VelocityUI-0ukc fixed the
+        // earlier bug where these two frames were forced identical, letting corner glyphs
+        // clip through the rounded corners.
+        let padding = VEdgeInsets.messageBubblePadding
+        XCTAssertEqual(fragments[1].frame.width, fragments[0].frame.width - padding.leading - padding.trailing,
+            accuracy: 0.01, "text must be narrower than the bubble by exactly the horizontal insets")
+        XCTAssertEqual(fragments[1].frame.height, fragments[0].frame.height - padding.top - padding.bottom,
+            accuracy: 0.01, "text must be shorter than the bubble by exactly the vertical insets")
+        XCTAssertEqual(fragments[1].frame.minX, fragments[0].frame.minX + padding.leading,
+            accuracy: 0.01, "text must be inset from the bubble's left edge by padding.leading")
+        XCTAssertEqual(fragments[1].frame.minY, fragments[0].frame.minY + padding.top,
+            accuracy: 0.01, "text must be inset from the bubble's top edge by padding.top")
     }
 
     // MARK: - Test 2: TextNode with .messageRole(.assistant) produces full-width text-only layout with no background
@@ -112,6 +122,62 @@ final class TextNodeMessageRoleTests: XCTestCase {
 
         XCTAssertEqual(root.font, font, "messageRole must preserve the font field")
         XCTAssertEqual(root.color, color, "messageRole must preserve the color field")
+    }
+
+    // MARK: - Test 5: messageRole(.user) bubble total size == text size + default insets
+
+    @MainActor
+    func testMessageRoleUser_BubbleSizeEqualsTextSizePlusDefaultInsets() async throws {
+        let bare = TextNode("Hi", alignment: .trailing, maxWidthFraction: 0.8)
+        let bubble = TextNode("Hi").messageRole(.user)
+
+        let bareTable = flatten(bare, itemID: "bare")
+        let bubbleTable = flatten(bubble, itemID: "bubble")
+        let bareLayout = await measureNode(bareTable, nodeIndex: 0, width: 320, textPool: TextMeasurementPool(capacity: 1))
+        let bubbleLayout = await measureNode(bubbleTable, nodeIndex: 0, width: 320, textPool: TextMeasurementPool(capacity: 1))
+
+        let padding = VEdgeInsets.messageBubblePadding
+        XCTAssertEqual(bubbleLayout.totalFrame.width, bareLayout.totalFrame.width + padding.leading + padding.trailing,
+            accuracy: 0.01, "bubble outer width must equal the unpadded text width plus the default horizontal insets")
+        XCTAssertEqual(bubbleLayout.totalFrame.height, bareLayout.totalFrame.height + padding.top + padding.bottom,
+            accuracy: 0.01, "bubble outer height must equal the unpadded text height plus the default vertical insets")
+    }
+
+    // MARK: - Test 6: messageRole(.user, padding:) overrides the default and roundtrips through Flattener
+
+    @MainActor
+    func testMessageRoleUser_CustomPadding_OverridesDefaultAndRoundtrips() async throws {
+        let customPadding = VEdgeInsets(top: 4, leading: 20, bottom: 4, trailing: 20)
+        let root = TextNode("Hi").messageRole(.user, padding: customPadding)
+
+        let table = flatten(root, itemID: "custom-padding")
+        guard case .text(let descriptor) = table.nodes[0] else {
+            return XCTFail("node 0 must be .text")
+        }
+        XCTAssertEqual(descriptor.backgroundChrome?.padding, customPadding,
+            "custom padding must roundtrip unchanged from TextNode through Flattener into TextDescriptor.backgroundChrome")
+
+        let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: TextMeasurementPool(capacity: 1))
+        let fragments = extractFragments(table: table, layout: layout)
+
+        XCTAssertEqual(fragments[1].frame.minX, fragments[0].frame.minX + customPadding.leading, accuracy: 0.01,
+            "custom padding.leading must be reflected in the measured text inset, not the default")
+    }
+
+    // MARK: - Test 7: backgroundChrome.padding folds into layoutHash; cornerRadius/color stay appearanceHash-only
+
+    @MainActor
+    func testMessageRoleUser_PaddingAffectsLayoutHash_CornerRadiusColorAffectOnlyAppearanceHash() {
+        let base = TextNode("Hi").messageRole(.user)
+        let differentPadding = TextNode("Hi").messageRole(.user, padding: VEdgeInsets(all: 30))
+        let differentColor = TextNode("Hi", color: .white).messageRole(.user)
+
+        XCTAssertNotEqual(base.layoutHash, differentPadding.layoutHash,
+            "a padding change must alter layoutHash — it affects measured geometry")
+        XCTAssertEqual(base.layoutHash, differentColor.layoutHash,
+            "a color-only change must not alter layoutHash — color is paint-only")
+        XCTAssertNotEqual(base.appearanceHash, differentColor.appearanceHash,
+            "a color change must alter appearanceHash")
     }
 }
 #endif

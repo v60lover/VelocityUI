@@ -14,6 +14,12 @@ extension VColorDescriptor {
     public static let messageBubbleBackground = VColorDescriptor(red: 0.85, green: 0.91, blue: 1.0, alpha: 1)
 }
 
+extension VEdgeInsets {
+    /// Default content padding for a `.messageRole(.user)` bubble — keeps glyphs clear of the
+    /// rounded corners (r=12) so a corner arc never clips through a character.
+    public static let messageBubblePadding = VEdgeInsets(horizontal: 14, vertical: 10)
+}
+
 extension TextNode {
     /// Stamps this row's alignment/maxWidthFraction/background fields (from `VelocityUI-8otc.1`
     /// and `.3`) for a chat message. No new layout or render path — measure/place (`.2`) and the
@@ -23,10 +29,14 @@ extension TextNode {
     /// `.assistant` — full width, no background; identical to `TextNode`'s own defaults, so
     /// omitting this modifier is equivalent to calling `.messageRole(.assistant)`.
     ///
+    /// - Parameter padding: content inset within the `.user` bubble's background. `nil` (the
+    ///   default) uses `.messageBubblePadding`; pass a value to override. Ignored for `.assistant`
+    ///   (no background to inset).
+    ///
     /// Preserves every other field (unlike `.font()`/`.lineLimit()`/etc., which silently drop
     /// alignment/maxWidthFraction/backgroundChrome — see `VelocityUI-8rin`), matching
     /// `.roundedBackground(cornerRadius:color:)`'s field-preserving pattern.
-    public func messageRole(_ role: MessageRole) -> TextNode {
+    public func messageRole(_ role: MessageRole, padding: VEdgeInsets? = nil) -> TextNode {
         let alignment: VHorizontalAlignment
         let maxWidthFraction: Double
         let backgroundChrome: TextBackgroundChrome?
@@ -34,7 +44,9 @@ extension TextNode {
         case .user:
             alignment = .trailing
             maxWidthFraction = 0.8
-            backgroundChrome = TextBackgroundChrome(cornerRadius: 12, color: .messageBubbleBackground)
+            backgroundChrome = TextBackgroundChrome(
+                cornerRadius: 12, color: .messageBubbleBackground, padding: padding ?? .messageBubblePadding
+            )
         case .assistant:
             alignment = .leading
             maxWidthFraction = 1.0

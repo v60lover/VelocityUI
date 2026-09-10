@@ -123,12 +123,13 @@ private nonisolated func collectFragments(
 
     // Intersect against the inherited clip and drop the fragment if fully clipped —
     // an empty rect means "nothing to paint here", not a degenerate Fragment.
-    func clippedFrame() -> CGRect? {
-        var frame = drawFrame
+    func clipped(_ base: CGRect) -> CGRect? {
+        var frame = base
         if let clip { frame = frame.intersection(clip) }
         guard !frame.isNull, !frame.isEmpty else { return nil }
         return frame
     }
+    func clippedFrame() -> CGRect? { clipped(drawFrame) }
     func appendLeaf(_ content: FragmentContent) {
         guard let frame = clippedFrame() else { return }
         result.append(Fragment(id: nodeIndex, blockID: table.blockID(at: nodeIndex), content: content, frame: frame))
@@ -154,11 +155,14 @@ private nonisolated func collectFragments(
         appendLeaf(.image(d))
     case .text(let d):
         // A row can carry its own pre-rounded backing layer (e.g. a chat bubble) -- synthesize
-        // it directly behind the text fragment, sharing the exact same clipped frame (no
-        // padding/inset, matching the code card's own header/body-flush-to-background layout).
+        // it directly behind the text fragment. The background uses the outer `absoluteFrame`
+        // (= totalFrame, the bubble box); the text leaf below uses `clippedFrame()` (= drawFrame,
+        // the padding-inset contentFrame when backgroundChrome.padding is non-zero). The two
+        // frames coincide only when padding is `.zero` (no chrome, or roundedBackground's
+        // default) -- matching the code card's own header/body-flush-to-background layout.
         // Reuses `.codeBlockBackground`'s content type and RenderCell's already-generic
         // rasterize + 9-patch-stretch rendering verbatim -- nothing code-specific in that path.
-        if let chrome = d.backgroundChrome, let frame = clippedFrame() {
+        if let chrome = d.backgroundChrome, let frame = clipped(absoluteFrame) {
             result.append(Fragment(
                 id: textBackgroundFragmentID(nodeIndex: nodeIndex),
                 blockID: codePartID(owner: table.blockID(at: nodeIndex), nodeIndex: nodeIndex, part: .textBackground),
