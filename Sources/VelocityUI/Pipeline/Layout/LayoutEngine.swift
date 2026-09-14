@@ -159,7 +159,15 @@ private func measureContent(
             totalFrame: CGRect(x: 0, y: 0, width: width, height: body.totalFrame.height),
             nodeIndex: nodeIndex, renderPart: .codeBody
         )
-        return ResolvedLayout(totalFrame: total, children: [background, header, clampedBody.offsetBy(dy: header.totalFrame.height)], nodeIndex: nodeIndex)
+        // Order comes from `codeBlockRenderPlan` -- the same source `materializeCodeBlockFragments`
+        // and `makeSyntheticWorkingRangeLayout` walk -- so all three stay in lockstep.
+        let layoutByPart: [RenderPartKind: ResolvedLayout] = [
+            .codeBackground: background,
+            .codeHeader: header,
+            .codeBody: clampedBody.offsetBy(dy: header.totalFrame.height),
+        ]
+        let children = codeBlockRenderPlan(nodeIndex: nodeIndex).compactMap { layoutByPart[$0.part] }
+        return ResolvedLayout(totalFrame: total, children: children, nodeIndex: nodeIndex)
 
     case .image(let d):
         let h = d.aspectRatio.map { width / $0 } ?? width

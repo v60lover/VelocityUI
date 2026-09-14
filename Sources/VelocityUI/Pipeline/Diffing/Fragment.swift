@@ -238,6 +238,18 @@ func codeBackgroundFragmentID(nodeIndex: Int) -> Int { -(nodeIndex * 3 + 1) }
 func codeHeaderFragmentID(nodeIndex: Int) -> Int { -(nodeIndex * 3 + 2) }
 func textBackgroundFragmentID(nodeIndex: Int) -> Int { -(nodeIndex * 3 + 3) }
 
+/// Single source of truth for "what parts a code block has, in what order, under what
+/// fragment id." `LayoutEngine`'s `.codeBlock` measurement, `makeSyntheticWorkingRangeLayout`,
+/// and `materializeCodeBlockFragments` below all walk this plan instead of listing the three
+/// cases by hand -- adding a part (e.g. a future `.codeCopyIcon`) means appending one line here.
+func codeBlockRenderPlan(nodeIndex: Int) -> [(part: RenderPartKind, id: Int)] {
+    [
+        (.codeBackground, codeBackgroundFragmentID(nodeIndex: nodeIndex)),
+        (.codeHeader, codeHeaderFragmentID(nodeIndex: nodeIndex)),
+        (.codeBody, nodeIndex),
+    ]
+}
+
 /// Produces one atomic `[background, header, body]` code-card paint plan.
 /// A visible card keeps all three fragments even when an individual part is empty or clipped.
 func materializeCodeBlockFragments(
@@ -249,11 +261,19 @@ func materializeCodeBlockFragments(
     bodyFrame: CGRect,
     clip: CGRect? = nil
 ) -> [Fragment] {
-    let parts: [(RenderPartKind, Int, FragmentContent, CGRect)] = [
-        (.codeBackground, codeBackgroundFragmentID(nodeIndex: nodeIndex), .codeBlockBackground(CodeBlockBackgroundDescriptor(cornerRadius: descriptor.chrome.cornerRadius, color: descriptor.chrome.backgroundColor)), backgroundFrame),
-        (.codeHeader, codeHeaderFragmentID(nodeIndex: nodeIndex), .text(descriptor.headerText), headerFrame),
-        (.codeBody, nodeIndex, .text(descriptor.bodyText), bodyFrame),
+    let contentByPart: [RenderPartKind: FragmentContent] = [
+        .codeBackground: .codeBlockBackground(CodeBlockBackgroundDescriptor(cornerRadius: descriptor.chrome.cornerRadius, color: descriptor.chrome.backgroundColor)),
+        .codeHeader: .text(descriptor.headerText),
+        .codeBody: .text(descriptor.bodyText),
     ]
+    let frameByPart: [RenderPartKind: CGRect] = [
+        .codeBackground: backgroundFrame,
+        .codeHeader: headerFrame,
+        .codeBody: bodyFrame,
+    ]
+    let parts: [(RenderPartKind, Int, FragmentContent, CGRect)] = codeBlockRenderPlan(nodeIndex: nodeIndex).map { plan in
+        (plan.part, plan.id, contentByPart[plan.part]!, frameByPart[plan.part]!)
+    }
     if let clip {
         let visibleBackground = backgroundFrame.intersection(clip)
         guard !visibleBackground.isNull, !visibleBackground.isEmpty else { return [] }

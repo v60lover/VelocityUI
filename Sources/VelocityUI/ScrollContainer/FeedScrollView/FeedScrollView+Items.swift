@@ -960,23 +960,24 @@ extension FeedScrollView {
             guard case .codeBlock = table.nodes[nodeIndex] else {
                 return byID[nodeIndex].map { ResolvedLayout(totalFrame: $0.frame, nodeIndex: nodeIndex) }
             }
-            guard let background = byID[codeBackgroundFragmentID(nodeIndex: nodeIndex)],
-                  let header = byID[codeHeaderFragmentID(nodeIndex: nodeIndex)],
-                  let body = byID[nodeIndex]
-            else { return nil }
+            // Plan gives both order and fragment id per part -- same source LayoutEngine and
+            // materializeCodeBlockFragments walk, so this stays in lockstep with them.
+            let plan = codeBlockRenderPlan(nodeIndex: nodeIndex)
+            var fragmentByPart: [RenderPartKind: Fragment] = [:]
+            for entry in plan {
+                guard let fragment = byID[entry.id] else { return nil }
+                fragmentByPart[entry.part] = fragment
+            }
+            guard let background = fragmentByPart[.codeBackground] else { return nil }
             let origin = background.frame.origin
             func local(_ fragment: Fragment) -> CGRect {
                 fragment.frame.offsetBy(dx: -origin.x, dy: -origin.y)
             }
-            return ResolvedLayout(
-                totalFrame: background.frame,
-                children: [
-                    ResolvedLayout(totalFrame: local(background), nodeIndex: nodeIndex, renderPart: .codeBackground),
-                    ResolvedLayout(totalFrame: local(header), nodeIndex: nodeIndex, renderPart: .codeHeader),
-                    ResolvedLayout(totalFrame: local(body), nodeIndex: nodeIndex, renderPart: .codeBody),
-                ],
-                nodeIndex: nodeIndex
-            )
+            let children = plan.compactMap { entry -> ResolvedLayout? in
+                guard let fragment = fragmentByPart[entry.part] else { return nil }
+                return ResolvedLayout(totalFrame: local(fragment), nodeIndex: nodeIndex, renderPart: entry.part)
+            }
+            return ResolvedLayout(totalFrame: background.frame, children: children, nodeIndex: nodeIndex)
         }
         return ResolvedLayout(
             totalFrame: CGRect(x: 0, y: 0, width: width, height: height),
