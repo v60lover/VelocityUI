@@ -7,6 +7,10 @@ enum RenderPartKind: Sendable, Hashable {
     case codeBackground
     case codeHeader
     case codeBody
+    /// The header row's copy-source button -- a small pre-rasterized glyph, same row as the
+    /// language label. Attached by `measureNode`'s `.codeBlock` case, mirroring `.codeHeader`'s
+    /// role but positioned by `codeBlockRenderPlan`/`LayoutEngine` at the card's trailing edge.
+    case codeCopyIcon
     /// A table's solved, natural (possibly cell-overflowing) content size — attached by
     /// `measureNode`'s `.table` case, mirroring `.codeBody`'s role for code cards.
     case tableBody

@@ -788,15 +788,16 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
             await Task.yield()
         }
 
-        let backgroundID = -4
-        let headerID = -5
         let bodyID = 1
+        let backgroundID = codeBackgroundFragmentID(nodeIndex: bodyID)
+        let headerID = codeHeaderFragmentID(nodeIndex: bodyID)
+        let iconID = codeCopyIconFragmentID(nodeIndex: bodyID)
         let headerKey = BlockKey(
             itemID: 0,
             blockID: codePartID(owner: BlockID("code"), nodeIndex: bodyID, part: .codeHeader)
         )
         let beforeFragments = feed._debugFragments(at: 0)
-        guard beforeFragments.map(\.id) == [backgroundID, headerID, bodyID],
+        guard beforeFragments.map(\.id) == [backgroundID, headerID, bodyID, iconID],
               let header = feed.renderEnvironment.visibleBlockStore.bitmap(for: headerKey)
                     ?? feed.renderEnvironment.frozenBitmapStore.bitmap(for: headerKey)
         else {
@@ -836,8 +837,8 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
         guard let roundTripped = feed._debugExtractFragmentsFromWorkingRange(at: 0) else {
             return XCTFail("synthetic code-block layout must be extractable")
         }
-        XCTAssertEqual(roundTripped.map(\.id), [backgroundID, headerID, bodyID],
-            "synthetic tree must preserve background → header → body order")
+        XCTAssertEqual(roundTripped.map(\.id), [backgroundID, headerID, bodyID, iconID],
+            "synthetic tree must preserve background → header → body → icon order")
         XCTAssertEqual(roundTripped.map(\.frame), feed._debugFragments(at: 0).map(\.frame),
             "synthetic extraction must reproduce the visible fast-path fragments")
 
@@ -928,8 +929,8 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
         await drainFeedWork(feed)
     }
 
-    /// An empty language label remains in the extractable code-card triple.
-    func testSealedCodeBlockWithNilLanguage_InPlaceEdit_StillRoundTripsAllThreeParts() async {
+    /// An empty language label remains in the extractable code-card quad.
+    func testSealedCodeBlockWithNilLanguage_InPlaceEdit_StillRoundTripsAllParts() async {
         let feed = makeCodeChatFeed()
         feed.cellBuilder = { item in
             VStackNode(spacing: 4) {
@@ -946,25 +947,26 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
         XCTAssertEqual(feed._workingRangeMissCount(from: 0, to: 1), 0,
             "a nil-language code block must still commit to WorkingRange, not fall back forever")
 
-        let backgroundID = -4
-        let headerID = -5
         let bodyID = 1
-        XCTAssertEqual(feed._debugFragments(at: 0).map(\.id), [backgroundID, headerID, bodyID],
-            "all three parts must be present even though the header label is empty")
+        let backgroundID = codeBackgroundFragmentID(nodeIndex: bodyID)
+        let headerID = codeHeaderFragmentID(nodeIndex: bodyID)
+        let iconID = codeCopyIconFragmentID(nodeIndex: bodyID)
+        XCTAssertEqual(feed._debugFragments(at: 0).map(\.id), [backgroundID, headerID, bodyID, iconID],
+            "all four parts must be present even though the header label is empty")
 
         feed.items = [CodeChatItem(id: 0, code: "let x = 1\nlet y = 2")]
         feed.layoutSubviews()
 
         XCTAssertEqual(feed._workingRangeMissCount(from: 0, to: 1), 0,
             "a body-only edit on a nil-language code block must patch WorkingRange in place")
-        XCTAssertEqual(feed._debugFragments(at: 0).map(\.id), [backgroundID, headerID, bodyID],
+        XCTAssertEqual(feed._debugFragments(at: 0).map(\.id), [backgroundID, headerID, bodyID, iconID],
             "the empty header part must survive a body edit, not disappear from the fragment list")
 
         guard let roundTripped = feed._debugExtractFragmentsFromWorkingRange(at: 0) else {
             return XCTFail("synthetic code-block layout must be extractable even with an empty header")
         }
-        XCTAssertEqual(roundTripped.map(\.id), [backgroundID, headerID, bodyID],
-            "synthetic extraction must reproduce all three parts, including the empty header")
+        XCTAssertEqual(roundTripped.map(\.id), [backgroundID, headerID, bodyID, iconID],
+            "synthetic extraction must reproduce all four parts, including the empty header")
 
         await drainFeedWork(feed)
     }

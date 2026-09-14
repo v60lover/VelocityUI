@@ -206,7 +206,7 @@ extension LiveLLMInputBar: UITextViewDelegate {
 extension MarkdownTheme {
     /// `.default` scaled down to a real chat-message size (17pt body, matching `UIFont.preferredFont(forTextStyle: .body)`)
     /// instead of the 20pt benchmark default, and headings stepped down to match.
-    fileprivate static let liveLLM: MarkdownTheme = {
+    static let liveLLM: MarkdownTheme = {
         var theme = MarkdownTheme.default
         theme.body = VFontDescriptor(size: 17, weight: VFontDescriptor.regularWeight)
         theme.code = VFontDescriptor(size: 14, weight: VFontDescriptor.regularWeight)

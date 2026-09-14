@@ -130,7 +130,7 @@ final class MediaDispatcher {
                 } else {
                     missingRaster = true
                 }
-            case .codeBlockBackground, .geometry:
+            case .codeBlockBackground, .codeCopyIcon, .geometry:
                 continue
             }
         }

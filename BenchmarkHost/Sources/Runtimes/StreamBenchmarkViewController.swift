@@ -280,7 +280,7 @@ private struct StreamFeedView: View {
             case .user(let text):
                 nodes = [
                     TextNode(text)
-                        .font(MarkdownTheme.stream.body)
+                        .font(MarkdownTheme.liveLLM.body)
                         .messageRole(.user)
                 ]
             case .assistant:

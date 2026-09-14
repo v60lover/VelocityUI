@@ -157,6 +157,51 @@ func codeBlockBackgroundContentsCenter(cornerRadius: CGFloat, scale: CGFloat = 1
     return CGRect(x: origin, y: origin, width: unit, height: unit)
 }
 
+/// Pre-rendered "copy" glyph -- two overlapping rounded-rect outlines, drawn once via `CGContext`
+/// at decode time and assigned straight to `CALayer.contents` (no SF Symbol live rendering, no
+/// `CATextLayer`, per the hard rule). Canvas size is `codeCopyIconSize` -- the single source of
+/// truth shared with `LayoutEngine`'s icon frame, so raster and layout can never disagree.
+///
+/// A raw `CGContext(data:...)` is bottom-up (CG-native), unlike `UIGraphicsImageRenderer`'s
+/// top-down convention -- the explicit flip below lets the two rect frames be written in an
+/// ordinary top-left-origin mental model.
+func rasterizeCodeCopyIcon(tint: VColorDescriptor = .codeCopyIconTint, scale: CGFloat = 1) -> CGImage? {
+    let size = codeCopyIconSize
+    let pixelWidth = pixelLength(size.width, scale: scale)
+    let pixelHeight = pixelLength(size.height, scale: scale)
+    guard pixelWidth > 0, pixelHeight > 0 else { return nil }
+
+    let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue |
+                      CGBitmapInfo.byteOrder32Little.rawValue   // BGRA8888
+    guard let ctx = CGContext(
+        data: nil,
+        width: pixelWidth,
+        height: pixelHeight,
+        bitsPerComponent: 8,
+        bytesPerRow: 0,
+        space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: bitmapInfo
+    ) else { return nil }
+
+    ctx.translateBy(x: 0, y: CGFloat(pixelHeight))
+    ctx.scaleBy(x: scale, y: -scale)
+    ctx.setStrokeColor(red: tint.red, green: tint.green, blue: tint.blue, alpha: tint.alpha)
+    ctx.setLineWidth(1.3)
+
+    // Squares are inset 1pt from every canvas edge they'd otherwise touch -- half the 1.3pt
+    // stroke width is 0.65pt, so a path sitting flush at 0 or `size` gets its outward half
+    // silently clipped by the context bounds. The 1pt margin covers that with room to spare.
+    let back = CGPath(roundedRect: CGRect(x: 6, y: 1, width: 9, height: 9), cornerWidth: 2, cornerHeight: 2, transform: nil)
+    ctx.addPath(back)
+    ctx.strokePath()
+
+    let front = CGPath(roundedRect: CGRect(x: 1, y: 6, width: 9, height: 9), cornerWidth: 2, cornerHeight: 2, transform: nil)
+    ctx.addPath(front)
+    ctx.strokePath()
+
+    return ctx.makeImage()
+}
+
 /// Exact height for the code body's fixed-size background layer, without waiting on
 /// `rasterizeCodeBlock`'s async TextKit measurement. The body always renders `.byClipping`
 /// (no wrap), so a line's height depends only on the font's fixed metrics, never on its

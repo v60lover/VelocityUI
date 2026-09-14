@@ -362,7 +362,7 @@ final class Spike4Tests: XCTestCase {
                         failures += 1
                         XCTFail("table \(tableIndex) fragment \(fragment.id): image fragment has a degenerate frame \(fragment.frame) in the mixed stack")
                     }
-                case .codeBlockBackground, .table, .mathBlock, .geometry:
+                case .codeBlockBackground, .codeCopyIcon, .table, .mathBlock, .geometry:
                     break
                 }
             }

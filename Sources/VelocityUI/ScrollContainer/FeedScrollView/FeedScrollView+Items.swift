@@ -897,13 +897,22 @@ extension FeedScrollView {
                     x: 0, y: cursor, width: width,
                     height: headerSize.height + localFrame.height
                 )
+                // Same formula as LayoutEngine's `.codeBlock` branch, sharing its
+                // codeCopyIconSize/codeCopyIconTrailingPadding constants so both paths position
+                // the icon identically.
+                let iconFrame = CGRect(
+                    x: width - codeCopyIconSize.width - codeCopyIconTrailingPadding,
+                    y: cursor + (headerSize.height - codeCopyIconSize.height) / 2,
+                    width: codeCopyIconSize.width, height: codeCopyIconSize.height
+                )
                 let materialized = materializeCodeBlockFragments(
                     descriptor: descriptor,
                     nodeIndex: block.fragment.id,
                     ownerBlockID: block.blockID,
                     backgroundFrame: total,
                     headerFrame: CGRect(x: 0, y: cursor, width: headerWidth, height: headerSize.height),
-                    bodyFrame: bodyFrame
+                    bodyFrame: bodyFrame,
+                    iconFrame: iconFrame
                 )
                 fragments.append(contentsOf: materialized)
                 if let headerBitmap {

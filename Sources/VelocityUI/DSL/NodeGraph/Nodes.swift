@@ -84,6 +84,8 @@ extension VColorDescriptor {
     public static let codeBlockBackground = VColorDescriptor(red: 0.95, green: 0.95, blue: 0.96, alpha: 1)
     /// Default grid-line color for a rasterized `MarkdownTableNode`.
     public static let tableGridLine = VColorDescriptor(red: 0.85, green: 0.85, blue: 0.87, alpha: 1)
+    /// Default tint for the code block header's copy-source icon glyph.
+    public static let codeCopyIconTint = VColorDescriptor(red: 0.44, green: 0.44, blue: 0.46, alpha: 1)
 }
 
 // MARK: - VStackNode

@@ -224,8 +224,9 @@ extension FeedScrollView {
     /// `.table`, and `.mathBlock` — across `range`, using whatever `WorkingRange` entries are
     /// already committed. These are exactly the fragment kinds `RenderPipeline` rasterizes into
     /// `FrozenBitmapStore` (see `rasterizeTextArtifacts`/`rasterizeTableArtifacts`/
-    /// `rasterizeMathArtifacts`); `.image`, `.codeBlockBackground` (a synchronous rounded-rect,
-    /// never frozen), and `.geometry` fragments don't own a bitmap there and are skipped.
+    /// `rasterizeMathArtifacts`); `.image`, `.codeBlockBackground`/`.codeCopyIcon` (synchronous
+    /// self-painted rasters, never frozen), and `.geometry` fragments don't own a bitmap there
+    /// and are skipped.
     ///
     /// An index still a `WorkingRange` miss contributes 0 — this is only a starting-size
     /// estimate, and the store already tracks real cost at store time, so undercounting an
@@ -238,7 +239,7 @@ extension FeedScrollView {
                 switch fragment.content {
                 case .text, .table, .mathBlock:
                     count += 1
-                case .image, .codeBlockBackground, .geometry:
+                case .image, .codeBlockBackground, .codeCopyIcon, .geometry:
                     continue
                 }
             }

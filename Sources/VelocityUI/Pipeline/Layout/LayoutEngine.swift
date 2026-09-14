@@ -159,12 +159,25 @@ private func measureContent(
             totalFrame: CGRect(x: 0, y: 0, width: width, height: body.totalFrame.height),
             nodeIndex: nodeIndex, renderPart: .codeBody
         )
+        // Same row as the header label, pinned to the card's trailing edge -- codeCopyIconSize/
+        // codeCopyIconTrailingPadding are the single source of truth also read by
+        // rasterizeCodeCopyIcon and the applyInPlaceBlockDiff fast path, so raster/layout/fast-path
+        // frames can never disagree.
+        let icon = ResolvedLayout(
+            totalFrame: CGRect(
+                x: width - codeCopyIconSize.width - codeCopyIconTrailingPadding,
+                y: (header.totalFrame.height - codeCopyIconSize.height) / 2,
+                width: codeCopyIconSize.width, height: codeCopyIconSize.height
+            ),
+            nodeIndex: nodeIndex, renderPart: .codeCopyIcon
+        )
         // Order comes from `codeBlockRenderPlan` -- the same source `materializeCodeBlockFragments`
-        // and `makeSyntheticWorkingRangeLayout` walk -- so all three stay in lockstep.
+        // and `makeSyntheticWorkingRangeLayout` walk -- so all four stay in lockstep.
         let layoutByPart: [RenderPartKind: ResolvedLayout] = [
             .codeBackground: background,
             .codeHeader: header,
             .codeBody: clampedBody.offsetBy(dy: header.totalFrame.height),
+            .codeCopyIcon: icon,
         ]
         let children = codeBlockRenderPlan(nodeIndex: nodeIndex).compactMap { layoutByPart[$0.part] }
         return ResolvedLayout(totalFrame: total, children: children, nodeIndex: nodeIndex)

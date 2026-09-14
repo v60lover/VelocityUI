@@ -19,6 +19,10 @@ public enum FragmentContent: Sendable {
     /// A rasterized block math formula (or its literal-text fallback), baked into one `CGImage`.
     /// See `MathBlockRasterDescriptor`.
     case mathBlock(MathBlockRasterDescriptor)
+    /// A code block's header-row copy-source button. No associated value: the glyph is a fixed
+    /// pre-rasterized CGImage (see `rasterizeCodeCopyIcon`) with no per-block customization
+    /// point today, unlike `.codeBlockBackground` which varies by corner radius/color.
+    case codeCopyIcon
     /// Spacer, hosting, gif, video, customLayer — frame only, no renderable content in Phase 1.
     case geometry
 }
@@ -140,7 +144,8 @@ private nonisolated func collectFragments(
         guard layout.renderPart == nil,
               let background = layout.children.first(where: { $0.renderPart == .codeBackground }),
               let header = layout.children.first(where: { $0.renderPart == .codeHeader }),
-              let body = layout.children.first(where: { $0.renderPart == .codeBody })
+              let body = layout.children.first(where: { $0.renderPart == .codeBody }),
+              let icon = layout.children.first(where: { $0.renderPart == .codeCopyIcon })
         else { return }
         result.append(contentsOf: materializeCodeBlockFragments(
             descriptor: descriptor,
@@ -149,6 +154,7 @@ private nonisolated func collectFragments(
             backgroundFrame: background.totalFrame.offsetBy(dx: absoluteFrame.minX, dy: absoluteFrame.minY),
             headerFrame: header.totalFrame.offsetBy(dx: absoluteFrame.minX, dy: absoluteFrame.minY),
             bodyFrame: body.totalFrame.offsetBy(dx: absoluteFrame.minX, dy: absoluteFrame.minY),
+            iconFrame: icon.totalFrame.offsetBy(dx: absoluteFrame.minX, dy: absoluteFrame.minY),
             clip: clip
         ))
     case .image(let d):
@@ -231,22 +237,34 @@ func codePartID(owner: BlockID?, nodeIndex: Int, part: RenderPartKind) -> BlockI
     return BlockID(PositionalCodeBlockPartID(nodeIndex: nodeIndex, part: part))
 }
 
-/// Synthetic ids are negative and disjoint from real `NodeTable` indices. A given `nodeIndex` is
-/// never both a `.codeBlock` and a `.text` node, so `textBackgroundFragmentID` sharing the same
-/// `nodeIndex * 3 + n` scheme as the code-block ids below can't collide with them.
-func codeBackgroundFragmentID(nodeIndex: Int) -> Int { -(nodeIndex * 3 + 1) }
-func codeHeaderFragmentID(nodeIndex: Int) -> Int { -(nodeIndex * 3 + 2) }
-func textBackgroundFragmentID(nodeIndex: Int) -> Int { -(nodeIndex * 3 + 3) }
+/// Synthetic ids are negative and disjoint from real `NodeTable` indices. Each formula owns its
+/// own residue class mod 4 (1, 2, 3, 0), so for any `nodeIndex` the four synthetic ids below can
+/// never collide with each other -- regardless of whether they come from the same node (a code
+/// block's background/header/icon) or different node kinds (a code block vs. a plain text row's
+/// `.textBackground`), since a given `nodeIndex` is never both a `.codeBlock` and a `.text` node.
+func codeBackgroundFragmentID(nodeIndex: Int) -> Int { -(nodeIndex * 4 + 1) }
+func codeHeaderFragmentID(nodeIndex: Int) -> Int { -(nodeIndex * 4 + 2) }
+func codeCopyIconFragmentID(nodeIndex: Int) -> Int { -(nodeIndex * 4 + 3) }
+func textBackgroundFragmentID(nodeIndex: Int) -> Int { -(nodeIndex * 4 + 4) }
+
+/// Fixed size of the pre-rasterized copy-icon glyph -- single source of truth shared by
+/// `rasterizeCodeCopyIcon` (canvas size) and `LayoutEngine`'s `.codeBlock` branch (layout frame),
+/// so the raster and the frame it's stretched into can never disagree (cross-site consistency).
+let codeCopyIconSize = CGSize(width: 16, height: 16)
+/// Trailing inset from the code card's right edge to the icon's frame -- shared by `LayoutEngine`
+/// and the `applyInPlaceBlockDiff` fast path so both position the icon identically.
+let codeCopyIconTrailingPadding: CGFloat = 8
 
 /// Single source of truth for "what parts a code block has, in what order, under what
 /// fragment id." `LayoutEngine`'s `.codeBlock` measurement, `makeSyntheticWorkingRangeLayout`,
-/// and `materializeCodeBlockFragments` below all walk this plan instead of listing the three
-/// cases by hand -- adding a part (e.g. a future `.codeCopyIcon`) means appending one line here.
+/// and `materializeCodeBlockFragments` below all walk this plan instead of listing the cases by
+/// hand -- adding a future part means appending one line here.
 func codeBlockRenderPlan(nodeIndex: Int) -> [(part: RenderPartKind, id: Int)] {
     [
         (.codeBackground, codeBackgroundFragmentID(nodeIndex: nodeIndex)),
         (.codeHeader, codeHeaderFragmentID(nodeIndex: nodeIndex)),
         (.codeBody, nodeIndex),
+        (.codeCopyIcon, codeCopyIconFragmentID(nodeIndex: nodeIndex)),
     ]
 }
 
@@ -259,17 +277,20 @@ func materializeCodeBlockFragments(
     backgroundFrame: CGRect,
     headerFrame: CGRect,
     bodyFrame: CGRect,
+    iconFrame: CGRect,
     clip: CGRect? = nil
 ) -> [Fragment] {
     let contentByPart: [RenderPartKind: FragmentContent] = [
         .codeBackground: .codeBlockBackground(CodeBlockBackgroundDescriptor(cornerRadius: descriptor.chrome.cornerRadius, color: descriptor.chrome.backgroundColor)),
         .codeHeader: .text(descriptor.headerText),
         .codeBody: .text(descriptor.bodyText),
+        .codeCopyIcon: .codeCopyIcon,
     ]
     let frameByPart: [RenderPartKind: CGRect] = [
         .codeBackground: backgroundFrame,
         .codeHeader: headerFrame,
         .codeBody: bodyFrame,
+        .codeCopyIcon: iconFrame,
     ]
     let parts: [(RenderPartKind, Int, FragmentContent, CGRect)] = codeBlockRenderPlan(nodeIndex: nodeIndex).map { plan in
         (plan.part, plan.id, contentByPart[plan.part]!, frameByPart[plan.part]!)

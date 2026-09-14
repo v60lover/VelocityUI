@@ -334,6 +334,21 @@ public final class RenderCell {
                 sub.backgroundColor = nil
                 mediaFragmentIDs.remove(fragment.id)
                 placeholderPaintedFragmentIDs.remove(fragment.id)
+            } else if case .codeCopyIcon = fragment.content {
+                codeTailSublayers.removeValue(forKey: identity)?.removeFromSuperlayer()
+                codeChunkSublayers.removeValue(forKey: identity)?.forEach { $0.removeFromSuperlayer() }
+                codeBodyClipLayer.removeValue(forKey: identity)?.removeFromSuperlayer()
+                codeBodyContentWidth.removeValue(forKey: identity)
+                codeBodyContentByFragmentID.removeValue(forKey: fragment.id)
+                appliedRasterIdentityByFragmentID.removeValue(forKey: fragment.id)
+                // The glyph never varies -- paint once and keep it, same "identity-cached" shape
+                // as `.codeBlockBackground` above, just without a descriptor to compare.
+                if sub.contents == nil {
+                    sub.contents = rasterizeCodeCopyIcon()
+                }
+                sub.backgroundColor = nil
+                mediaFragmentIDs.remove(fragment.id)
+                placeholderPaintedFragmentIDs.remove(fragment.id)
             } else if case .text(let descriptor) = fragment.content {
                 if case .body = descriptor.codeBlockRole {
                     appliedRasterIdentityByFragmentID.removeValue(forKey: fragment.id)
@@ -641,10 +656,10 @@ public final class RenderCell {
         var index = 0
         while index < fragments.count {
             let fragment = fragments[index]
-            if isCodeBlockTriple(fragments, startingAt: index) {
+            if let group = codeBlockGroupRange(fragments, startingAt: index) {
                 blockFrames.append(fragment.frame)
-                blockFragmentRanges.append(index..<(index + 3))
-                index += 3
+                blockFragmentRanges.append(group)
+                index = group.upperBound
             } else {
                 blockFrames.append(fragment.frame)
                 blockFragmentRanges.append(index..<(index + 1))
@@ -1025,15 +1040,24 @@ public final class RenderCell {
         fragment.blockID.map { .block($0) } ?? .positional(fragment.id)
     }
 
-    private func isCodeBlockTriple(_ fragments: [Fragment], startingAt index: Int) -> Bool {
+    /// A code block's whole render-part span (background/header/body/copy-icon, in
+    /// `codeBlockRenderPlan` order) must be treated as one atomic residency unit for viewport
+    /// grouping — mounting the body without its icon (or vice versa) must never happen. Reads
+    /// the span length from `codeBlockRenderPlan` itself (via the body fragment's id, which is
+    /// the owning nodeIndex) instead of a hardcoded count, so a future fifth render part doesn't
+    /// need this call site updated too — the exact drift risk `materializeCodeBlockFragments`
+    /// already guards against.
+    private func codeBlockGroupRange(_ fragments: [Fragment], startingAt index: Int) -> Range<Int>? {
         guard index + 2 < fragments.count,
               case .codeBlockBackground = fragments[index].content,
               case .text(let header) = fragments[index + 1].content,
               case .header = header.codeBlockRole,
               case .text(let body) = fragments[index + 2].content,
               case .body = body.codeBlockRole
-        else { return false }
-        return true
+        else { return nil }
+        let span = codeBlockRenderPlan(nodeIndex: fragments[index + 2].id).count
+        guard index + span <= fragments.count else { return nil }
+        return index..<(index + span)
     }
 
     private func layer(for fragmentID: Int) -> CALayer? {

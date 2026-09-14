@@ -629,7 +629,7 @@ final class FragmentTests: XCTestCase {
         let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: TextMeasurementPool(capacity: 2))
         let fragments = extractFragments(table: table, layout: layout)
 
-        XCTAssertEqual(fragments.count, 3, "header + body must gain exactly one synthesized background fragment")
+        XCTAssertEqual(fragments.count, 4, "header + body must gain a synthesized background and copy icon")
 
         guard case .codeBlockBackground = fragments[0].content else {
             return XCTFail("background must be inserted first (z-order: behind both header and body)")
@@ -639,6 +639,9 @@ final class FragmentTests: XCTestCase {
         }
         guard case .text = fragments[2].content else {
             return XCTFail("body must follow the header")
+        }
+        guard case .codeCopyIcon = fragments[3].content else {
+            return XCTFail("copy icon must follow the body")
         }
     }
 
@@ -717,14 +720,14 @@ final class FragmentTests: XCTestCase {
     }
 
     @MainActor
-    func testExtractFragments_CodeBlock_NilLanguage_StillEmitsAllThreeParts() async throws {
+    func testExtractFragments_CodeBlock_NilLanguage_StillEmitsAllParts() async throws {
         // An empty language label remains the code card's header fragment.
         let root = VStackNode { CodeBlockNode(language: nil, rawCode: "let x = 1") }
         let table = flatten(root, itemID: "code-msg")
         let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: TextMeasurementPool(capacity: 2))
         let fragments = extractFragments(table: table, layout: layout)
 
-        XCTAssertEqual(fragments.count, 3, "nil language must not drop the header part")
+        XCTAssertEqual(fragments.count, 4, "nil language must not drop the header part")
         guard case .codeBlockBackground = fragments[0].content else {
             return XCTFail("fragments[0] must be the background")
         }
@@ -733,6 +736,9 @@ final class FragmentTests: XCTestCase {
         }
         guard case .text = fragments[2].content else {
             return XCTFail("fragments[2] must be the body")
+        }
+        guard case .codeCopyIcon = fragments[3].content else {
+            return XCTFail("fragments[3] must be the copy icon")
         }
     }
 

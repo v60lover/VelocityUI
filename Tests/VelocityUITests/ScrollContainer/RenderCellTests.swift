@@ -44,6 +44,10 @@ final class RenderCellTests: XCTestCase {
         )
     }
 
+    private func codeCopyIconFragment(id: Int, frame: CGRect) -> Fragment {
+        Fragment(id: id, content: .codeCopyIcon, frame: frame)
+    }
+
     /// Known-valid canonical BlurHash string (public example from https://blurha.sh).
     private let validBlurHash = "L6PZfSi_.AyE_3t7t7R**0o#DgR4"
 
@@ -938,10 +942,11 @@ final class RenderCellTests: XCTestCase {
         )
         let header = codeTextFragment(id: 0, role: .header(chrome), frame: CGRect(x: 0, y: 0, width: 320, height: 30))
         let body = codeTextFragment(id: 1, role: .body(chrome), frame: CGRect(x: 0, y: 30, width: 320, height: 60))
-        let unrelated = textFragment(id: 2, frame: CGRect(x: 0, y: 90, width: 320, height: 60))
+        let icon = codeCopyIconFragment(id: 2, frame: CGRect(x: 296, y: 7, width: 16, height: 16))
+        let unrelated = textFragment(id: 3, frame: CGRect(x: 0, y: 90, width: 320, height: 60))
 
         let active = cell.updateBlockViewport(
-            fragments: [background, header, body, unrelated],
+            fragments: [background, header, body, icon, unrelated],
             viewportInCell: CGRect(x: 0, y: 0, width: 320, height: 25), // reaches only the header row
             synchronousContent: [:]
         )
@@ -951,6 +956,7 @@ final class RenderCellTests: XCTestCase {
         XCTAssertTrue(activeIDs.contains(background.id), "background must activate alongside its card")
         XCTAssertTrue(activeIDs.contains(body.id),
             "body must activate too -- the whole card is one unit, even though the window only reaches the header row")
+        XCTAssertTrue(activeIDs.contains(icon.id), "the copy icon rides along with the rest of its card's atomic unit")
         XCTAssertFalse(activeIDs.contains(unrelated.id),
             "a block after the code block must not be pulled in by the group's extended range")
     }
@@ -966,9 +972,10 @@ final class RenderCellTests: XCTestCase {
         )
         let header = codeTextFragment(id: 0, role: .header(chrome), frame: CGRect(x: 0, y: 0, width: 320, height: 30))
         let body = codeTextFragment(id: 1, role: .body(chrome), frame: CGRect(x: 0, y: 30, width: 320, height: 60))
+        let icon = codeCopyIconFragment(id: 2, frame: CGRect(x: 296, y: 7, width: 16, height: 16))
 
         let active = cell.updateBlockViewport(
-            fragments: [background, header, body],
+            fragments: [background, header, body, icon],
             // header's own row (y 0-30) is entirely above this window -- only the body row is visible.
             viewportInCell: CGRect(x: 0, y: 40, width: 320, height: 25),
             synchronousContent: [:]
@@ -980,6 +987,8 @@ final class RenderCellTests: XCTestCase {
             "background must stay active while any part of its card (here, the body) is visible")
         XCTAssertTrue(activeIDs.contains(header.id),
             "header rides along with the rest of its card's atomic activation unit")
+        XCTAssertTrue(activeIDs.contains(icon.id),
+            "the copy icon rides along with the rest of its card's atomic activation unit too")
     }
 
     func testUpdateBlockViewport_MissingHeaderDoesNotGroupUnrelatedFragment() {
@@ -1015,13 +1024,14 @@ final class RenderCellTests: XCTestCase {
         let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: TextMeasurementPool(capacity: 2))
         let fragments = extractFragments(table: table, layout: layout)
 
-        XCTAssertEqual(fragments.count, 4, "a clipped code card must retain background, empty header, and body")
+        XCTAssertEqual(fragments.count, 5, "a clipped code card must retain background, empty header, body, and copy icon")
         guard case .codeBlockBackground = fragments[0].content,
               case .text(let header) = fragments[1].content,
               case .header = header.codeBlockRole,
               case .text(let body) = fragments[2].content,
-              case .body = body.codeBlockRole
-        else { return XCTFail("the code card must be an ordered triple") }
+              case .body = body.codeBlockRole,
+              case .codeCopyIcon = fragments[3].content
+        else { return XCTFail("the code card must be an ordered quad") }
 
         let cell = makeCell()
         let active = cell.updateBlockViewport(
@@ -1029,7 +1039,7 @@ final class RenderCellTests: XCTestCase {
             viewportInCell: fragments[0].frame,
             synchronousContent: [:]
         )
-        XCTAssertEqual(Set(active.map(\.id)), Set(fragments.prefix(3).map(\.id)),
+        XCTAssertEqual(Set(active.map(\.id)), Set(fragments.prefix(4).map(\.id)),
             "the next fragment must not be treated as a clipped code card part")
     }
 
