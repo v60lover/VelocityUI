@@ -27,11 +27,11 @@ extension RenderNode {
     /// to a later hit-test pass. Excluded from `layoutHash`/`appearanceHash` — changing only
     /// the id triggers no relayout or repaint.
     ///
-    /// Known limitation (VelocityUI-m5tl.2): `LayoutCache`'s key is `(layoutHash, width)`, which
-    /// doesn't include this id. Two items whose content produces the same `layoutHash` but
-    /// different action ids can collide on the same cache entry and briefly resolve taps to the
-    /// wrong id until the item's own re-measure overwrites the cache. Keep ids stable for a given
-    /// node identity rather than relying on this for per-item uniqueness of otherwise-identical content.
+    /// `LayoutCache`'s key is `(layoutHash, width)`, which doesn't include this id, so two items
+    /// with the same content but different action ids can share one cache entry. That's safe:
+    /// on a hit, `RenderPipeline` re-derives fragments from the requesting item's own `NodeTable`
+    /// over the cached layout, so the returned action id is always this item's, not whichever
+    /// item populated the cache first (VelocityUI-m5tl.2).
     public func action<ID: Hashable & Sendable>(_ id: ID) -> ActionModifierNode {
         ActionModifierNode(content: self, actionID: ActionID(id))
     }

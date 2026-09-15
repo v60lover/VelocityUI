@@ -226,9 +226,15 @@ public actor RenderPipeline {
                     let key = CacheKey(layoutHash: table.layoutHash, width: availableWidth)
                     group.addTask {
                         if let entry = await cache.get(key) {
+                            // CacheKey is (layoutHash, width) only — tags (actionID/blockID)
+                            // don't affect geometry, so two items with identical content but
+                            // different tags share this entry. Re-derive fragments from the
+                            // CURRENT item's table over the cached layout so the tags are this
+                            // item's own, not whichever item populated the cache first.
+                            let fragments = extractFragments(table: table, layout: entry.layout)
                             let (artifacts, retokenizeCount) = rasterizeTextArtifacts(
                                 table: table,
-                                fragments: entry.fragments,
+                                fragments: fragments,
                                 layoutWidth: availableWidth,
                                 scale: capturedScale,
                                 highlightRegistry: registry,
@@ -237,14 +243,14 @@ public actor RenderPipeline {
                                 formulaCache: formulaCache, fontProvider: fontProvider
                             )
                             let tableArtifacts = rasterizeTableArtifacts(
-                                table: table, fragments: entry.fragments, scale: capturedScale,
+                                table: table, fragments: fragments, scale: capturedScale,
                                 formulaCache: formulaCache, fontProvider: fontProvider
                             )
                             let mathArtifacts = rasterizeMathArtifacts(
-                                table: table, fragments: entry.fragments, scale: capturedScale,
+                                table: table, fragments: fragments, scale: capturedScale,
                                 formulaCache: formulaCache, fontProvider: fontProvider
                             )
-                            return (index, entry.layout, entry.fragments, artifacts + tableArtifacts + mathArtifacts, true, retokenizeCount)
+                            return (index, entry.layout, fragments, artifacts + tableArtifacts + mathArtifacts, true, retokenizeCount)
                         }
                         // Guard before the expensive path — exits quickly on cancellation.
                         guard !Task.isCancelled else { return (index, .placeholder, [], [], false, 0) }

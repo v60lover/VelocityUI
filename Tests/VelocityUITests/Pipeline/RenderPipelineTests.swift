@@ -1591,5 +1591,149 @@ final class RenderPipelineTests: XCTestCase {
         let startsAfterChange = await pipeline.taskStartCount
         XCTAssertEqual(startsAfterChange, 2, "A changed warmRange must spawn a new task")
     }
+
+    // MARK: - VelocityUI-m5tl.2: LayoutCache key collision must not leak tags across items
+    //
+    // | Invariant being verified                                            | Assertion |
+    // |----------------------------------------------------------------------|-----------|
+    // | Two items with equal layoutHash but different `.action(_:)` ids: a  | `testLayoutCacheHit_ReStampsActionID...` — the second item's committed |
+    // | cache-hit for the second item resolves to ITS OWN action id, not    | fragment carries `ActionID("actionB")`, not `ActionID("actionA")`, and |
+    // | the first item's.                                                   | `cacheHitCount` proves the second boundary was actually a hit.        |
+    // | Same, for `blockID` (`.renderID`-style stable identity).            | `testLayoutCacheHit_ReStampsBlockID...` — committed fragment's        |
+    // |                                                                      | `blockID` is `BlockID("blockB")`, not `BlockID("blockA")`.            |
+    // | Code-block synthetic fragments (background/header/icon, negative    | `testLayoutCacheHit_CodeBlockSyntheticFragments...` — the            |
+    // | ids) resolve to the CURRENT item's owner `BlockID` on a cache hit,  | background fragment's `blockID` equals the codePartID derived from   |
+    // | not the item that originally populated the cache entry.             | item B's own `BlockID`, not item A's.                                 |
+
+    @MainActor
+    func testLayoutCacheHit_ReStampsActionID_ToTheRequestingItemNotTheCachePopulator() async throws {
+        let tableA = flatten(TextNode("hello").action("actionA"), itemID: "itemA")
+        let tableB = flatten(TextNode("hello").action("actionB"), itemID: "itemB")
+        XCTAssertEqual(tableA.layoutHash, tableB.layoutHash, "Precondition: same content, different action id, must collide on CacheKey")
+        let tables = [tableA, tableB]
+
+        let pipeline = makePipeline()
+        let range = await WorkingRange(capacity: 4)
+
+        // Cold pass: item 0 (actionA) populates the LayoutCache entry for this layoutHash.
+        await pipeline.onIndexBoundary(
+            warmRange: 0..<1, leadingIndex: 0, workingRange: range, tables: tables, availableWidth: 100, scale: 1
+        )
+        await pipeline.waitForCurrentPrefetch()
+
+        // Item 1 (actionB) shares the same CacheKey — must resolve as a hit against item 0's
+        // cached layout, but its own actionID must win.
+        await pipeline.onIndexBoundary(
+            warmRange: 0..<2, leadingIndex: 0, workingRange: range, tables: tables, availableWidth: 100, scale: 1
+        )
+        await pipeline.waitForCurrentPrefetch()
+
+        let hits = await pipeline.cacheHitCount
+        XCTAssertGreaterThan(hits, 0, "Item 1 must resolve via a LayoutCache hit for this test to be meaningful")
+
+        let entryAt1 = await range.entry(at: 1)
+        let entry = try XCTUnwrap(entryAt1)
+        let textFragment = try XCTUnwrap(entry.fragments.first { if case .text = $0.content { return true }; return false })
+        XCTAssertEqual(textFragment.actionID, ActionID("actionB"), "Cache-hit fragment must carry the requesting item's own action id")
+        XCTAssertNotEqual(textFragment.actionID, ActionID("actionA"), "Cache-hit fragment must not leak the cache populator's action id")
+    }
+
+    @MainActor
+    func testLayoutCacheHit_ReStampsBlockID_ToTheRequestingItemNotTheCachePopulator() async throws {
+        let tableA = flatten(TextNode("hello", blockID: BlockID("blockA")), itemID: "itemA")
+        let tableB = flatten(TextNode("hello", blockID: BlockID("blockB")), itemID: "itemB")
+        XCTAssertEqual(tableA.layoutHash, tableB.layoutHash, "Precondition: same content, different blockID, must collide on CacheKey")
+        let tables = [tableA, tableB]
+
+        let pipeline = makePipeline()
+        let range = await WorkingRange(capacity: 4)
+
+        await pipeline.onIndexBoundary(
+            warmRange: 0..<1, leadingIndex: 0, workingRange: range, tables: tables, availableWidth: 100, scale: 1
+        )
+        await pipeline.waitForCurrentPrefetch()
+
+        await pipeline.onIndexBoundary(
+            warmRange: 0..<2, leadingIndex: 0, workingRange: range, tables: tables, availableWidth: 100, scale: 1
+        )
+        await pipeline.waitForCurrentPrefetch()
+
+        let hits = await pipeline.cacheHitCount
+        XCTAssertGreaterThan(hits, 0, "Item 1 must resolve via a LayoutCache hit for this test to be meaningful")
+
+        let entryAt1 = await range.entry(at: 1)
+        let entry = try XCTUnwrap(entryAt1)
+        let textFragment = try XCTUnwrap(entry.fragments.first { if case .text = $0.content { return true }; return false })
+        XCTAssertEqual(textFragment.blockID, BlockID("blockB"), "Cache-hit fragment must carry the requesting item's own blockID")
+        XCTAssertNotEqual(textFragment.blockID, BlockID("blockA"), "Cache-hit fragment must not leak the cache populator's blockID")
+    }
+
+    @MainActor
+    func testLayoutCacheHit_CodeBlockSyntheticFragments_ResolveToRequestingItemsOwner() async throws {
+        let tableA = flatten(
+            VStackNode { CodeBlockNode(language: "swift", rawCode: "let x = 1", blockID: BlockID("codeA")) },
+            itemID: "itemA"
+        )
+        let tableB = flatten(
+            VStackNode { CodeBlockNode(language: "swift", rawCode: "let x = 1", blockID: BlockID("codeB")) },
+            itemID: "itemB"
+        )
+        XCTAssertEqual(tableA.layoutHash, tableB.layoutHash, "Precondition: identical code, different owner blockID, must collide on CacheKey")
+        let tables = [tableA, tableB]
+
+        let pipeline = makePipeline()
+        let range = await WorkingRange(capacity: 4)
+
+        await pipeline.onIndexBoundary(
+            warmRange: 0..<1, leadingIndex: 0, workingRange: range, tables: tables, availableWidth: 100, scale: 1
+        )
+        await pipeline.waitForCurrentPrefetch()
+
+        await pipeline.onIndexBoundary(
+            warmRange: 0..<2, leadingIndex: 0, workingRange: range, tables: tables, availableWidth: 100, scale: 1
+        )
+        await pipeline.waitForCurrentPrefetch()
+
+        let hits = await pipeline.cacheHitCount
+        XCTAssertGreaterThan(hits, 0, "Item 1 must resolve via a LayoutCache hit for this test to be meaningful")
+
+        let entryAt1 = await range.entry(at: 1)
+        let entry = try XCTUnwrap(entryAt1)
+        let backgroundFragment = try XCTUnwrap(entry.fragments.first {
+            if case .codeBlockBackground = $0.content { return true }; return false
+        })
+        let expectedBlockID = codePartID(owner: BlockID("codeB"), nodeIndex: 0, part: .codeBackground)
+        let staleBlockID = codePartID(owner: BlockID("codeA"), nodeIndex: 0, part: .codeBackground)
+        XCTAssertEqual(backgroundFragment.blockID, expectedBlockID, "Synthetic code-block fragment must resolve to the requesting item's own owner BlockID")
+        XCTAssertNotEqual(backgroundFragment.blockID, staleBlockID, "Synthetic code-block fragment must not leak the cache populator's owner BlockID")
+    }
+
+    /// Hit-rate guard for the re-stamp fix: re-deriving fragments from the current item's
+    /// `NodeTable` on a hit (`extractFragments(table:layout:)`) must stay a flatten-only, O(fragments)
+    /// operation — it must NOT fall back to a re-measure. Proven indirectly: across N items sharing
+    /// one layoutHash, exactly 1 measure (the first) should occur, so cacheHitCount must land at
+    /// exactly N-1, not less (a regression that silently re-measured on "collision" would undercount hits).
+    @MainActor
+    func testLayoutCacheHit_ReStampDoesNotRegressHitRate_AcrossManySameLayoutHashItems() async throws {
+        let tables = (0..<5).map { i in
+            flatten(TextNode("hello").action("action\(i)"), itemID: "item\(i)")
+        }
+        for table in tables.dropFirst() {
+            XCTAssertEqual(table.layoutHash, tables[0].layoutHash, "Precondition: all items must share one CacheKey")
+        }
+
+        let pipeline = makePipeline()
+        let range = await WorkingRange(capacity: tables.count)
+
+        for i in 0..<tables.count {
+            await pipeline.onIndexBoundary(
+                warmRange: 0..<(i + 1), leadingIndex: 0, workingRange: range, tables: tables, availableWidth: 100, scale: 1
+            )
+            await pipeline.waitForCurrentPrefetch()
+        }
+
+        let hits = await pipeline.cacheHitCount
+        XCTAssertEqual(hits, tables.count - 1, "Re-stamping on hit must not introduce extra re-measures: only item 0 should ever miss")
+    }
 }
 #endif
