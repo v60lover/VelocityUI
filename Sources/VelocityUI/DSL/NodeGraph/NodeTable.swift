@@ -527,6 +527,10 @@ public struct NodeTable: Sendable {
     public let blockIDs: [BlockID?]
     /// Per-node lifecycle metadata. `.positional` preserves legacy trailing-hot behavior.
     public let blockLifecycles: [BlockLifecycle]
+    /// Opaque per-node action identity from a `.action(_:)` modifier, indexed identically to
+    /// `nodes`. Unlike `blockIDs`, duplicates are allowed — several nodes sharing one action id
+    /// (e.g. a "reply" affordance repeated on many rows) is a legitimate shape.
+    public let actionIDs: [ActionID?]
 
     /// Parallel array of per-node `.frame()` specs, indexed identically to `nodes`. `nil` (not an
     /// all-`.unspecified` array) whenever no node in the tree was framed — the zero-cost unframed
@@ -551,7 +555,8 @@ public struct NodeTable: Sendable {
         appearanceHash: Int,
         frames: [FrameSpec]? = nil,
         blockIDs: [BlockID?]? = nil,
-        blockLifecycles: [BlockLifecycle]? = nil
+        blockLifecycles: [BlockLifecycle]? = nil,
+        actionIDs: [ActionID?]? = nil
     ) {
         self._itemID = AnyHashable(itemID)
         self.nodes = nodes
@@ -561,6 +566,7 @@ public struct NodeTable: Sendable {
         self.frames = frames
         self.blockIDs = NodeTable.sanitizedBlockIDs(blockIDs, nodeCount: nodes.count)
         self.blockLifecycles = NodeTable.sanitizedBlockLifecycles(blockLifecycles, nodeCount: nodes.count)
+        self.actionIDs = NodeTable.sanitizedActionIDs(actionIDs, nodeCount: nodes.count)
         (childRanges, childIndices) = NodeTable.buildChildIndex(parentIndices: parentIndices)
     }
 
@@ -587,6 +593,11 @@ public struct NodeTable: Sendable {
     public func blockLifecycle(at i: Int) -> BlockLifecycle {
         guard i >= 0, i < blockLifecycles.count else { return .positional }
         return blockLifecycles[i]
+    }
+
+    public func actionID(at i: Int) -> ActionID? {
+        guard i >= 0, i < actionIDs.count else { return nil }
+        return actionIDs[i]
     }
 
     // MARK: - Private
@@ -635,6 +646,13 @@ public struct NodeTable: Sendable {
     ) -> [BlockLifecycle] {
         guard let proposed, proposed.count == nodeCount else {
             return [BlockLifecycle](repeating: .positional, count: nodeCount)
+        }
+        return proposed
+    }
+
+    private static func sanitizedActionIDs(_ proposed: [ActionID?]?, nodeCount: Int) -> [ActionID?] {
+        guard let proposed, proposed.count == nodeCount else {
+            return [ActionID?](repeating: nil, count: nodeCount)
         }
         return proposed
     }

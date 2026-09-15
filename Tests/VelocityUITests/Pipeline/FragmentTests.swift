@@ -183,6 +183,81 @@ final class FragmentTests: XCTestCase {
         XCTAssertEqual(fragment.blockID, BlockID("stable"))
     }
 
+    // MARK: - .action() modifier plumbing (VelocityUI-ye8a.1)
+
+    func testExtractFragments_PropagatesActionIDOntoLeafFragment() async throws {
+        let table = NodeTable(
+            itemID: "action-fragment",
+            nodes: [.text(textDesc("Tap me"))], parentIndices: [-1],
+            layoutHash: 1, appearanceHash: 1, actionIDs: [ActionID("open")]
+        )
+        let layout = await measureNode(table, nodeIndex: 0, width: 200, textPool: TextMeasurementPool(capacity: 1))
+        let fragment = try XCTUnwrap(extractFragments(table: table, layout: layout).first)
+        XCTAssertEqual(fragment.actionID, ActionID("open"))
+    }
+
+    func testExtractFragments_UntaggedContainer_EmitsNoExtraGeometryFragment() async throws {
+        // Same shape as testVStackImageTextProduces2Fragments, no actionIDs at all — the
+        // container must stay fragment-less, byte-identical to pre-ye8a.1 output.
+        let table = NodeTable(
+            itemID: "untagged-container",
+            nodes: [
+                .vstack(VStackDescriptor.test(alignment: 0, spacing: 0)),
+                .image(imageDesc(aspectRatio: 2.0, hash: 1)),
+                .text(textDesc("Hello", hash: 2)),
+            ],
+            parentIndices: [-1, 0, 0],
+            layoutHash: 10, appearanceHash: 10
+        )
+        let pool = TextMeasurementPool(capacity: 1)
+        let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: pool)
+        let fragments = extractFragments(table: table, layout: layout)
+
+        XCTAssertEqual(fragments.count, 2, "untagged container must not synthesize an extra fragment")
+        XCTAssertFalse(fragments.contains { $0.id == 0 },
+            "container node index 0 must not appear as a fragment id when untagged")
+        XCTAssertTrue(fragments.allSatisfy { $0.actionID == nil })
+    }
+
+    func testExtractFragments_TaggedContainer_EmitsGeometryFragmentCoveringFullRect() async throws {
+        // VStack(0, tagged "card", framed to height 300) → Hosting(1, 50x50, centered).
+        // The child only covers a small slice of the container — the container's own
+        // synthesized fragment must still carry the action id and cover the FULL rect,
+        // including the padding around the child (the "tap in the padding" requirement).
+        let table = NodeTable(
+            itemID: "tagged-container",
+            nodes: [
+                .vstack(VStackDescriptor.test(alignment: 0, spacing: 0)),
+                .hosting(HostingDescriptor(size: CGSize(width: 50, height: 50), layoutHash: 1, appearanceHash: 1)),
+            ],
+            parentIndices: [-1, 0],
+            layoutHash: 1, appearanceHash: 1,
+            frames: [FrameSpec(height: 300), FrameSpec.unspecified],
+            actionIDs: [ActionID("card"), nil]
+        )
+        let pool = TextMeasurementPool(capacity: 1)
+        let layout = await measureNode(table, nodeIndex: 0, width: 320, textPool: pool)
+        let fragments = extractFragments(table: table, layout: layout)
+
+        let containerF = try XCTUnwrap(fragments.first { $0.id == 0 })
+        XCTAssertEqual(containerF.actionID, ActionID("card"))
+        guard case .geometry = containerF.content else {
+            return XCTFail("tagged container must synthesize a .geometry fragment")
+        }
+        XCTAssertEqual(containerF.frame, CGRect(x: 0, y: 0, width: 320, height: 300),
+            "container fragment must cover the full container rect, not just the child's")
+
+        let childF = try XCTUnwrap(fragments.first { $0.id == 1 })
+        XCTAssertNil(childF.actionID, "an untagged child keeps its own nil actionID")
+
+        // A point in the padding below the (vertically centered, 50-tall) child still falls
+        // inside the container's rect but outside the child's — proves the container-rect
+        // approach resolves taps the leaf-only approach would miss.
+        let paddingPoint = CGPoint(x: 10, y: 250)
+        XCTAssertFalse(childF.frame.contains(paddingPoint))
+        XCTAssertTrue(containerF.frame.contains(paddingPoint))
+    }
+
     // MARK: - Test 5: HStack spacing is correctly applied to absolute x-origins
 
     func testHStackSpacingAppliedToAbsoluteFrames() async throws {

@@ -70,13 +70,18 @@ public struct Fragment: Sendable {
     public let id: Int
     /// Optional stable identity propagated from a `.renderID(...)` modifier.
     public let blockID: BlockID?
+    /// Optional opaque action identity propagated from a `.action(...)` modifier — owns this
+    /// fragment's rect for a later hit-test pass (VelocityUI-ye8a.2+). `nil` for every fragment
+    /// whose originating node wasn't tagged.
+    public let actionID: ActionID?
     public let content: FragmentContent
     /// Absolute frame in cell coordinates (origin relative to the cell's top-left corner).
     public let frame: CGRect
 
-    public init(id: Int, blockID: BlockID? = nil, content: FragmentContent, frame: CGRect) {
+    public init(id: Int, blockID: BlockID? = nil, actionID: ActionID? = nil, content: FragmentContent, frame: CGRect) {
         self.id = id
         self.blockID = blockID
+        self.actionID = actionID
         self.content = content
         self.frame = frame
     }
@@ -136,7 +141,10 @@ private nonisolated func collectFragments(
     func clippedFrame() -> CGRect? { clipped(drawFrame) }
     func appendLeaf(_ content: FragmentContent) {
         guard let frame = clippedFrame() else { return }
-        result.append(Fragment(id: nodeIndex, blockID: table.blockID(at: nodeIndex), content: content, frame: frame))
+        result.append(Fragment(
+            id: nodeIndex, blockID: table.blockID(at: nodeIndex), actionID: table.actionID(at: nodeIndex),
+            content: content, frame: frame
+        ))
     }
 
     switch table.nodes[nodeIndex] {
@@ -210,8 +218,16 @@ private nonisolated func collectFragments(
         if table.frame(at: nodeIndex).isSpecified {
             childClip = clip.map { $0.intersection(absoluteFrame) } ?? absoluteFrame
         }
-        // No fragment for containers themselves. Children are already alignment-shifted
-        // within this container's local space, so pass absoluteFrame.origin as parentOrigin.
+        // Containers normally produce no fragment of their own — but a `.action(...)`-tagged
+        // container (e.g. a whole card is tappable) needs its own rect so a tap in the padding
+        // between children still resolves. `.geometry` content paints nothing, so this is
+        // invisible; the branch only fires when the container was actually tagged, so an
+        // untagged tree's fragment output is unaffected.
+        if let actionID = table.actionID(at: nodeIndex), let frame = clipped(absoluteFrame) {
+            result.append(Fragment(id: nodeIndex, actionID: actionID, content: .geometry, frame: frame))
+        }
+        // Children are already alignment-shifted within this container's local space, so pass
+        // absoluteFrame.origin as parentOrigin.
         for child in layout.children {
             collectFragments(table: table, layout: child, parentOrigin: absoluteFrame.origin, clip: childClip, into: &result)
         }

@@ -129,6 +129,50 @@ final class FlattenTests: XCTestCase {
         XCTAssertEqual(table.blockID(at: 3), BlockID("geometry"))
     }
 
+    // MARK: - .action() modifier (VelocityUI-ye8a.1)
+
+    @MainActor func testAction_PropagatesThroughNestedModifiers() {
+        let root = VStackNode {
+            TextNode("text").action("open-profile").frame(width: 100)
+            AsyncImageNode(url: nil).frame(height: 30).action("open-image")
+            SpacerNode().action("geometry-action")
+        }
+        let table = flatten(root, itemID: "item")
+
+        XCTAssertEqual(table.actionID(at: 1), ActionID("open-profile"))
+        XCTAssertEqual(table.actionID(at: 2), ActionID("open-image"))
+        XCTAssertEqual(table.actionID(at: 3), ActionID("geometry-action"))
+    }
+
+    @MainActor func testAction_UntaggedTree_ActionIDsAllNil() {
+        let root = VStackNode {
+            TextNode("plain")
+            AsyncImageNode(url: nil)
+        }
+        let table = flatten(root, itemID: "plain")
+        for i in 0..<table.nodes.count {
+            XCTAssertNil(table.actionID(at: i), "node \(i) was never tagged — actionID must stay nil")
+        }
+    }
+
+    @MainActor func testAction_DoesNotAffectLayoutOrAppearanceHash() {
+        let base = TextNode("caption")
+        let tagged = TextNode("caption").action("tap-me")
+        XCTAssertEqual(base.layoutHash, tagged.layoutHash,
+            "action id is opaque plumbing — must not perturb layoutHash")
+        XCTAssertEqual(base.appearanceHash, tagged.appearanceHash,
+            "action id is opaque plumbing — must not perturb appearanceHash")
+    }
+
+    @MainActor func testAction_TableLevelHashesUnaffected() {
+        let untagged = flatten(VStackNode { TextNode("x") }, itemID: "i")
+        let tagged = flatten(VStackNode { TextNode("x").action("a") }, itemID: "i")
+        XCTAssertEqual(untagged.layoutHash, tagged.layoutHash,
+            "tagging a node with an action id must not perturb the table's layoutHash")
+        XCTAssertEqual(untagged.appearanceHash, tagged.appearanceHash,
+            "tagging a node with an action id must not perturb the table's appearanceHash")
+    }
+
     // MARK: - Descriptor mapping
 
     @MainActor func testFlatten_asyncImageNode_mapsAllFields() {
