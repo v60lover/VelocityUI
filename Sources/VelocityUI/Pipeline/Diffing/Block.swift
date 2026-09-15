@@ -233,6 +233,10 @@ public struct BlockRenderContract: Sendable {
     public let geometryHash: Int
     public let appearanceHash: Int
     public let contentRequest: BlockContentRequest?
+    /// Carried through to the `Block`'s `Fragment` unconditionally — reused/updated/inserted
+    /// alike. Excluded from `geometryHash`/`appearanceHash` on purpose (mirrors
+    /// `ActionModifierNode`): an id-only change must never trigger a relayout/rerasterize.
+    public let actionID: ActionID?
 
     public init(
         key: BlockKey,
@@ -241,7 +245,8 @@ public struct BlockRenderContract: Sendable {
         presentation: BlockPresentationPolicy,
         geometryHash: Int,
         appearanceHash: Int,
-        contentRequest: BlockContentRequest? = nil
+        contentRequest: BlockContentRequest? = nil,
+        actionID: ActionID? = nil
     ) {
         self.key = key
         self.lifecycle = lifecycle
@@ -250,6 +255,7 @@ public struct BlockRenderContract: Sendable {
         self.geometryHash = geometryHash
         self.appearanceHash = appearanceHash
         self.contentRequest = contentRequest
+        self.actionID = actionID
     }
 }
 
@@ -297,14 +303,15 @@ public struct Block: Sendable {
             geometry: .measured,
             presentation: Block.presentation(for: fragment.content),
             geometryHash: contentHash,
-            appearanceHash: 0
+            appearanceHash: 0,
+            actionID: fragment.actionID
         )
     }
 
     public init(contract: BlockRenderContract, id: Int, frame: CGRect) {
         self.key = contract.key
         self.blockID = contract.key.blockID
-        self.fragment = Fragment(id: id, blockID: contract.key.blockID, content: contract.presentation.fragmentContent, frame: frame)
+        self.fragment = Fragment(id: id, blockID: contract.key.blockID, actionID: contract.actionID, content: contract.presentation.fragmentContent, frame: frame)
         self.layout = ResolvedLayout(totalFrame: frame)
         self.lifecycle = contract.lifecycle
         self.contentHash = Block.combineHash(contract.geometryHash, contract.appearanceHash)

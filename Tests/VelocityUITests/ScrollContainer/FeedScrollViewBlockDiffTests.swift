@@ -256,6 +256,57 @@ final class FeedScrollViewBlockDiffTests: XCTestCase {
         await drainFeedWork(feed)
     }
 
+    private struct StreamingActionTag: Hashable, Sendable {
+        let itemID: Int
+        let blockIndex: Int
+    }
+
+    /// Regression for VelocityUI-ye8a.2's fix to `BlockRenderContract`/`Block.init(contract:)`:
+    /// before that fix, `applyInPlaceBlockDiff`'s fast path (exercised by this exact streaming
+    /// shape — see `testStreamingUpdate_PatchesWorkingRangeInPlace_NeighborsNeverInvalidated`
+    /// above) always rebuilt each block's `Fragment` with `actionID: nil`, silently dropping any
+    /// `.action(_:)` tag on every streamed chat message, reused or freshly changed alike.
+    func testStreamingUpdate_PreservesActionIDThroughInPlaceBlockDiffFastPath() async {
+        let feed = makeChatFeed()
+        feed.cellBuilder = { item in
+            VStackNode(spacing: 4) {
+                for (i, text) in item.blocks.enumerated() {
+                    TextNode(text).action(StreamingActionTag(itemID: item.id, blockIndex: i))
+                }
+            }
+        }
+        let itemCount = 3
+        feed.items = (0..<itemCount).map { ChatItem(id: $0, blocks: ["seed message \($0)", "second block \($0)"]) }
+        feed.layoutSubviews()
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < deadline, feed._workingRangeMissCount(from: 0, to: itemCount) > 0 {
+            await Task.yield()
+            feed.layoutSubviews()
+        }
+        XCTAssertEqual(feed._workingRangeMissCount(from: 0, to: itemCount), 0,
+            "Precondition: all items must be warmed up before the streaming update")
+
+        // Same same-position streaming shape as testStreamingUpdate_PatchesWorkingRangeInPlace...
+        // above: item 0's first block grows (-> .layoutChanged, hits applyInPlaceBlockDiff's
+        // `d.updated` branch), item 0's second block is untouched (-> `d.reused` branch). Both
+        // branches read `block.fragment` from `newBlocks`, built via `blockRenderContract`
+        // (fresh NodeTable) -- both must carry their CURRENT tag after the fix.
+        var items = feed.items
+        items[0] = ChatItem(id: 0, blocks: ["seed message 0 grew a lot longer just now", "second block 0"])
+        feed.items = items
+        feed.layoutSubviews()
+
+        let fragments = feed.workingRange.entry(at: 0)?.fragments ?? []
+        let changedTag = fragments.first { $0.actionID == ActionID(StreamingActionTag(itemID: 0, blockIndex: 0)) }
+        let reusedTag = fragments.first { $0.actionID == ActionID(StreamingActionTag(itemID: 0, blockIndex: 1)) }
+
+        XCTAssertNotNil(changedTag, "The changed block's actionID must survive applyInPlaceBlockDiff's `d.updated` branch")
+        XCTAssertNotNil(reusedTag, "The untouched block's actionID must survive applyInPlaceBlockDiff's `d.reused` branch")
+
+        await drainFeedWork(feed)
+    }
+
     /// Companion to `testStreamingUpdate_PatchesWorkingRangeInPlace_NeighborsNeverInvalidated`
     /// (proves WorkingRange stays intact) — this proves the downstream effect: `itemsDidChange`
     /// used to reset `lastNotifiedLeadingIndex = -1` UNCONDITIONALLY, forcing

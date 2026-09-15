@@ -949,6 +949,7 @@ extension FeedScrollView {
             fragments.append(Fragment(
                 id: block.fragment.id,
                 blockID: block.blockID,
+                actionID: block.fragment.actionID,
                 content: content,
                 frame: frame
             ))

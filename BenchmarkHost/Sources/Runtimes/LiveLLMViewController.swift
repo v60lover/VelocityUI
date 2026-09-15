@@ -289,31 +289,61 @@ private final class LiveLLMStore: ObservableObject {
     }
 }
 
+// MARK: - Per-node action-id manual test hook (VelocityUI-ye8a.2)
+
+/// Tags each top-level block node so `.onNodeTap` below can be poked by hand on-device.
+/// `blockIndex` matters for the assistant case: it tags EVERY streamed paragraph/code/table
+/// block individually, so editing one block mid-stream (the `applyInPlaceBlockDiff` fast path
+/// VelocityUI-ye8a.2 fixed a real actionID-drop bug in) exercises both the `d.updated` block
+/// (the one still growing) and every `d.reused` block (the ones already sealed) in the same tap.
+private struct LiveLLMBlockTag: Hashable, Sendable {
+    let messageID: Int
+    let blockIndex: Int
+}
+
 // MARK: - SwiftUI feed view
 
 private struct LiveLLMFeedView: View {
     @ObservedObject var store: LiveLLMStore
     let environment: RenderEnvironment
+    @State private var lastTap: String?
 
     var body: some View {
-        AsyncFeed(items: store.messages, environment: environment) { message in
-            let nodes: [any RenderNode]
-            switch message.content {
-            case .user(let text):
-                nodes = [
-                    TextNode(text)
-                        .font(MarkdownTheme.liveLLM.body)
-                        .messageRole(.user)
-                ]
-            case .assistant:
-                nodes = store.controller(for: message.id).renderNodes
+        VStack(spacing: 0) {
+            if let lastTap {
+                Text(lastTap)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .padding(6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.yellow.opacity(0.25))
             }
-            return LiveLLMCell(nodes: nodes)
+            AsyncFeed(items: store.messages, environment: environment) { message in
+                let nodes: [any RenderNode]
+                switch message.content {
+                case .user(let text):
+                    nodes = [
+                        TextNode(text)
+                            .font(MarkdownTheme.liveLLM.body)
+                            .messageRole(.user)
+                            .action(LiveLLMBlockTag(messageID: message.id, blockIndex: 0)) as any RenderNode
+                    ]
+                case .assistant:
+                    nodes = store.controller(for: message.id).renderNodes.enumerated().map { index, node in
+                        node.action(LiveLLMBlockTag(messageID: message.id, blockIndex: index)) as any RenderNode
+                    }
+                }
+                return LiveLLMCell(nodes: nodes)
+            }
+            .onNodeTap { message, actionID, _ in
+                let tag = actionID.rawValue.base as? LiveLLMBlockTag
+                lastTap = "Tapped msg \(message.id) block \(tag?.blockIndex.description ?? "?")"
+            }
+            .prefetchWindow(ahead: 10, behind: 3)
+            .tailFollow(.llmChat, pinTrigger: store.pinToken)
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
         }
-        .prefetchWindow(ahead: 10, behind: 3)
-        .tailFollow(.llmChat, pinTrigger: store.pinToken)
-        .padding(.horizontal, 12)
-        .padding(.top, 8)
     }
 }
 
