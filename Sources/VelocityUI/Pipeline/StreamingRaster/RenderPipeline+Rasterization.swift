@@ -29,12 +29,19 @@ nonisolated func rasterizeTextFragment(
     fontProvider: KaTeXFontProvider? = nil
 ) -> (image: CGImage?, size: CGSize, retokenized: Bool) {
     guard case .body(let chrome) = descriptor.codeBlockRole else {
-        // layoutWidth is the full width the fragment was measured at (see LayoutEngine's
-        // `.text` case); frameSize is the tight measured size -- laying out narrower than
-        // measurement here is exactly the clip bug this split fixes.
+        // `layoutWidth` is the whole column width, shared by every fragment. A fragment was
+        // measured at its OWN narrower width, though -- LayoutEngine's `.text` case wraps at
+        // `layoutWidth * maxWidthFraction - horizontal padding` (a user bubble is 0.8 of the
+        // column, inset by its chrome). Re-derive that exact width here so the raster wraps to
+        // the same line count/breaks the measure produced; otherwise the bitmap is a different
+        // size than the tight `frameSize` and `contentsGravity = .resize` stretches the glyphs
+        // (the multi-line user-bubble "vytyanutyy/blurry text" bug). `frameSize` stays the tight
+        // measured size -- laying out narrower than measurement is the clip bug this split fixes.
+        let padding = descriptor.backgroundChrome?.padding ?? .zero
+        let wrapWidth = max(0, layoutWidth * CGFloat(descriptor.maxWidthFraction) - padding.leading - padding.trailing)
         return (
             rasterizeText(
-                descriptor, layoutWidth: layoutWidth, outputSize: frameSize, scale: scale,
+                descriptor, layoutWidth: wrapWidth, outputSize: frameSize, scale: scale,
                 formulaCache: formulaCache, fontProvider: fontProvider
             ),
             frameSize, false

@@ -86,5 +86,47 @@ final class TextRoundedBackgroundFragmentTests: XCTestCase {
         }
         XCTAssertFalse(hasBackground, "plain TextNode must never produce a .codeBlockBackground fragment")
     }
+
+    // MARK: - Test 4: Multi-line user bubble rasterizes at its own wrap width, not the full column
+
+    /// Regression: a `.messageRole(.user)` bubble is measured at `column * 0.8 - padding`, but the
+    /// raster path passes ONE `layoutWidth` (the full column) for every fragment. Laying the bubble
+    /// text out at the full column wraps it to a different line count than measurement, so the
+    /// bitmap ends up a different size than the tight `frame`; `contentsGravity = .resize` then
+    /// stretches the glyphs (the "multi-line bubble text is vytyanutyy/blurry" bug). Asserts the
+    /// rasterized bitmap's point width matches the text fragment's frame width -- they diverge only
+    /// when the raster wraps at a wider width than the frame was measured at.
+    @MainActor
+    func testMultiLineUserBubble_RastersAtWrapWidthNotFullColumn() async throws {
+        // "Random text" x7 -- wraps to three lines inside an 0.8-column bubble, like the report.
+        let root = TextNode(String(repeating: "Random text ", count: 7)).messageRole(.user)
+        let column: CGFloat = 320
+
+        let table = flatten(root, itemID: "multiline-bubble")
+        let layout = await measureNode(table, nodeIndex: 0, width: column, textPool: TextMeasurementPool(capacity: 1))
+        let fragments = extractFragments(table: table, layout: layout)
+
+        // fragments[0] = background, fragments[1] = text (see Test 1).
+        let textFragment = fragments[1]
+        guard case .text(let descriptor) = textFragment.content else {
+            return XCTFail("fragments[1] must be .text, got \(textFragment.content)")
+        }
+
+        // The pipeline passes the full column width as `layoutWidth` for every fragment
+        // (RenderPipeline.rasterizeTextArtifacts). The fix re-derives the bubble's own wrap width
+        // inside rasterizeTextFragment.
+        let (image, size, _) = rasterizeTextFragment(
+            descriptor, frameSize: textFragment.frame.size, layoutWidth: column, scale: 1,
+            highlightRegistry: HighlightRegistry(), theme: .defaultLight, existingBodyRaster: nil
+        )
+        let bitmap = try XCTUnwrap(image, "rasterizeTextFragment returned nil for a multi-line bubble")
+
+        XCTAssertEqual(size, textFragment.frame.size,
+            "declared raster size must equal the tight measured frame size")
+        // Point width == pixel width at scale 1. `inkGuard` (2pt) + a whole-pixel round-up is the
+        // only legitimate slack; a full-column layout would overshoot this by tens of points.
+        XCTAssertEqual(CGFloat(bitmap.width), textFragment.frame.width, accuracy: 3,
+            "bitmap must be as wide as the bubble frame -- a wider bitmap gets squashed by contentsGravity=.resize")
+    }
 }
 #endif
