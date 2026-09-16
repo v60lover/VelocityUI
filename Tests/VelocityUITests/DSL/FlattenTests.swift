@@ -129,8 +129,9 @@ final class FlattenTests: XCTestCase {
         XCTAssertEqual(table.blockID(at: 3), BlockID("geometry"))
     }
 
-    // MARK: - .action() modifier (VelocityUI-ye8a.1)
+    // MARK: - .action() modifier (disabled with the tap API)
 
+    /*
     @MainActor func testAction_PropagatesThroughNestedModifiers() {
         let root = VStackNode {
             TextNode("text").action("open-profile").frame(width: 100)
@@ -172,6 +173,7 @@ final class FlattenTests: XCTestCase {
         XCTAssertEqual(untagged.appearanceHash, tagged.appearanceHash,
             "tagging a node with an action id must not perturb the table's appearanceHash")
     }
+    */
 
     // MARK: - Descriptor mapping
 

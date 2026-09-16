@@ -168,6 +168,9 @@ extension FeedScrollView {
         var stale: Set<BlockKey> = []
         for b in prevBlocks {
             guard let id = b.blockID else { continue }
+            // A hot-table completion needs the prior resident pixels to remain mounted while its
+            // replacement runs. The coordinator overwrites this key on delivery.
+            if case .table = previousTable.nodes[b.fragment.id] { continue }
             if newHashByID[id] != b.contentHash { stale.insert(b.key) }
         }
         if !stale.isEmpty { environment.visibleBlockStore.evict(stale) }
@@ -349,6 +352,9 @@ extension FeedScrollView {
                   scale: scale,
                   codeStreamDelivery: { [weak cell] fragmentID, content in
                       cell?.applyCodeBodyTile(id: fragmentID, content: content, for: inputs.newTable.itemID)
+                  },
+                  hotTableDelivery: { [weak self] result, isFinal in
+                      self?.applyHotTableResult(result, isFinal: isFinal)
                   }
               )
         else {
@@ -452,7 +458,8 @@ extension FeedScrollView {
         itemID: ID,
         width: CGFloat,
         scale: CGFloat,
-        codeStreamDelivery: @MainActor @escaping (Int, CodeBodyLayerContent) -> Void = { _, _ in }
+        codeStreamDelivery: @MainActor @escaping (Int, CodeBodyLayerContent) -> Void = { _, _ in },
+        hotTableDelivery: @MainActor @escaping (HotTableRenderResult, Bool) -> Void = { _, _ in }
     ) -> (height: CGFloat, fragments: [Fragment], textBitmaps: [Int: CGImage], codeBodyContents: [Int: CodeBodyLayerContent])? {
         guard let (previousBlocks, _) = flatBlocks(for: previousTable, itemID: itemID, width: width),
               let (newBlocks, spacing) = flatBlocks(for: newTable, itemID: itemID, width: width),
@@ -682,6 +689,21 @@ extension FeedScrollView {
             return (size.height, size, raster.image)
         }
 
+        func submitHotTable(_ block: Block, isFinal: Bool) -> Bool {
+            guard case .table(let descriptor) = newTable.nodes[block.fragment.id] else { return false }
+            environment.hotTableRasterizerStore.submit(
+                HotTableRenderSnapshot(
+                    key: block.key, generation: 0, descriptor: descriptor, width: block.width,
+                    scale: scale, isFinal: isFinal
+                ),
+                renderer: { [formulaCache = environment.formulaCache, fontProvider = environment.mathFontProvider] snapshot in
+                    rasterizeHotTable(snapshot, formulaCache: formulaCache, fontProvider: fontProvider)
+                },
+                onDelivery: hotTableDelivery
+            )
+            return true
+        }
+
         var heights = [CGFloat](repeating: 0, count: newBlocks.count)
         var localFragmentFrames = [CGRect](repeating: .null, count: newBlocks.count)
         var textBitmaps: [Int: CGImage] = [:]
@@ -814,6 +836,10 @@ extension FeedScrollView {
                 localFragmentFrames[i] = CGRect(x: 0, y: 0, width: width, height: r.height)
                 textBitmaps[block.fragment.id] = r.bitmap
                 mathSizes[block.fragment.id] = r.size
+            } else if case .table = block.fragment.content {
+                guard let previous = previousFragmentByID[block.fragment.id], submitHotTable(block, isFinal: !d.hot.contains(i)) else { return nil }
+                heights[i] = previous.frame.height
+                localFragmentFrames[i] = CGRect(x: previous.frame.minX, y: 0, width: previous.frame.width, height: previous.frame.height)
             } else {
                 guard let geometry = resolveDeterministicGeometry(block) else { return nil }
                 recordGeometry(geometry, at: i)
@@ -835,6 +861,10 @@ extension FeedScrollView {
                 localFragmentFrames[i] = CGRect(x: 0, y: 0, width: width, height: r.height)
                 textBitmaps[block.fragment.id] = r.bitmap
                 mathSizes[block.fragment.id] = r.size
+            } else if case .table = block.fragment.content {
+                guard let previous = previousFragmentByID[block.fragment.id], submitHotTable(block, isFinal: false) else { return nil }
+                heights[i] = previous.frame.height
+                localFragmentFrames[i] = CGRect(x: previous.frame.minX, y: 0, width: previous.frame.width, height: previous.frame.height)
             } else {
                 guard let geometry = resolveDeterministicGeometry(block) else { return nil }
                 recordGeometry(geometry, at: i)
@@ -859,6 +889,7 @@ extension FeedScrollView {
             residentStore.evict(removed)
             environment.hotBlockRasterizerStore.evict(removed)
             environment.hotCodeStreamStore.evict(removed)
+            environment.hotTableRasterizerStore.evict(removed)
         }
 
         var cursor: CGFloat = 0
@@ -995,6 +1026,69 @@ extension FeedScrollView {
         )
     }
 
+    /// Applies a completed hot-table render only while the keyed block still belongs to this feed.
+    /// A newer stream snapshot may already exist; the coordinator's generation order makes this
+    /// progressive paint safe, while this membership check prevents reuse from receiving old pixels.
+    private func applyHotTableResult(_ result: HotTableRenderResult, isFinal: Bool) {
+        guard let index = tables.firstIndex(where: { $0.itemID == result.key.itemID }),
+              index < items.count,
+              let entry = workingRange.entry(at: index),
+              let (blocks, _) = flatBlocks(for: tables[index], itemID: items[index].id, width: measureWidth(for: containerWidth)),
+              let block = blocks.first(where: { $0.key == result.key }),
+              case .table(let descriptor) = tables[index].nodes[block.fragment.id],
+              let target = entry.fragments.firstIndex(where: { $0.id == block.fragment.id })
+        else { return }
+
+        var fragments = entry.fragments
+        let oldFrame = fragments[target].frame
+        let delta = result.size.height - oldFrame.height
+        fragments[target] = Fragment(
+            id: fragments[target].id, blockID: fragments[target].blockID,
+            content: .table(TableRasterDescriptor(
+                naturalContentSize: result.size, layoutHash: descriptor.layoutHash,
+                appearanceHash: descriptor.appearanceHash
+            )),
+            // The fragment frame is the clip viewport. Keep its cell-width while the descriptor
+            // carries the full raster width; otherwise a wide table's content and viewport become
+            // equal and the horizontal-pan target disappears.
+            frame: CGRect(x: oldFrame.minX, y: oldFrame.minY, width: oldFrame.width, height: result.size.height)
+        )
+        if delta != 0 {
+            fragments = fragments.enumerated().map { fragmentIndex, fragment in
+                guard fragmentIndex != target, fragment.frame.minY > oldFrame.minY else { return fragment }
+                return Fragment(
+                    id: fragment.id, blockID: fragment.blockID, content: fragment.content,
+                    frame: fragment.frame.offsetBy(dx: 0, dy: delta)
+                )
+            }
+        }
+
+        environment.visibleBlockStore.store(result.image, size: result.size, for: result.key)
+        if isFinal {
+            environment.frozenBitmapStore.store(
+                result.image, size: result.size, cost: result.image.bytesPerRow * result.image.height, for: result.key
+            )
+        }
+
+        let height = entry.layout.totalFrame.height + delta
+        let layout = makeSyntheticWorkingRangeLayout(
+            table: tables[index], fragments: fragments, width: measureWidth(for: containerWidth), height: height
+        )
+        workingRange.commit(layout, fragments, at: index)
+        let frameDelta = VerticalLayoutProvider.refineFrames(&resolvedFrames, at: index, newHeight: height)
+        applyContentHeightDelta(frameDelta)
+        guard let cell = visibleCells[index] else { return }
+        cell.layer.frame = resolvedFrames[index]
+        var syncMap = buildSyncMap(for: fragments, table: tables[index], ordinals: tables[index].leafOrdinals(), index: index)
+        syncMap[block.fragment.id] = result.image
+        let entering = cell.updateBlockViewport(
+            fragments: fragments, viewportInCell: blockViewport(for: cell.layer.frame), synchronousContent: syncMap
+        )
+        spawnMediaFetches(for: cell, fragments: entering, itemID: tables[index].itemID, syncMap: syncMap)
+        syncContentSize()
+        setNeedsLayout()
+    }
+
     /// Recognizes the one item shape this diff optimizes: a root `.vstack` whose direct children
     /// are all leaves — no nesting, no hstack/zstack — the "VStack of streaming message blocks"
     /// shape a chat message produces. Returns `nil` for any other shape, so the caller falls
@@ -1124,6 +1218,9 @@ extension FeedScrollView {
             scale: scale,
             codeStreamDelivery: { [weak cell] fragmentID, content in
                 cell?.applyCodeBodyTile(id: fragmentID, content: content, for: newTable.itemID)
+            },
+            hotTableDelivery: { [weak self] result, isFinal in
+                self?.applyHotTableResult(result, isFinal: isFinal)
             }
         ) else { return false }
 

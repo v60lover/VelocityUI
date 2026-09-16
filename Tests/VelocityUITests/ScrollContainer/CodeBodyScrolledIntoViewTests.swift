@@ -26,7 +26,7 @@ final class CodeBodyScrolledIntoViewTests: XCTestCase {
             dimensionCache: dimensions, imageActor: ImageActor(dimensionCache: dimensions),
             gifActor: GIFActor(), videoController: VideoController(videoPreparation: videoPreparation),
             videoPreparation: videoPreparation, frozenBitmapStore: FrozenBitmapStore(),
-            hotBlockRasterizerStore: HotBlockRasterizerStore(), hotCodeStreamStore: HotCodeStreamStore()
+            hotBlockRasterizerStore: HotBlockRasterizerStore(), hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore()
         )
         let feed = FeedScrollView<Message>(environment: environment, frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         feed.cellBuilder = { _ in

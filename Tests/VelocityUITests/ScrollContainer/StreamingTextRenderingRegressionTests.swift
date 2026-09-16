@@ -25,7 +25,7 @@ final class StreamingTextRenderingRegressionTests: XCTestCase {
             videoPreparation: videoPreparation,
             frozenBitmapStore: FrozenBitmapStore(),
             hotBlockRasterizerStore: HotBlockRasterizerStore(),
-            hotCodeStreamStore: HotCodeStreamStore()
+            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore()
         )
         let feed = FeedScrollView<Message>(
             environment: environment,

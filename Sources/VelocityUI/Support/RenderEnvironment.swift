@@ -40,6 +40,10 @@ public final class RenderEnvironment: Sendable {
     /// contract as `hotBlockRasterizerStore`, which it replaces for `.body` code descriptors.
     public let hotCodeStreamStore: HotCodeStreamStore
 
+    /// Per-`BlockKey` scheduler for full-table renders while a streamed table is still growing.
+    /// It owns at most one active and one pending snapshot per key.
+    public let hotTableRasterizerStore: HotTableRasterizerStore
+
     /// Gates the trailing hot block between the O(appended) incremental path
     /// (`hotBlockRasterizerStore.append`) and the O(block) fallback (a full `rasterizeText` pass
     /// every append). `true` in every production call site — exists so BenchmarkHost can compare
@@ -124,6 +128,7 @@ public final class RenderEnvironment: Sendable {
         visibleBlockStore: VisibleBlockStore = .init(),
         hotBlockRasterizerStore: HotBlockRasterizerStore,
         hotCodeStreamStore: HotCodeStreamStore,
+        hotTableRasterizerStore: HotTableRasterizerStore,
         hotBlockRasterizeEnabled: Bool = true,
         placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer(),
         contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil,
@@ -154,6 +159,7 @@ public final class RenderEnvironment: Sendable {
         self.visibleBlockStore = visibleBlockStore
         self.hotBlockRasterizerStore = hotBlockRasterizerStore
         self.hotCodeStreamStore = hotCodeStreamStore
+        self.hotTableRasterizerStore = hotTableRasterizerStore
         self.hotBlockRasterizeEnabled = hotBlockRasterizeEnabled
         self.placeholderRenderer = placeholderRenderer
         self.contentDeliveryObserver = contentDeliveryObserver
@@ -187,6 +193,7 @@ public final class RenderEnvironment: Sendable {
         visibleBlockStore: VisibleBlockStore = .init(),
         hotBlockRasterizerStore: HotBlockRasterizerStore = .init(),
         hotCodeStreamStore: HotCodeStreamStore = .init(),
+        hotTableRasterizerStore: HotTableRasterizerStore = .init(),
         hotBlockRasterizeEnabled: Bool = true,
         placeholderRenderer: any PlaceholderRenderer = DefaultPlaceholderRenderer(),
         contentDeliveryObserver: (@Sendable (RenderCell.ContentTransitionKind) -> Void)? = nil,
@@ -212,6 +219,7 @@ public final class RenderEnvironment: Sendable {
             visibleBlockStore: visibleBlockStore,
             hotBlockRasterizerStore: hotBlockRasterizerStore,
             hotCodeStreamStore: hotCodeStreamStore,
+            hotTableRasterizerStore: hotTableRasterizerStore,
             hotBlockRasterizeEnabled: hotBlockRasterizeEnabled,
             placeholderRenderer: placeholderRenderer,
             contentDeliveryObserver: contentDeliveryObserver,
