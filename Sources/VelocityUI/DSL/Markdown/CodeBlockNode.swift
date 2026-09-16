@@ -81,6 +81,8 @@ public struct CodeBlockNode: RenderNode {
         return h.finalize()
     }
 
+    public var managesOwnBlockIdentity: Bool { true }
+
     var descriptor: CodeBlockDescriptor {
         let chrome = CodeBlockChrome(cornerRadius: cornerRadius, backgroundColor: backgroundColor, language: language)
         return CodeBlockDescriptor(

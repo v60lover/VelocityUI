@@ -330,15 +330,20 @@ private struct LiveLLMFeedView: View {
                     ]
                 case .assistant:
                     nodes = store.controller(for: message.id).renderNodes.enumerated().map { index, node in
-                        node.action(LiveLLMBlockTag(messageID: message.id, blockIndex: index)) as any RenderNode
+                        // Code/math/table blocks carry their own blockID and reject .action()/
+                        // .frame()/.renderID() wrapping (see Flattener.visit's assert guard).
+                        if node.managesOwnBlockIdentity {
+                            return node
+                        }
+                        return node.action(LiveLLMBlockTag(messageID: message.id, blockIndex: index)) as any RenderNode
                     }
                 }
                 return LiveLLMCell(nodes: nodes)
             }
-            .onNodeTap { message, actionID, _ in
-                let tag = actionID.rawValue.base as? LiveLLMBlockTag
-                lastTap = "Tapped msg \(message.id) block \(tag?.blockIndex.description ?? "?")"
-            }
+//            .onNodeTap { message, actionID, _ in
+//                let tag = actionID.rawValue.base as? LiveLLMBlockTag
+//                lastTap = "Tapped msg \(message.id) block \(tag?.blockIndex.description ?? "?")"
+//            }
             .prefetchWindow(ahead: 10, behind: 3)
             .tailFollow(.llmChat, pinTrigger: store.pinToken)
             .padding(.horizontal, 12)

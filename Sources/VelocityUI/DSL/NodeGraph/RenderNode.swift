@@ -9,6 +9,15 @@ import Foundation
 public protocol RenderNode: Sendable {
     var layoutHash: Int { get }
     var appearanceHash: Int { get }
+
+    /// True for nodes that own their block identity via an init `blockID:` parameter
+    /// (`CodeBlockNode`, `MathBlockNode`, `MarkdownTableNode`) and reject `.frame()`/
+    /// `.renderID()`/`.action()` wrapping — see `Flattener.visit`'s assert guard.
+    var managesOwnBlockIdentity: Bool { get }
+}
+
+public extension RenderNode {
+    var managesOwnBlockIdentity: Bool { false }
 }
 
 /// Entry point for a developer-defined cell.

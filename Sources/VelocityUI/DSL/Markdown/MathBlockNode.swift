@@ -52,6 +52,8 @@ public struct MathBlockNode: RenderNode {
         return h.finalize()
     }
 
+    public var managesOwnBlockIdentity: Bool { true }
+
     var descriptor: MathBlockDescriptor {
         MathBlockDescriptor(
             rawTeX: rawTeX,

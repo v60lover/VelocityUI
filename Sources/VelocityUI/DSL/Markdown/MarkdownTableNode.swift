@@ -62,6 +62,8 @@ struct MarkdownTableNode: RenderNode {
         return h.finalize()
     }
 
+    var managesOwnBlockIdentity: Bool { true }
+
     var descriptor: MarkdownTableDescriptor {
         let cells = makeTableCellDescriptors(tableRows: tableRows, font: font, color: color)
         return MarkdownTableDescriptor(
