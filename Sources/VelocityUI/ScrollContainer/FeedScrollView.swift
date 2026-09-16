@@ -39,19 +39,6 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// `warmWindow`, so tuning the prefetch window can't silently move the page-load trigger.
     public let reachEndThreshold: Int
 
-    /// Called when a user taps a cell. Receives the tapped item and its frame converted to
-    /// **window coordinates** (`convert(_:to: nil)`, computed once at tap time) — ready to
-    /// drive a zoom/preview transition without a caller-side coordinate conversion.
-    public var onTap: (@MainActor (Item, CGRect) -> Void)?
-
-    /// Called when a tap resolves to a per-node action-tagged fragment (deepest match wins for
-    /// nested tags, e.g. an icon inside a tappable card). Receives the item, the tapped node's
-    /// opaque action id, and its frame in window coordinates. A tap that lands on a tagged node
-    /// invokes this instead of `onTap`, never both; a tap on an untagged region of the cell still
-    /// fires `onTap` as before. `nil` (default) — an app that never sets this or never tags nodes
-    /// via `.action(_:)` sees no behavior change from `onTap`.
-    public var onNodeTap: (@MainActor (Item, ActionID, CGRect) -> Void)?
-
     /// VoiceOver label source for a visible cell's `UIAccessibilityElement`. `nil` (default)
     /// falls back to `String(describing:)`. Phase 1 only — full node-level labeling is out of
     /// scope here (see VelocityUI-ye8a.2). Named distinctly from `UIView.accessibilityLabel`
@@ -124,10 +111,6 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// mount/unmount/reposition sites `updateVisibleCells()` already has — not derived from
     /// live `resolvedFrames` at tap time. See `FeedScrollView+Accessibility.swift`.
     var frameMap: [Int: CGRect] = [:]
-
-    /// Per-mounted-index tagged-node hit rects, content coordinates — built at the same
-    /// mount/reposition sites as `frameMap` (see `FeedScrollView+ActionHitTest.swift`).
-    var actionFrameMap: [Int: [TaggedFragmentHit]] = [:]
 
     /// One reused `UIAccessibilityElement` per mounted index. Only added/removed on
     /// mount/unmount; its frame is refreshed in place every layout pass in
@@ -321,8 +304,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
         // below). VelocityUI otherwise makes no use of the scroll delegate.
         delegate = self
         addSubview(interactionOverlay)
-        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTapGesture(_:)))
-        interactionOverlay.addGestureRecognizer(tap)
+        // Tap handling is temporarily disabled.
+        // let tap = UITapGestureRecognizer(target: self, action: #selector(handleTapGesture(_:)))
+        // interactionOverlay.addGestureRecognizer(tap)
 
         let codePan = HorizontalCodePanRecognizer(target: self, action: #selector(handleCodePan(_:)))
         codePan.hitTest = { [weak self] point in self?.resolveCodeBodyTarget(at: point) != nil }
@@ -457,25 +441,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
         updateTailFollowFromUserScroll()
     }
 
-    // MARK: - Tap handling
-
-    @objc private func handleTapGesture(_ gesture: UITapGestureRecognizer) {
-        // UIScrollView: bounds.origin = contentOffset, so gesture.location(in:) is already content-space.
-        handleTap(at: gesture.location(in: self))
-    }
-
-    /// Non-`@objc` body of the tap handler — a plain internal method so tests can drive tap
-    /// resolution without synthesizing a real `UITapGestureRecognizer`.
-    func handleTap(at contentPoint: CGPoint) {
-        guard let index = resolveTappedIndex(at: contentPoint), index < items.count,
-              let contentFrame = frameMap[index] else { return }
-        if let hit = resolveTappedAction(at: contentPoint, in: index) {
-            onNodeTap?(items[index], hit.actionID, convert(hit.rect, to: nil))
-            return
-        }
-        let windowFrame = convert(contentFrame, to: nil)
-        onTap?(items[index], windowFrame)
-    }
+    // Tap recognizer setup, hit testing, and callback delivery are disabled.
 
     // MARK: - Code body horizontal scroll
 

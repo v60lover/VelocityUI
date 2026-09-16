@@ -7,7 +7,7 @@ import UIKit
 /// SwiftUI entry point for VelocityUI feeds.
 ///
 /// Deliberately not `Equatable`: `.equatable()`'s skip path would leave Coordinator's
-/// `onTap`/`onReachEnd` closures stale, since closures aren't Equatable. `updateUIView`'s own
+/// `onReachEnd` closures stale, since closures aren't Equatable. `updateUIView`'s own
 /// structural guard already makes the "items unchanged" case cheap.
 @MainActor
 public struct AsyncFeed<
@@ -24,8 +24,6 @@ public struct AsyncFeed<
     private let cellBuilder: @MainActor (Item) -> Cell
     private var warmWindow: WarmWindow = .screens(leading: 2, trailing: 1)
     private var reachEndThreshold: Int = 3
-    private var onTap: (@MainActor (Item, CGRect) -> Void)? = nil
-    private var onNodeTap: (@MainActor (Item, ActionID, CGRect) -> Void)? = nil
     private var onReachEnd: (@MainActor () async -> Void)? = nil
     private var tailFollowMode: TailFollowMode = .off
     private var pinTrigger: Int = 0
@@ -83,24 +81,11 @@ public struct AsyncFeed<
         return copy
     }
 
-    /// Registers a handler invoked on `@MainActor` when the user taps a cell, receiving the item and
-    /// its frame in scroll-content coordinates. The Coordinator always holds the latest closure.
-    public func onTap(_ handler: @escaping @MainActor (Item, CGRect) -> Void) -> Self {
-        var copy = self
-        copy.onTap = handler
-        return copy
-    }
-
-    /// Registers a handler invoked on `@MainActor` when the user taps a node tagged via
-    /// `.action(_:)`, receiving the item, the tapped node's opaque action id (deepest tagged
-    /// node wins for nested tags), and its frame in window coordinates. A tap that lands on a
-    /// tagged node invokes this instead of `onTap`, never both; an untagged region still fires
-    /// `onTap`. The Coordinator always holds the latest closure.
-    public func onNodeTap(_ handler: @escaping @MainActor (Item, ActionID, CGRect) -> Void) -> Self {
-        var copy = self
-        copy.onNodeTap = handler
-        return copy
-    }
+    // Tap callback modifiers are disabled.
+    /*
+    public func onTap(_ handler: @escaping @MainActor (Item, CGRect) -> Void) -> Self { /* ... */ }
+    public func onNodeTap(_ handler: @escaping @MainActor (Item, ActionID, CGRect) -> Void) -> Self { /* ... */ }
+    */
 
     /// Registers an async handler invoked on `@MainActor` when the visible trailing edge nears the end
     /// of the item list. Fires at most once per page; the gate resets when `items.count` grows. Extend
@@ -131,8 +116,6 @@ public struct AsyncFeed<
     @MainActor
     public final class Coordinator {
         var cellBuilder: (@MainActor (Item) -> Cell)?
-        var onTap: (@MainActor (Item, CGRect) -> Void)?
-        var onNodeTap: (@MainActor (Item, ActionID, CGRect) -> Void)?
         var onReachEnd: (@MainActor () async -> Void)?
 
         /// Last `pinTrigger` value seen from the parent's `.tailFollow(_:pinTrigger:)` modifier.
@@ -140,8 +123,6 @@ public struct AsyncFeed<
         /// only when a later value differs from this one, then updates it.
         var lastPinTrigger: Int = 0
 
-        func handleTap(_ item: Item, _ frame: CGRect) { onTap?(item, frame) }
-        func handleNodeTap(_ item: Item, _ actionID: ActionID, _ frame: CGRect) { onNodeTap?(item, actionID, frame) }
         func handleReachEnd() async { await onReachEnd?() }
         func build(_ item: Item) -> any RenderNode {
             cellBuilder!(item).renderBody
@@ -171,8 +152,6 @@ public struct AsyncFeed<
     /// `internal`, not `private`: `_testMakeUIView(coordinator:)` in AsyncFeed+TestHooks.swift calls this.
     func buildUIView(coordinator: Coordinator) -> FeedScrollView<Item> {
         coordinator.cellBuilder = cellBuilder
-        coordinator.onTap = onTap
-        coordinator.onNodeTap = onNodeTap
         coordinator.onReachEnd = onReachEnd
         coordinator.lastPinTrigger = pinTrigger
 
@@ -187,8 +166,6 @@ public struct AsyncFeed<
         // Route through coordinator rather than capturing self (a value type) in view-stored
         // closures. Coordinator outlives each struct update, so a direct strong capture is safe.
         view.cellBuilder = { item in coordinator.build(item) }
-        view.onTap = { item, frame in coordinator.handleTap(item, frame) }
-        view.onNodeTap = { item, actionID, frame in coordinator.handleNodeTap(item, actionID, frame) }
         view.onReachEnd = { await coordinator.handleReachEnd() }
 
         return view
@@ -205,8 +182,6 @@ public struct AsyncFeed<
     func performUpdate(uiView: FeedScrollView<Item>, coordinator: Coordinator, animate: Bool) {
         // Always refresh Coordinator slots — they capture current SwiftUI state.
         coordinator.cellBuilder = cellBuilder
-        coordinator.onTap = onTap
-        coordinator.onNodeTap = onNodeTap
         coordinator.onReachEnd = onReachEnd
 
         // Prefetch window is init-time only. Debug-assert values unchanged.
@@ -244,8 +219,6 @@ public struct AsyncFeed<
         let cohort = ObjectIdentifier(uiView)
         Task { await gifActor.stopDisplayLinks(cohort: cohort) }
         coordinator.cellBuilder = nil
-        coordinator.onTap = nil
-        coordinator.onNodeTap = nil
         coordinator.onReachEnd = nil
     }
 

@@ -14,7 +14,6 @@ extension FeedScrollView {
     /// refreshes its label/frame instead of allocating a second element.
     func mountAccessibilityElement(for index: Int, frame: CGRect, item: Item) {
         frameMap[index] = frame
-        syncActionFrames(for: index, cellFrame: frame)
         if let element = accessibilityElementsByIndex[index] {
             element.accessibilityLabel = accessibilityLabelText(for: item)
         } else {
@@ -29,7 +28,6 @@ extension FeedScrollView {
     /// `updateVisibleCells()`'s cell-recycle loop.
     func unmountAccessibilityElement(for index: Int) {
         frameMap.removeValue(forKey: index)
-        removeActionFrames(for: index)
         if accessibilityElementsByIndex.removeValue(forKey: index) != nil {
             _accessibilityElementsDirty = true
         }

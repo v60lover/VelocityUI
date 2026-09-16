@@ -293,9 +293,9 @@ private struct StreamFeedView: View {
             }
             return StreamBenchmarkCell(nodes: nodes)
         }
-        .onTap({ message, rect in
-            print("message = \(message), rect = \(rect)")
-        })
+//        .onTap({ message, rect in
+//            print("message = \(message), rect = \(rect)")
+//        })
         .prefetchWindow(ahead: 10, behind: 3)
         .tailFollow(.llmChat, pinTrigger: store.pinToken)
         .padding(.horizontal, 8)

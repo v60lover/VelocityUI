@@ -1,5 +1,6 @@
 // FeedScrollView+ActionHitTest.swift
 
+/* Tap action-frame bookkeeping and hit testing are disabled.
 #if canImport(UIKit)
 import UIKit
 import CoreGraphics
@@ -79,3 +80,4 @@ extension FeedScrollView {
     }
 }
 #endif
+*/

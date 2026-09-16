@@ -109,10 +109,6 @@ extension FeedScrollView {
             // Check visibleCells first so the set is not mutated when no cell is present.
             if let cell = visibleCells[index], _pendingFragmentIndices.remove(index) != nil {
                 cell.layer.frame = resolvedFrames[index]
-                // mountAccessibilityElement isn't re-called on this path (frameMap already has
-                // an entry from the placeholder mount) -- refresh actionFrameMap here instead,
-                // now that entry.fragments carries real (not empty-placeholder) content.
-                syncActionFrames(for: index, cellFrame: cell.layer.frame)
                 let ordinals = tables[index].leafOrdinals()
                 let syncMap = buildSyncMap(for: entry.fragments, table: tables[index], ordinals: ordinals, index: index)
                 let codeMap = buildCodeBodyContentMap(for: entry.fragments, table: tables[index], ordinals: ordinals)

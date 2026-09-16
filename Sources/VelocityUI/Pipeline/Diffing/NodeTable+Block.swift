@@ -7,25 +7,21 @@ public extension NodeTable {
         guard index >= 0, index < nodes.count else { return nil }
         let key = canonicalBlockKey(itemID: itemID, blockID: blockID(at: index), logicalOrdinal: logicalOrdinal ?? index)
         let lifecycle = blockLifecycle(at: index)
-        // Read once, forwarded to every case below -- this is the one place a leaf's live
-        // actionID enters the block pipeline, so `applyInPlaceBlockDiff`'s fast path (and any
-        // other consumer of `blockRenderContract`) carries the CURRENT id, not a cached one.
-        let tag = actionID(at: index)
         switch nodes[index] {
-        case .text(let d): return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: .measured, presentation: .text(d), geometryHash: d.layoutHash, appearanceHash: d.appearanceHash, actionID: tag)
-        case .codeBlock(let d): return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: .measured, presentation: .text(d.bodyText), geometryHash: d.layoutHash, appearanceHash: d.appearanceHash, actionID: tag)
+        case .text(let d): return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: .measured, presentation: .text(d), geometryHash: d.layoutHash, appearanceHash: d.appearanceHash)
+        case .codeBlock(let d): return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: .measured, presentation: .text(d.bodyText), geometryHash: d.layoutHash, appearanceHash: d.appearanceHash)
         case .image(let d):
             let generation = Block.hash(d.layoutHash, d.appearanceHash)
-            return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: d.aspectRatio.map(BlockGeometryPolicy.aspectRatio) ?? .measured, presentation: .image(d), geometryHash: d.layoutHash, appearanceHash: d.appearanceHash, contentRequest: d.url.map { _ in BlockContentRequest(key: key, generation: generation, kind: .image(d)) }, actionID: tag)
-        case .spacer(let length): return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: .spacer(length), presentation: .geometry, geometryHash: Block.hash(length), appearanceHash: 0, actionID: tag)
-        case .hosting(let d): return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: .fixed(d.size), presentation: .geometry, geometryHash: d.layoutHash, appearanceHash: d.appearanceHash, actionID: tag)
+            return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: d.aspectRatio.map(BlockGeometryPolicy.aspectRatio) ?? .measured, presentation: .image(d), geometryHash: d.layoutHash, appearanceHash: d.appearanceHash, contentRequest: d.url.map { _ in BlockContentRequest(key: key, generation: generation, kind: .image(d)) })
+        case .spacer(let length): return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: .spacer(length), presentation: .geometry, geometryHash: Block.hash(length), appearanceHash: 0)
+        case .hosting(let d): return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: .fixed(d.size), presentation: .geometry, geometryHash: d.layoutHash, appearanceHash: d.appearanceHash)
         case .gif(let d):
             let generation = Block.hash(d.layoutHash, d.appearanceHash)
-            return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: .measured, presentation: .geometry, geometryHash: d.layoutHash, appearanceHash: d.appearanceHash, contentRequest: d.url.map { _ in BlockContentRequest(key: key, generation: generation, kind: .gif(d)) }, actionID: tag)
+            return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: .measured, presentation: .geometry, geometryHash: d.layoutHash, appearanceHash: d.appearanceHash, contentRequest: d.url.map { _ in BlockContentRequest(key: key, generation: generation, kind: .gif(d)) })
         case .video(let d):
             let generation = Block.hash(d.layoutHash, d.appearanceHash)
-            return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: .measured, presentation: .geometry, geometryHash: d.layoutHash, appearanceHash: d.appearanceHash, contentRequest: d.url.map { _ in BlockContentRequest(key: key, generation: generation, kind: .video(d)) }, actionID: tag)
-        case .customLayer(let size): return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: .fixed(size), presentation: .geometry, geometryHash: Block.hash(size.width, size.height), appearanceHash: 0, actionID: tag)
+            return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: .measured, presentation: .geometry, geometryHash: d.layoutHash, appearanceHash: d.appearanceHash, contentRequest: d.url.map { _ in BlockContentRequest(key: key, generation: generation, kind: .video(d)) })
+        case .customLayer(let size): return BlockRenderContract(key: key, lifecycle: lifecycle, geometry: .fixed(size), presentation: .geometry, geometryHash: Block.hash(size.width, size.height), appearanceHash: 0)
         // `naturalContentSize` is unknown at contract time (no measurement has run yet) --
         // this synthesized Block's fragment is only ever consulted for diffing (contentHash,
         // key), never painted directly. The real paint fragment always comes from
@@ -34,7 +30,7 @@ public extension NodeTable {
             return BlockRenderContract(
                 key: key, lifecycle: lifecycle, geometry: .measured,
                 presentation: .table(TableRasterDescriptor(naturalContentSize: .zero, layoutHash: d.layoutHash, appearanceHash: d.appearanceHash)),
-                geometryHash: d.layoutHash, appearanceHash: d.appearanceHash, actionID: tag
+                geometryHash: d.layoutHash, appearanceHash: d.appearanceHash
             )
         // `naturalContentSize` is unknown at contract time (same reasoning as `.table` above) --
         // this synthesized Block's fragment is only ever consulted for diffing, never painted
@@ -43,7 +39,7 @@ public extension NodeTable {
             return BlockRenderContract(
                 key: key, lifecycle: lifecycle, geometry: .measured,
                 presentation: .mathBlock(MathBlockRasterDescriptor(naturalContentSize: .zero, layoutHash: d.layoutHash, appearanceHash: d.appearanceHash)),
-                geometryHash: d.layoutHash, appearanceHash: d.appearanceHash, actionID: tag
+                geometryHash: d.layoutHash, appearanceHash: d.appearanceHash
             )
         case .vstack, .hstack, .zstack: return nil
         }

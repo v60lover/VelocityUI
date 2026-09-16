@@ -28,7 +28,6 @@ public func flatten<ID: Hashable & Sendable>(
     var frameByIndex: [Int: FrameSpec] = [:]
     var blockIDByIndex: [Int: BlockID] = [:]
     var blockLifecycleByIndex: [Int: BlockLifecycle] = [:]
-    var actionIDByIndex: [Int: ActionID] = [:]
     // Set the first time a TextNode is visited. Gates whether contentSizeCategory folds into the
     // top-level layoutHash — unconditional folding would misclassify category-blind, pure-image
     // trees as `.media` instead of `.none` on every Dynamic Type change.
@@ -44,7 +43,6 @@ public func flatten<ID: Hashable & Sendable>(
         var node = node
         var spec = FrameSpec.unspecified
         var blockID: BlockID?
-        var actionID: ActionID?
         while true {
             if let f = node as? FrameModifierNode {
                 spec = FrameSpec.merge(inner: f.spec, outer: spec)
@@ -52,17 +50,14 @@ public func flatten<ID: Hashable & Sendable>(
             } else if let modifier = node as? RenderIDModifierNode {
                 blockID = blockID ?? modifier.blockID
                 node = modifier.content
-            } else if let modifier = node as? ActionModifierNode {
-                actionID = actionID ?? modifier.actionID
-                node = modifier.content
             } else {
                 break
             }
         }
 
         if let codeBlock = node as? CodeBlockNode {
-            assert(!spec.isSpecified && blockID == nil && actionID == nil,
-                "CodeBlockNode does not support .frame()/.renderID()/.action() — use its own blockID: parameter")
+            assert(!spec.isSpecified && blockID == nil,
+                "CodeBlockNode does not support .frame()/.renderID() — use its own blockID: parameter")
             let myIndex = nodes.count
             let descriptor = codeBlock.descriptor
             parentIndices.append(parent)
@@ -74,8 +69,8 @@ public func flatten<ID: Hashable & Sendable>(
         }
 
         if let table = node as? MarkdownTableNode {
-            assert(!spec.isSpecified && blockID == nil && actionID == nil,
-                "MarkdownTableNode does not support .frame()/.renderID()/.action() — use its own blockID: parameter")
+            assert(!spec.isSpecified && blockID == nil,
+                "MarkdownTableNode does not support .frame()/.renderID() — use its own blockID: parameter")
             let myIndex = nodes.count
             let descriptor = table.descriptor
             parentIndices.append(parent)
@@ -87,8 +82,8 @@ public func flatten<ID: Hashable & Sendable>(
         }
 
         if let mathBlock = node as? MathBlockNode {
-            assert(!spec.isSpecified && blockID == nil && actionID == nil,
-                "MathBlockNode does not support .frame()/.renderID()/.action() — use its own blockID: parameter")
+            assert(!spec.isSpecified && blockID == nil,
+                "MathBlockNode does not support .frame()/.renderID() — use its own blockID: parameter")
             let myIndex = nodes.count
             let descriptor = mathBlock.descriptor
             parentIndices.append(parent)
@@ -150,7 +145,6 @@ public func flatten<ID: Hashable & Sendable>(
             nodes.append(.spacer(0))
         }
         if let blockID { blockIDByIndex[myIndex] = blockID }
-        if let actionID { actionIDByIndex[myIndex] = actionID }
     }
 
     visit(root, parent: -1)
@@ -162,7 +156,6 @@ public func flatten<ID: Hashable & Sendable>(
         : (0..<nodes.count).map { frameByIndex[$0] ?? .unspecified }
     let blockIDs = (0..<nodes.count).map { blockIDByIndex[$0] }
     let blockLifecycles = (0..<nodes.count).map { blockLifecycleByIndex[$0] ?? .positional }
-    let actionIDs = (0..<nodes.count).map { actionIDByIndex[$0] }
 
     // sawText gate: a category-blind tree must keep byte-identical layoutHash across categories, or
     // classify()'s tier-1 fast path misses on every Dynamic Type change and misclassifies as `.media`.
@@ -176,8 +169,7 @@ public func flatten<ID: Hashable & Sendable>(
         appearanceHash: root.appearanceHash,
         frames: frames,
         blockIDs: blockIDs,
-        blockLifecycles: blockLifecycles,
-        actionIDs: actionIDs
+        blockLifecycles: blockLifecycles
     )
 }
 

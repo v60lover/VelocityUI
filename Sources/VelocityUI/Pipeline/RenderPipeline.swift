@@ -226,7 +226,7 @@ public actor RenderPipeline {
                     let key = CacheKey(layoutHash: table.layoutHash, width: availableWidth)
                     group.addTask {
                         if let entry = await cache.get(key) {
-                            // CacheKey is (layoutHash, width) only — tags (actionID/blockID)
+                            // CacheKey is (layoutHash, width) only — block IDs
                             // don't affect geometry, so two items with identical content but
                             // different tags share this entry. Re-derive fragments from the
                             // CURRENT item's table over the cached layout so the tags are this
