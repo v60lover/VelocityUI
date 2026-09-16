@@ -492,20 +492,33 @@ public actor ImageActor {
         let networkStart = CFAbsoluteTimeGetCurrent()
         #endif
         let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(from: url)
-        } catch {
-            #if DEBUG
-            log.error("network fetch failed for \(url.absoluteString, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            #endif
-            return DecodeResult(image: nil, rawSourceSize: nil)
-        }
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            #if DEBUG
-            log.error("network fetch for \(url.absoluteString, privacy: .public) returned status \(http.statusCode)")
-            #endif
-            return DecodeResult(image: nil, rawSourceSize: nil)
+        if url.isFileURL {
+            // Read in-process: nsurlsessiond can't reach into our sandbox container for file://
+            // on a real device, so session.data(from:) 404s even though the file exists.
+            do {
+                data = try Data(contentsOf: url)
+            } catch {
+                #if DEBUG
+                log.error("file read failed for \(url.absoluteString, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                #endif
+                return DecodeResult(image: nil, rawSourceSize: nil)
+            }
+        } else {
+            let response: URLResponse
+            do {
+                (data, response) = try await session.data(from: url)
+            } catch {
+                #if DEBUG
+                log.error("network fetch failed for \(url.absoluteString, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                #endif
+                return DecodeResult(image: nil, rawSourceSize: nil)
+            }
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                #if DEBUG
+                log.error("network fetch for \(url.absoluteString, privacy: .public) returned status \(http.statusCode)")
+                #endif
+                return DecodeResult(image: nil, rawSourceSize: nil)
+            }
         }
         #if DEBUG
         let networkMs = (CFAbsoluteTimeGetCurrent() - networkStart) * 1_000

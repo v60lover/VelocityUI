@@ -95,19 +95,29 @@
     // MARK: - Private
 
     private func fetchAndParse(url: URL) async -> CGSize? {
-      let request = Self.rangedRequest(for: url)
-      guard let (data, response) = try? await session.data(for: request) else { return nil }
-
-      if let http = response as? HTTPURLResponse {
-        switch http.statusCode {
-        case 206:
-          break  // partial content — Range honored, expected path
-        case 200:
-          break  // server ignored Range, full body returned
-        // Phase 6: emit os_signpost here to surface CDNs that strip Range headers
-        default:
-          return nil  // 416 range-not-satisfiable or error response
+      let data: Data
+      if url.isFileURL {
+        // Read in-process: nsurlsessiond can't reach into our sandbox container for file://
+        // on a real device, so session.data(for:) 404s even though the file exists.
+        // .mappedIfSafe keeps the "only touch the header" intent of the Range request —
+        // ImageSource only faults in the pages it actually reads.
+        guard let mapped = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
+        data = mapped
+      } else {
+        let request = Self.rangedRequest(for: url)
+        guard let (fetched, response) = try? await session.data(for: request) else { return nil }
+        if let http = response as? HTTPURLResponse {
+          switch http.statusCode {
+          case 206:
+            break  // partial content — Range honored, expected path
+          case 200:
+            break  // server ignored Range, full body returned
+          // Phase 6: emit os_signpost here to surface CDNs that strip Range headers
+          default:
+            return nil  // 416 range-not-satisfiable or error response
+          }
         }
+        data = fetched
       }
 
       guard let size = Self.parse(from: data) else { return nil }

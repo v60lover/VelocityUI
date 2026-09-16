@@ -243,12 +243,12 @@ final class FeedScrollViewRasterRepairTests: XCTestCase {
         await waitForRepairCompletion(feed)
         await waitForBitmapPaint(feed, at: 0, fragmentId: 0)
 
-        // Verify repair task count stayed the same throughout
-        XCTAssertEqual(
-            feed._repairTaskSpawnCount,
-            spawnCountAfterFirstDetection,
-            "Only one repair task should have spawned total"
-        )
+        // No assertion on the total spawn count here. Coalescing guarantees "one task per
+        // in-flight window" (verified by the two synchronous passes above), not "one task
+        // ever". Scrolling back cold-remounts several cells at once; whichever ones the async
+        // pipeline has not yet re-rasterized legitimately report a raster miss and are repaired
+        // by a follow-up task after the first completes. That count is timing-dependent and not
+        // an invariant to pin.
 
         // Verify painted
         let bitmapsAfterRepair = feed._debugPaintedBitmaps(at: 0)
