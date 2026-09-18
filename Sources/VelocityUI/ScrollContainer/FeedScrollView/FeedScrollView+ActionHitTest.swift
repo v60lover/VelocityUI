@@ -1,83 +1,49 @@
 // FeedScrollView+ActionHitTest.swift
 
-/* Tap action-frame bookkeeping and hit testing are disabled.
 #if canImport(UIKit)
 import UIKit
 import CoreGraphics
 
-/// One action-tagged node's hit rect for `resolveTappedAction`, in scroll-content coordinates
-/// (same convention `frameMap` uses). `depth` is the node's distance from the `NodeTable` root —
-/// resolves an ancestor/descendant rect overlap (e.g. a tappable icon inside a tappable card) to
-/// the innermost tagged node.
-struct TaggedFragmentHit {
-    let rect: CGRect
+/// One resolved tap-target: the tagged node's action id and its rect in content coordinates.
+struct TappedActionHit {
     let actionID: ActionID
-    let depth: Int
+    let rect: CGRect
 }
 
 extension FeedScrollView {
 
-    // MARK: - actionFrameMap bookkeeping (mount/unmount only, mirrors frameMap)
-
-    /// Rebuilds `index`'s tagged-node hit rects from whatever `WorkingRange` currently knows,
-    /// converting each `Fragment.frame` (cell-local) into `cellFrame`'s content-space coordinate.
-    /// Called from `mountAccessibilityElement` — every mount/reposition site already has both
-    /// `index` and `cellFrame` in hand, so no new call sites are needed in the scroll path — plus
-    /// once more from `refineKnownFrames`, the one place real fragments are delivered to a cell
-    /// that was mounted as an empty `WorkingRange`-miss placeholder without a fresh
-    /// `mountAccessibilityElement` call. Empty array (not a missing key) for a mounted index with
-    /// no tagged nodes — cheap, common case, no allocation beyond the empty-array literal.
-    func syncActionFrames(for index: Int, cellFrame: CGRect) {
-        guard index < tables.count, let fragments = workingRange.entry(at: index)?.fragments else {
-            actionFrameMap[index] = []
-            return
-        }
+    /// Resolves a tap to the deepest action-tagged node under `contentPoint`, or `nil` if the tap
+    /// only lands on untagged space. Walks `workingRange.entry(at:)?.layout` (the `ResolvedLayout`
+    /// tree) directly, not the fragment list — a tagged container synthesizes no `Fragment` of its
+    /// own (see `Fragment.swift`), so resolving from fragments alone misses taps in a container's
+    /// padding/gaps and reports a child leaf's rect instead of the container's own. The layout
+    /// tree has a real frame for every node, tagged or not, so both are fixed by construction.
+    /// No bookkeeping mirrors this on the scroll path — taps are rare, renders are constant.
+    ///
+    /// Innermost wins: when the point lands under a tagged leaf nested inside a tagged container,
+    /// each candidate is scored by its depth from the tree root, and the deepest one is returned.
+    func resolveTappedAction(at contentPoint: CGPoint, in index: Int) -> TappedActionHit? {
+        guard index < tables.count, let cellFrame = frameMap[index],
+              let layout = workingRange.entry(at: index)?.layout else { return nil }
         let table = tables[index]
-        var hits: [TaggedFragmentHit] = []
-        for fragment in fragments {
-            guard let actionID = fragment.actionID else { continue }
-            hits.append(TaggedFragmentHit(
-                rect: fragment.frame.offsetBy(dx: cellFrame.minX, dy: cellFrame.minY),
-                actionID: actionID,
-                depth: nodeDepth(of: fragment.id, in: table)
-            ))
+        var best: (actionID: ActionID, rect: CGRect, depth: Int)?
+
+        // Mirrors collectFragments' coordinate math (Fragment.swift): totalFrame is local to
+        // the parent, so each level's absoluteFrame.origin becomes the next level's parentOrigin.
+        func walk(_ node: ResolvedLayout, parentOrigin: CGPoint, depth: Int) {
+            let absoluteFrame = node.totalFrame.offsetBy(dx: parentOrigin.x, dy: parentOrigin.y)
+            if node.nodeIndex >= 0, let actionID = table.actionID(at: node.nodeIndex) {
+                let contentFrame = absoluteFrame.offsetBy(dx: cellFrame.minX, dy: cellFrame.minY)
+                if contentFrame.contains(contentPoint), best == nil || depth > best!.depth {
+                    best = (actionID, contentFrame, depth)
+                }
+            }
+            for child in node.children {
+                walk(child, parentOrigin: absoluteFrame.origin, depth: depth + 1)
+            }
         }
-        actionFrameMap[index] = hits
-    }
-
-    /// Drops `index`'s tagged-node hit rects, paired with `unmountAccessibilityElement`.
-    func removeActionFrames(for index: Int) {
-        actionFrameMap.removeValue(forKey: index)
-    }
-
-    /// Number of ancestors between `nodeIndex` and the `NodeTable` root — a tagged container
-    /// (e.g. a whole card) has a smaller depth than a tagged leaf nested inside it.
-    private func nodeDepth(of nodeIndex: Int, in table: NodeTable) -> Int {
-        var depth = 0
-        var i = nodeIndex
-        while table.parentIndices.indices.contains(i) {
-            let parent = table.parentIndices[i]
-            guard parent >= 0 else { break }
-            i = parent
-            depth += 1
-        }
-        return depth
-    }
-
-    // MARK: - Tap resolution
-
-    /// Deepest tagged node under `contentPoint` within `index`'s mounted rects — "innermost
-    /// wins" for a tappable icon nested inside a tappable card. `nil` when the point lands only
-    /// in untagged space, or `index` has no tagged nodes at all — the caller falls through to
-    /// the existing item-level `onTap` in that case.
-    func resolveTappedAction(at contentPoint: CGPoint, in index: Int) -> TaggedFragmentHit? {
-        guard let hits = actionFrameMap[index] else { return nil }
-        var best: TaggedFragmentHit?
-        for hit in hits where hit.rect.contains(contentPoint) {
-            if best == nil || hit.depth > best!.depth { best = hit }
-        }
-        return best
+        walk(layout, parentOrigin: .zero, depth: 0)
+        return best.map { TappedActionHit(actionID: $0.actionID, rect: $0.rect) }
     }
 }
 #endif
-*/

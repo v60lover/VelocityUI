@@ -48,7 +48,6 @@ final class InteractionOverlayTests: XCTestCase {
         (0..<count).map { TestItem(id: $0, aspectRatio: aspectRatio) }
     }
 
-    /* Disabled while the tap/action API is unavailable.
     // MARK: - Test 1: Tap on a visible cell reports correct item + window-coordinate frame
 
     func testTapOnVisibleCellReportsCorrectItemAndWindowFrame() {
@@ -109,7 +108,6 @@ final class InteractionOverlayTests: XCTestCase {
 
         XCTAssertFalse(tapFired, "onTap must not fire when tapping outside all frame bounds")
     }
-    */
 
     // MARK: - Test 3: resolveTappedIndex returns nil for a point between two frames
 
@@ -298,8 +296,6 @@ final class InteractionOverlayTests: XCTestCase {
 
     // MARK: - Per-node action-id hit-test (VelocityUI-ye8a.2)
 
-    /* Disabled while the tap/action API is unavailable.
-
     private enum ActionTag: Hashable, Sendable {
         case card(Int)
         case icon(Int)
@@ -349,13 +345,17 @@ final class InteractionOverlayTests: XCTestCase {
         }
     }
 
-    /// Cell-local frame of the fragment carrying `actionID`, or `nil` if no committed fragment
-    /// for `index` carries it. Tests read this straight from `WorkingRange` (the same source
-    /// `syncActionFrames` reads) rather than hand-computing text measurement.
+    /// Cell-local frame of the leaf fragment whose own `NodeTable` node carries `actionID`, or
+    /// `nil` if no committed fragment for `index` resolves to it. `actionID` now lives only on
+    /// `NodeTable` (not `Fragment` — see `resolveTappedAction`), so this looks the tag up via
+    /// `table.actionID(at:)` on each fragment's node index instead of reading it off the
+    /// fragment directly.
     private func taggedFragmentFrame(
         _ feed: FeedScrollView<TestItem>, index: Int, actionID: ActionID
     ) -> CGRect? {
-        feed.workingRange.entry(at: index)?.fragments.first { $0.actionID == actionID }?.frame
+        guard let entry = feed.workingRange.entry(at: index), index < feed.tables.count else { return nil }
+        let table = feed.tables[index]
+        return entry.fragments.first { table.actionID(at: $0.id) == actionID }?.frame
     }
 
     private func contentPoint(
@@ -365,6 +365,15 @@ final class InteractionOverlayTests: XCTestCase {
               let fragmentFrame = taggedFragmentFrame(feed, index: index, actionID: actionID)
         else { return nil }
         return CGPoint(x: cellFrame.minX + fragmentFrame.midX, y: cellFrame.minY + fragmentFrame.midY)
+    }
+
+    /// Cell-local frame of the "Card N" text fragment in `makeNestedTaggedFeed` -- untagged
+    /// itself, but nested inside the tagged card container, so a tap on it exercises the same
+    /// "no leaf owns this point" path as a tap in the card's own padding/spacing.
+    private func untaggedTextFragmentFrame(_ feed: FeedScrollView<TestItem>, index: Int) -> CGRect? {
+        guard let entry = feed.workingRange.entry(at: index), index < feed.tables.count else { return nil }
+        let table = feed.tables[index]
+        return entry.fragments.first { table.actionID(at: $0.id) == nil && $0.content.isTextContent }?.frame
     }
 
     func testTapOnTaggedNodeReportsCorrectItemAndActionID() async throws {
@@ -408,18 +417,14 @@ final class InteractionOverlayTests: XCTestCase {
         }
         await waitForWorkingRangeCommit(feed, index: testIndex)
         let iconActionID = ActionID(ActionTag.icon(testIndex))
-        let cardActionID = ActionID(ActionTag.card(testIndex))
         guard let tapPoint = contentPoint(feed, index: testIndex, actionID: iconActionID) else {
             throw XCTSkip("Icon fragment not committed for index \(testIndex)")
         }
-        // Sanity: the tap point must genuinely sit inside BOTH the card's and the icon's rect,
-        // or this isn't testing the nested-overlap case at all.
-        guard let cardFrame = taggedFragmentFrame(feed, index: testIndex, actionID: cardActionID),
-              let cellFrame = feed.frameMap[testIndex],
-              cardFrame.offsetBy(dx: cellFrame.minX, dy: cellFrame.minY).contains(tapPoint)
-        else {
-            throw XCTSkip("Card fragment doesn't enclose the icon tap point")
-        }
+        // No separate containment check needed: the icon is a child of the card in the DSL
+        // tree, so any point inside the icon's rect is structurally inside the card's rect too.
+        // The card container synthesizes no `Fragment` of its own (see `Fragment.swift`), so
+        // there's nothing to look up here directly -- the meaningful assertion is which tag
+        // `resolveTappedAction` returns for this point.
 
         var capturedActionID: ActionID?
         feed.onNodeTap = { _, actionID, _ in capturedActionID = actionID }
@@ -427,6 +432,93 @@ final class InteractionOverlayTests: XCTestCase {
         feed.handleTap(at: tapPoint)
 
         XCTAssertEqual(capturedActionID, iconActionID, "The deeper tag (icon) must win over the shallower enclosing tag (card)")
+        await drainFeedWork(feed)
+    }
+
+    /// A tagged container synthesizes no `Fragment` of its own -- a tap on a spot no leaf
+    /// fragment covers (here: "Card N", itself untagged, sitting inside the tagged card) must
+    /// still resolve to the card's own id by walking the `ResolvedLayout` tree (VelocityUI-4uyk
+    /// finding #1). Before the fix, `resolveTappedAction` only started its ancestor walk from a
+    /// fragment the tap point directly hit, so this point resolved to nothing and fell through
+    /// to item-level `onTap`.
+    func testTapOnContainerPaddingResolvesToContainerActionID() async throws {
+        let feed = makeNestedTaggedFeed()
+        feed.items = items(count: 20)
+        feed.layoutSubviews()
+
+        guard let testIndex = feed.visibleCells.keys.sorted().first else {
+            throw XCTSkip("Expected at least one visible item")
+        }
+        await waitForWorkingRangeCommit(feed, index: testIndex)
+        let iconActionID = ActionID(ActionTag.icon(testIndex))
+        guard let cellFrame = feed.frameMap[testIndex],
+              let cardNFrame = untaggedTextFragmentFrame(feed, index: testIndex),
+              let iconFrame = taggedFragmentFrame(feed, index: testIndex, actionID: iconActionID)
+        else {
+            throw XCTSkip("\"Card N\"/icon fragments not committed for index \(testIndex)")
+        }
+        // The point must land in the 4pt VStack spacing gap below "Card N" and above "Icon" --
+        // NOT inside either leaf's own fragment. A point inside "Card N"'s fragment would still
+        // resolve via the pre-fix ancestor walk (it starts from the fragment under the point and
+        // climbs parentIndices), so it wouldn't reproduce finding #1's regression at all.
+        let gapPoint = CGPoint(x: cardNFrame.minX + 1, y: cardNFrame.maxY + 2)
+        guard !cardNFrame.contains(gapPoint), !iconFrame.contains(gapPoint), gapPoint.y < iconFrame.minY else {
+            throw XCTSkip("Gap point unexpectedly overlaps a leaf fragment for index \(testIndex)")
+        }
+        let tapPoint = CGPoint(x: cellFrame.minX + gapPoint.x, y: cellFrame.minY + gapPoint.y)
+        let expectedActionID = ActionID(ActionTag.card(testIndex))
+
+        var capturedActionID: ActionID?
+        var onTapFired = false
+        feed.onTap = { _, _ in onTapFired = true }
+        feed.onNodeTap = { _, actionID, _ in capturedActionID = actionID }
+
+        feed.handleTap(at: tapPoint)
+
+        XCTAssertEqual(capturedActionID, expectedActionID,
+            "A tap that lands on no leaf fragment but inside a tagged container must resolve to the container's own id")
+        XCTAssertFalse(onTapFired, "A tap resolved to a tagged container must not also fire item-level onTap")
+        await drainFeedWork(feed)
+    }
+
+    /// `onNodeTap`'s rect must be the tagged node's OWN frame, not a child leaf's (finding #2).
+    /// The card container wraps both "Card N" and "Icon", so its frame must contain both leaves'
+    /// frames and be strictly larger than either -- a leaf's frame satisfies neither.
+    func testOnNodeTapDeliversContainerFrameNotLeafFrame() async throws {
+        let feed = makeNestedTaggedFeed()
+        feed.items = items(count: 20)
+        feed.layoutSubviews()
+
+        guard let testIndex = feed.visibleCells.keys.sorted().first else {
+            throw XCTSkip("Expected at least one visible item")
+        }
+        await waitForWorkingRangeCommit(feed, index: testIndex)
+        let iconActionID = ActionID(ActionTag.icon(testIndex))
+        guard let cellFrame = feed.frameMap[testIndex],
+              let cardNFrame = untaggedTextFragmentFrame(feed, index: testIndex),
+              let iconFrame = taggedFragmentFrame(feed, index: testIndex, actionID: iconActionID)
+        else {
+            throw XCTSkip("Card/icon fragments not committed for index \(testIndex)")
+        }
+        let tapPoint = CGPoint(x: cellFrame.minX + cardNFrame.midX, y: cellFrame.minY + cardNFrame.midY)
+        let absoluteCardNFrame = cardNFrame.offsetBy(dx: cellFrame.minX, dy: cellFrame.minY)
+        let absoluteIconFrame = iconFrame.offsetBy(dx: cellFrame.minX, dy: cellFrame.minY)
+        // handleTap reports onNodeTap's rect in window coordinates (`convert(hit.rect, to: nil)`);
+        // apply the same conversion here so both sides compare in the same coordinate space
+        // rather than assuming `convert(_:to:nil)` is its own inverse for an unwindowed view.
+        let expectedCardNWindowFrame = feed.convert(absoluteCardNFrame, to: nil)
+        let expectedIconWindowFrame = feed.convert(absoluteIconFrame, to: nil)
+
+        var capturedRect: CGRect?
+        feed.onNodeTap = { _, _, rect in capturedRect = rect }
+
+        feed.handleTap(at: tapPoint)
+
+        let rect = try XCTUnwrap(capturedRect, "onNodeTap must fire for a tap inside the tagged card")
+        XCTAssertTrue(rect.contains(expectedCardNWindowFrame), "Container rect must contain the \"Card N\" leaf's frame")
+        XCTAssertTrue(rect.contains(expectedIconWindowFrame), "Container rect must contain the icon leaf's frame")
+        XCTAssertNotEqual(rect, expectedCardNWindowFrame, "Container rect must not be the \"Card N\" leaf's own frame")
+        XCTAssertNotEqual(rect, expectedIconWindowFrame, "Container rect must not be the icon leaf's own frame")
         await drainFeedWork(feed)
     }
 
@@ -439,8 +531,11 @@ final class InteractionOverlayTests: XCTestCase {
             throw XCTSkip("Expected at least one visible item")
         }
         await waitForWorkingRangeCommit(feed, index: testIndex)
+        let table = feed.tables[testIndex]
         guard let entry = feed.workingRange.entry(at: testIndex),
-              let untaggedFragment = entry.fragments.first(where: { $0.actionID == nil && $0.content.isTextContent }),
+              let untaggedFragment = entry.fragments.first(where: {
+                  table.actionID(at: $0.id) == nil && $0.content.isTextContent
+              }),
               let cellFrame = feed.frameMap[testIndex]
         else {
             throw XCTSkip("Untagged text fragment not committed for index \(testIndex)")
@@ -478,23 +573,10 @@ final class InteractionOverlayTests: XCTestCase {
         XCTAssertFalse(nodeTapFired, "onNodeTap must not fire when tapping outside all frame bounds")
     }
 
-    func testActionFrameMapConsistentWithVisibleCellsAcrossNoOpLayoutPass() {
-        let feed = makeNestedTaggedFeed()
-        feed.items = items(count: 20)
-        feed.layoutSubviews()
-
-        let keysBefore = Set(feed.actionFrameMap.keys)
-        XCTAssertEqual(keysBefore, Set(feed.visibleCells.keys),
-            "actionFrameMap keys must exactly match visibleCells keys after initial mount")
-
-        // A second layout pass with no scroll/items change must not touch mount/unmount sites --
-        // syncActionFrames only runs there, so the map must come out byte-for-byte identical.
-        feed.layoutSubviews()
-
-        XCTAssertEqual(Set(feed.actionFrameMap.keys), keysBefore,
-            "actionFrameMap must stay unchanged across a no-op layout pass (mount-only, never per-frame)")
-    }
-    */
+    // `actionFrameMap`/`syncActionFrames` no longer exist: tap resolution is lazy
+    // (`resolveTappedAction`, `FeedScrollView+ActionHitTest.swift`), reading `WorkingRange` and
+    // `NodeTable.actionID(at:)` directly at tap time instead of mirroring a per-frame map on the
+    // scroll path (VelocityUI-4uyk). There is nothing left to mount/unmount-consistency-check.
 }
 
 private extension FragmentContent {

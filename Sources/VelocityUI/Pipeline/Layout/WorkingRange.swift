@@ -8,6 +8,28 @@ import CoreGraphics
 public struct CellEntry: Sendable {
     public let layout: ResolvedLayout
     public let fragments: [Fragment]
+    /// Rasterized text/table/math bitmaps captured at the same time as the layout. A
+    /// `LayoutCache` hit whose `rasterIdentity` still matches the live theme+scale re-keys these
+    /// to the requesting item (cheap — see `RenderPipeline`'s hit branch) instead of re-running
+    /// `rasterizeTextArtifacts`/`rasterizeTableArtifacts`/`rasterizeMathArtifacts` — those calls
+    /// are a full re-raster every time, not a cache-backed lookup, so re-running them on every
+    /// hit is what starved the pipeline during streaming (VelocityUI-4uyk).
+    let artifacts: [TextBitmapArtifact]
+    /// Theme generation + display scale in effect when `artifacts` was rasterized, mirroring
+    /// `CodeBodyRasterIdentity`. A hit under a different (later) identity means the pixels are
+    /// stale — the reader must re-rasterize rather than reuse, even though the layout/fragments
+    /// are still valid (geometry doesn't depend on theme or scale).
+    let rasterIdentity: CodeBodyRasterIdentity
+
+    init(
+        layout: ResolvedLayout, fragments: [Fragment], artifacts: [TextBitmapArtifact] = [],
+        rasterIdentity: CodeBodyRasterIdentity = CodeBodyRasterIdentity(themeGeneration: 0, scale: 0)
+    ) {
+        self.layout = layout
+        self.fragments = fragments
+        self.artifacts = artifacts
+        self.rasterIdentity = rasterIdentity
+    }
 }
 
 /// O(1) ring-buffer cache of CellEntry for items near the visible range — no hashing or

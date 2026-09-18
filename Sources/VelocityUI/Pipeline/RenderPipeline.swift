@@ -226,12 +226,48 @@ public actor RenderPipeline {
                     let key = CacheKey(layoutHash: table.layoutHash, width: availableWidth)
                     group.addTask {
                         if let entry = await cache.get(key) {
-                            // CacheKey is (layoutHash, width) only — block IDs
-                            // don't affect geometry, so two items with identical content but
-                            // different tags share this entry. Re-derive fragments from the
-                            // CURRENT item's table over the cached layout so the tags are this
-                            // item's own, not whichever item populated the cache first.
+                            // CacheKey is (layoutHash, width) only — actionID/blockID don't
+                            // affect geometry, so two items with identical content share this
+                            // entry. `extractFragments` is a cheap tree walk (no CoreText/
+                            // CGContext work) -- re-run it against the CURRENT item's table so
+                            // this item's own blockIDs land on its fragments, not the cache
+                            // populator's (actionID never enters this path at all -- it lives
+                            // only on NodeTable, resolved lazily at tap time).
                             let fragments = extractFragments(table: table, layout: entry.layout)
+                            let currentIdentity = CodeBodyRasterIdentity(
+                                themeGeneration: themeSnapshot.generation, scale: capturedScale
+                            )
+                            if entry.rasterIdentity == currentIdentity {
+                                // Common case: the previously-rasterized pixels are still valid
+                                // (same theme+scale) -- re-key each cached artifact to this item's
+                                // own BlockKey (itemID/blockID differ per item) instead of calling
+                                // rasterizeText/Table/MathArtifacts again. Pure dictionary lookups
+                                // + BlockKey construction, no raster work at all.
+                                let itemID = table.itemID
+                                let ordinals = table.leafOrdinals()
+                                let fragmentByID = Dictionary(fragments.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+                                let rekeyed: [TextBitmapArtifact] = entry.artifacts.compactMap { artifact in
+                                    guard let fragment = fragmentByID[artifact.fragmentID] else { return nil }
+                                    let newKey = canonicalBlockKey(
+                                        boxedItemID: itemID, fragment: fragment,
+                                        logicalOrdinal: ordinals[fragment.id] ?? fragment.id
+                                    )
+                                    return TextBitmapArtifact(
+                                        fragmentID: artifact.fragmentID, key: newKey,
+                                        image: artifact.image, size: artifact.size,
+                                        codeBodyIdentity: artifact.codeBodyIdentity
+                                    )
+                                }
+                                if rekeyed.count == entry.artifacts.count {
+                                    return (index, entry.layout, fragments, rekeyed, true, 0)
+                                }
+                                // Shape mismatch shouldn't happen for a genuine layoutHash match --
+                                // fall through to a full re-raster below for safety.
+                            }
+                            // Theme or scale changed since this entry was rasterized, or the cheap
+                            // re-key above couldn't line up 1:1 -- full re-raster from the cached
+                            // layout (geometry is theme/scale/identity independent) using this
+                            // item's own freshly-derived fragments.
                             let (artifacts, retokenizeCount) = rasterizeTextArtifacts(
                                 table: table,
                                 fragments: fragments,
@@ -250,7 +286,15 @@ public actor RenderPipeline {
                                 table: table, fragments: fragments, scale: capturedScale,
                                 formulaCache: formulaCache, fontProvider: fontProvider
                             )
-                            return (index, entry.layout, fragments, artifacts + tableArtifacts + mathArtifacts, true, retokenizeCount)
+                            let allArtifacts = artifacts + tableArtifacts + mathArtifacts
+                            await cache.set(
+                                CellEntry(
+                                    layout: entry.layout, fragments: fragments,
+                                    artifacts: allArtifacts, rasterIdentity: currentIdentity
+                                ),
+                                for: key
+                            )
+                            return (index, entry.layout, fragments, allArtifacts, true, retokenizeCount)
                         }
                         // Guard before the expensive path — exits quickly on cancellation.
                         guard !Task.isCancelled else { return (index, .placeholder, [], [], false, 0) }
@@ -279,8 +323,17 @@ public actor RenderPipeline {
                             table: table, fragments: fragments, scale: capturedScale,
                             formulaCache: formulaCache, fontProvider: fontProvider
                         )
-                        await cache.set(CellEntry(layout: layout, fragments: fragments), for: key)
-                        return (index, layout, fragments, artifacts + tableArtifacts + mathArtifacts, false, retokenizeCount)
+                        let allArtifacts = artifacts + tableArtifacts + mathArtifacts
+                        await cache.set(
+                            CellEntry(
+                                layout: layout, fragments: fragments, artifacts: allArtifacts,
+                                rasterIdentity: CodeBodyRasterIdentity(
+                                    themeGeneration: themeSnapshot.generation, scale: capturedScale
+                                )
+                            ),
+                            for: key
+                        )
+                        return (index, layout, fragments, allArtifacts, false, retokenizeCount)
                     }
                 }
                 // Consume results in completion order; spawn prefetch immediately per item.

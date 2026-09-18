@@ -1,12 +1,37 @@
 // ActionModifier.swift
 
-// The node-action DSL and its hit-test transport are disabled.
-/*
 import Foundation
 
-public struct ActionID: Hashable, Sendable { /* ... */ }
-public struct ActionModifierNode: RenderNode { /* ... */ }
-extension RenderNode {
-    public func action<ID: Hashable & Sendable>(_ id: ID) -> ActionModifierNode { /* ... */ }
+/// Opaque per-node action identity for a later hit-test/gesture pass (VelocityUI-ye8a.2+).
+/// Carries no closure — only a Sendable+Hashable id crosses the Layer 1/2 boundary. Mirrors
+/// `BlockID`'s AnyHashable-box shape exactly.
+public struct ActionID: Hashable, Sendable {
+    nonisolated(unsafe) public let rawValue: AnyHashable
+
+    public init<ID: Hashable & Sendable>(_ rawValue: ID) {
+        self.rawValue = AnyHashable(rawValue)
+    }
 }
-*/
+
+/// Transparent Layer-1 wrapper produced by `.action(_:)` and consumed by `flatten()`.
+public struct ActionModifierNode: RenderNode {
+    public let content: any RenderNode
+    public let actionID: ActionID
+
+    public var layoutHash: Int { content.layoutHash }
+    public var appearanceHash: Int { content.appearanceHash }
+}
+
+extension RenderNode {
+    /// Tags this node with an opaque action identity, carried only on `NodeTable` (never into
+    /// `LayoutCache`/`Fragment`/`Block`) to a lazy hit-test pass at tap time. Excluded from
+    /// `layoutHash`/`appearanceHash` — changing only the id triggers no relayout or repaint.
+    ///
+    /// `LayoutCache`'s key is `(layoutHash, width)`, which doesn't include this id, so two items
+    /// with the same content but different action ids can share one cache entry. That's safe:
+    /// the id is resolved lazily at tap time from the tapped item's own `NodeTable`, not from
+    /// anything carried through the cached layout/fragments (VelocityUI-4uyk).
+    public func action<ID: Hashable & Sendable>(_ id: ID) -> ActionModifierNode {
+        ActionModifierNode(content: self, actionID: ActionID(id))
+    }
+}

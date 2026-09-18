@@ -1,18 +1,27 @@
 // RenderPipeline+Rasterization.swift
 
-#if canImport(UIKit)
-import Foundation
 import CoreGraphics
-import SwaTex
-import SwaTexRender
 
+/// One rasterized text/table/math bitmap, keyed for `FrozenBitmapStore`. Declared outside the
+/// `canImport(UIKit)` gate below (needs only CoreGraphics) so non-UIKit builds can still store it
+/// on `CellEntry` (see `WorkingRange.swift`) — the functions that produce it stay UIKit-only.
 struct TextBitmapArtifact: @unchecked Sendable {
+    /// The `NodeTable` node index (or synthetic chrome id) this bitmap was rasterized for —
+    /// stable across items sharing the same `LayoutCache` entry, since it's the same node
+    /// structure. Lets a `LayoutCache` hit re-key a cached artifact to the requesting item's own
+    /// `BlockKey` (`itemID`/`blockID` differ per item) without re-rasterizing the pixels.
+    let fragmentID: Int
     let key: BlockKey
     let image: CGImage
     let size: CGSize
     /// `CGImage` is immutable; this optional identity is present only for code-body rasters.
     let codeBodyIdentity: CodeBodyRasterIdentity?
 }
+
+#if canImport(UIKit)
+import Foundation
+import SwaTex
+import SwaTexRender
 
 /// Rasterizes plain text normally and code bodies with syntax highlighting and no wrapping.
 /// A supplied body raster has already passed layout and raster-identity checks, so reuse skips
@@ -101,7 +110,7 @@ nonisolated func rasterizeTextArtifacts(
         guard let image else { return nil }
         if retokenized { retokenizeCount += 1 }
         return TextBitmapArtifact(
-            key: key, image: image, size: size,
+            fragmentID: fragment.id, key: key, image: image, size: size,
             codeBodyIdentity: isCodeBody ? codeBodyIdentity : nil
         )
     }
@@ -151,7 +160,7 @@ nonisolated func rasterizeTableArtifacts(
             padding: padding, scale: scale, formulaCache: formulaCache, fontProvider: fontProvider
         )
         guard let image = raster.image else { return nil }
-        return TextBitmapArtifact(key: key, image: image, size: raster.size, codeBodyIdentity: nil)
+        return TextBitmapArtifact(fragmentID: fragment.id, key: key, image: image, size: raster.size, codeBodyIdentity: nil)
     }
 }
 
@@ -192,7 +201,7 @@ nonisolated func rasterizeMathArtifacts(
         )
         let raster = rasterizeMathBlock(mathLayout, blockWidth: blockWidth, scale: scale, fontProvider: fontProvider)
         guard let image = raster.image else { return nil }
-        return TextBitmapArtifact(key: key, image: image, size: raster.size, codeBodyIdentity: nil)
+        return TextBitmapArtifact(fragmentID: fragment.id, key: key, image: image, size: raster.size, codeBodyIdentity: nil)
     }
 }
 #endif

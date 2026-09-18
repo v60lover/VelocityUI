@@ -1605,9 +1605,13 @@ final class RenderPipelineTests: XCTestCase {
     // | ids) resolve to the CURRENT item's owner `BlockID` on a cache hit,  | background fragment's `blockID` equals the codePartID derived from   |
     // | not the item that originally populated the cache entry.             | item B's own `BlockID`, not item A's.                                 |
 
-    /* Disabled while the tap/action API is unavailable.
+    /* testLayoutCacheHit_ReStampsActionID_ToTheRequestingItemNotTheCachePopulator removed:
+       Fragment no longer carries `actionID` (it lives only on NodeTable, resolved lazily at tap
+       time -- see FeedScrollView+ActionHitTest.swift), so there's nothing for a RenderPipeline
+       test to assert about it anymore. Equivalent tap-correctness coverage now lives in
+       InteractionOverlayTests.swift, against the real FeedScrollView + lazy resolver.
     @MainActor
-    func testLayoutCacheHit_ReStampsActionID_ToTheRequestingItemNotTheCachePopulator() async throws {
+    func _removed_testLayoutCacheHit_ReStampsActionID_ToTheRequestingItemNotTheCachePopulator() async throws {
         let tableA = flatten(TextNode("hello").action("actionA"), itemID: "itemA")
         let tableB = flatten(TextNode("hello").action("actionB"), itemID: "itemB")
         XCTAssertEqual(tableA.layoutHash, tableB.layoutHash, "Precondition: same content, different action id, must collide on CacheKey")
@@ -1715,7 +1719,6 @@ final class RenderPipelineTests: XCTestCase {
     /// operation — it must NOT fall back to a re-measure. Proven indirectly: across N items sharing
     /// one layoutHash, exactly 1 measure (the first) should occur, so cacheHitCount must land at
     /// exactly N-1, not less (a regression that silently re-measured on "collision" would undercount hits).
-    /* Disabled while the tap/action API is unavailable.
     @MainActor
     func testLayoutCacheHit_ReStampDoesNotRegressHitRate_AcrossManySameLayoutHashItems() async throws {
         let tables = (0..<5).map { i in
@@ -1738,6 +1741,5 @@ final class RenderPipelineTests: XCTestCase {
         let hits = await pipeline.cacheHitCount
         XCTAssertEqual(hits, tables.count - 1, "Re-stamping on hit must not introduce extra re-measures: only item 0 should ever miss")
     }
-    */
 }
 #endif

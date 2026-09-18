@@ -326,25 +326,24 @@ private struct LiveLLMFeedView: View {
                         TextNode(text)
                             .font(MarkdownTheme.liveLLM.body)
                             .messageRole(.user)
-//                            .action(LiveLLMBlockTag(messageID: message.id, blockIndex: 0)) as any RenderNode
+                            .action(LiveLLMBlockTag(messageID: message.id, blockIndex: 0)) as any RenderNode
                     ]
                 case .assistant:
-                    nodes = store.controller(for: message.id).renderNodes
-//                    nodes = store.controller(for: message.id).renderNodes.enumerated().map { index, node in
+                    nodes = store.controller(for: message.id).renderNodes.enumerated().map { index, node in
                         // Code/math/table blocks carry their own blockID and reject .action()/
                         // .frame()/.renderID() wrapping (see Flattener.visit's assert guard).
-//                        if node.managesOwnBlockIdentity {
-//                            return node
-//                        }
-//                        return node.action(LiveLLMBlockTag(messageID: message.id, blockIndex: index)) as any RenderNode
-//                    }
+                        if node.managesOwnBlockIdentity {
+                            return node
+                        }
+                        return node.action(LiveLLMBlockTag(messageID: message.id, blockIndex: index)) as any RenderNode
+                    }
                 }
                 return LiveLLMCell(nodes: nodes)
             }
-//            .onNodeTap { message, actionID, _ in
-//                let tag = actionID.rawValue.base as? LiveLLMBlockTag
-//                lastTap = "Tapped msg \(message.id) block \(tag?.blockIndex.description ?? "?")"
-//            }
+            .onNodeTap { message, actionID, _ in
+                let tag = actionID.rawValue.base as? LiveLLMBlockTag
+                lastTap = "Tapped msg \(message.id) block \(tag?.blockIndex.description ?? "?")"
+            }
             .prefetchWindow(ahead: 10, behind: 3)
             .tailFollow(.llmChat, pinTrigger: store.pinToken)
             .padding(.horizontal, 12)
