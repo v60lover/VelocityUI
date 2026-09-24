@@ -345,7 +345,7 @@ private struct LiveLLMFeedView: View {
                 lastTap = "Tapped msg \(message.id) block \(tag?.blockIndex.description ?? "?")"
             }
             .prefetchWindow(ahead: 10, behind: 3)
-            .tailFollow(.llmChat, pinTrigger: store.pinToken)
+            .tailFollow(.off, pinTrigger: store.pinToken)
             .padding(.horizontal, 12)
             .padding(.top, 8)
         }

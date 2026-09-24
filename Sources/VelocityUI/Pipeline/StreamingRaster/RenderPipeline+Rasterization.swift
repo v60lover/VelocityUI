@@ -23,6 +23,13 @@ import Foundation
 import SwaTex
 import SwaTexRender
 
+/// Width a text node wraps at inside a column: its `maxWidthFraction` of the column, minus bubble
+/// padding. Raster and selection both call this so their line breaks cannot disagree.
+nonisolated func textWrapWidth(_ descriptor: TextDescriptor, columnWidth: CGFloat) -> CGFloat {
+    let padding = descriptor.backgroundChrome?.padding ?? .zero
+    return max(0, columnWidth * CGFloat(descriptor.maxWidthFraction) - padding.leading - padding.trailing)
+}
+
 /// Rasterizes plain text normally and code bodies with syntax highlighting and no wrapping.
 /// A supplied body raster has already passed layout and raster-identity checks, so reuse skips
 /// tree-sitter tokenization and wide rasterization.
@@ -46,8 +53,7 @@ nonisolated func rasterizeTextFragment(
         // size than the tight `frameSize` and `contentsGravity = .resize` stretches the glyphs
         // (the multi-line user-bubble "vytyanutyy/blurry text" bug). `frameSize` stays the tight
         // measured size -- laying out narrower than measurement is the clip bug this split fixes.
-        let padding = descriptor.backgroundChrome?.padding ?? .zero
-        let wrapWidth = max(0, layoutWidth * CGFloat(descriptor.maxWidthFraction) - padding.leading - padding.trailing)
+        let wrapWidth = textWrapWidth(descriptor, columnWidth: layoutWidth)
         return (
             rasterizeText(
                 descriptor, layoutWidth: wrapWidth, outputSize: frameSize, scale: scale,

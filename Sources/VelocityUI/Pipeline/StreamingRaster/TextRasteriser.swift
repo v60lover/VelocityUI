@@ -168,7 +168,19 @@ extension TextDescriptor {
     func attributedString(
         formulaCache: FormulaCache?, fontProvider: KaTeXFontProvider?, scale: CGFloat
     ) -> NSAttributedString {
+        var noMap: TextSelectionOffsetMap?
+        return attributedString(formulaCache: formulaCache, fontProvider: fontProvider, scale: scale, offsetMap: &noMap)
+    }
+
+    /// Same builder, and when `offsetMap` is non-nil it also records TextKit-to-`content` offsets
+    /// (selection copy). Raster and measure pass nil, so their path allocates nothing extra.
+    func attributedString(
+        formulaCache: FormulaCache?, fontProvider: KaTeXFontProvider?, scale: CGFloat,
+        offsetMap: inout TextSelectionOffsetMap?
+    ) -> NSAttributedString {
         guard !runs.isEmpty else {
+            offsetMap?.append(kitLength: (content as NSString).length, contentStart: 0,
+                              contentLength: (content as NSString).length, isMath: false)
             return NSAttributedString(string: content, attributes: makeAttributes())
         }
 
@@ -201,9 +213,12 @@ extension TextDescriptor {
                     range: NSRange(location: 0, length: attachmentString.length)
                 )
                 result.append(attachmentString)
+                offsetMap?.append(kitLength: attachmentString.length, contentStart: cursor,
+                                  contentLength: length, isMath: true)
             } else {
                 let span = ns.substring(with: NSRange(location: cursor, length: length))
                 result.append(NSAttributedString(string: span, attributes: run.makeAttributes(base: self)))
+                offsetMap?.append(kitLength: length, contentStart: cursor, contentLength: length, isMath: false)
             }
             cursor += length
         }
@@ -211,6 +226,8 @@ extension TextDescriptor {
         if cursor < ns.length {
             let remainder = ns.substring(from: cursor)
             result.append(NSAttributedString(string: remainder, attributes: makeAttributes()))
+            offsetMap?.append(kitLength: ns.length - cursor, contentStart: cursor,
+                              contentLength: ns.length - cursor, isMath: false)
         }
         return result
     }

@@ -35,11 +35,15 @@ final class HorizontalCodePanRecognizer: UIPanGestureRecognizer {
 /// extension of a generic class) can still own gesture-recognizer delegation. Owned as a
 /// stored property on `FeedScrollView` since `UIGestureRecognizer.delegate` is `weak`.
 final class HorizontalCodePanDirectionDelegate: NSObject, UIGestureRecognizerDelegate {
+    /// When it returns true the pan refuses to begin (a text selection is active).
+    var isBlocked: (() -> Bool)?
+
     /// `gestureRecognizerShouldBegin` fires right before the recognizer would leave `.possible`,
     /// once UIKit has already accumulated enough movement to consider starting -- `translation`
     /// is meaningful here without an extra hand-rolled noise threshold. Returning `false` wins
     /// vertical scroll on every non-clearly-horizontal drag (vertical, diagonal, or a tie).
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if isBlocked?() == true { return false }
         guard let pan = gestureRecognizer as? UIPanGestureRecognizer, let view = pan.view else { return true }
         return Self.isHorizontallyDominant(pan.translation(in: view))
     }

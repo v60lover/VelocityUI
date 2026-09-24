@@ -52,6 +52,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// via `.action(_:)` sees no behavior change from `onTap`.
     public var onNodeTap: (@MainActor (Item, ActionID, CGRect) -> Void)?
 
+    /// Long-press that lands on nothing selectable. Internal placeholder; `ye8a.4` makes it public.
+    var onNodeLongPress: (@MainActor (Item, ActionID?, CGRect) -> Void)?
+
+    /// The active text selection (highlights, Copy menu). Idle unless the user long-presses text.
+    let textSelection = TextSelectionController()
+
     /// VoiceOver label source for a visible cell's `UIAccessibilityElement`. `nil` (default)
     /// falls back to `String(describing:)`. Phase 1 only — full node-level labeling is out of
     /// scope here (see VelocityUI-ye8a.2). Named distinctly from `UIView.accessibilityLabel`
@@ -327,6 +333,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
         // The feed's own vertical pan always waits for ours to fail or succeed first -- the
         // standard nested-scroll-direction technique.
         panGestureRecognizer.require(toFail: codePan)
+        codePanDirectionDelegate.isBlocked = { [weak self] in self?.textSelection.isActive == true }
+        installTextSelection()
 
         contentSizeCategory = VContentSizeCategory(traitCollection.preferredContentSizeCategory)
         // queue: nil — the OS always posts this on main, keeping delivery synchronous and
@@ -423,6 +431,7 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
         }
 
         refineKnownFrames()
+        revalidateTextSelection()
         applyTailFollowIfNeeded()
         let visRange = updateVisibleCells()
         syncInteractionOverlayFrame()
@@ -453,6 +462,12 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
         updateTailFollowFromUserScroll()
     }
 
+    /// The scroll pan refuses to begin while a text selection is active.
+    public override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if gestureRecognizer === panGestureRecognizer, textSelection.isActive { return false }
+        return super.gestureRecognizerShouldBegin(gestureRecognizer)
+    }
+
     // MARK: - Tap handling
 
     @objc private func handleTapGesture(_ gesture: UITapGestureRecognizer) {
@@ -463,6 +478,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// Non-`@objc` body of the tap handler — a plain internal method so tests can drive tap
     /// resolution without synthesizing a real `UITapGestureRecognizer`.
     func handleTap(at contentPoint: CGPoint) {
+        if textSelection.isActive {
+            textSelection.handleTap(at: contentPoint)
+            return
+        }
         guard let index = resolveTappedIndex(at: contentPoint), index < items.count,
               let contentFrame = frameMap[index] else { return }
         if let hit = resolveTappedAction(at: contentPoint, in: index) {

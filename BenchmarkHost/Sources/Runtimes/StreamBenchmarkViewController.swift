@@ -297,7 +297,7 @@ private struct StreamFeedView: View {
             print("message = \(message), rect = \(rect)")
         })
         .prefetchWindow(ahead: 10, behind: 3)
-        .tailFollow(.llmChat, pinTrigger: store.pinToken)
+        .tailFollow(.off, pinTrigger: store.pinToken)
         .padding(.horizontal, 8)
     }
 }
