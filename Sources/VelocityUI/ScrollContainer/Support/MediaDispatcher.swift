@@ -138,10 +138,16 @@ final class MediaDispatcher {
     }
 
     private func raster(for key: BlockKey, kind: RasterDiagnosticFragmentKind) -> CGImage? {
-        if let image = visibleBlockStore.bitmap(for: key) { return image }
+        if let image = visibleBlockStore.bitmap(for: key) {
+            rasterDiagnosticsObserver?.emit(.rasterHit(key: key, kind: kind, fromFrozenStore: false))
+            return image
+        }
         let wasFrozen = rasterDiagnosticsObserver.map { _ in frozenBitmapStore.bitmap(for: key) != nil } ?? false
         visibleBlockStore.promote([key], from: frozenBitmapStore)
-        if let image = visibleBlockStore.bitmap(for: key) { return image }
+        if let image = visibleBlockStore.bitmap(for: key) {
+            rasterDiagnosticsObserver?.emit(.rasterHit(key: key, kind: kind, fromFrozenStore: true))
+            return image
+        }
         rasterDiagnosticsObserver?.emit(.rasterMiss(
             key: key,
             kind: kind,

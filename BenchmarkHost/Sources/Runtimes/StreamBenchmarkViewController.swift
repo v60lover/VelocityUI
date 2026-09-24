@@ -163,6 +163,8 @@ private func rasterDiagnosticsConsoleLine(_ event: RasterDiagnosticsEvent) -> St
         return "[raster] lru-evict item=\(key.itemID) key=\(key) cost=\(cost) bytes=\(currentByteTotal)/\(byteBudget)"
     case let .repaintMissing(key, kind):
         return "[raster] repaint-missing item=\(key.itemID) key=\(key) kind=\(kind.rawValue)"
+    case .rasterHit, .emptyLayoutMount, .placeholderExposure, .layoutResolved, .imageRequest, .coldArchiveLookup:
+        return "[raster] \(event)"
     }
 }
 

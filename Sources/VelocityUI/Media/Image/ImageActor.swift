@@ -112,15 +112,18 @@ public actor ImageActor {
     private let session: URLSession
     /// `nonisolated` so RenderEnvironment can check identity (===) in its designated init.
     nonisolated let dimensionCache: DimensionCache
+    private let diagnosticsObserver: RasterDiagnosticsObserver?
 
     /// - Parameters:
     ///   - session: Defaults to `.shared`; tests can inject a custom session.
     ///   - dimensionCache: Must be the same instance used by `classify()` — separate instances break the hit contract.
     ///   - decodeScaleCeiling: Defaults to 2.0; pass 3.0+ for full display scale.
+    ///   - diagnosticsObserver: Optional; receives `.imageRequest` outcomes (no URLs).
     public init(
         session: URLSession = .shared,
         dimensionCache: DimensionCache,
-        decodeScaleCeiling: CGFloat = 2.0
+        decodeScaleCeiling: CGFloat = 2.0,
+        diagnosticsObserver: RasterDiagnosticsObserver? = nil
     ) {
         self._executor = DispatchQueueExecutor(label: "velocityui.image.actor")
         // 64 MB cap — ~5 images at production density (400×800pt @3x, 4 bytes/pixel).
@@ -128,6 +131,7 @@ public actor ImageActor {
         self.session = session
         self.dimensionCache = dimensionCache
         self.decodeScaleCeiling = decodeScaleCeiling
+        self.diagnosticsObserver = diagnosticsObserver
         // Tag decodeQueue so the async closure can verify it is on the right queue.
         decodeQueue.setSpecific(key: _testDecodeQueueKey, value: true)
     }
@@ -178,7 +182,10 @@ public actor ImageActor {
         let key = ImageCacheKey(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: decodeScale)
 
         // 1. Cache hit — O(1), no allocation on the hot path.
-        if let hit = cache.object(forKey: key) { return hit.image }
+        if let hit = cache.object(forKey: key) {
+            diagnosticsObserver?.emit(.imageRequest(.decodedHit))
+            return hit.image
+        }
 
         // 2. Join an existing in-flight task for the same key rather than launching a second fetch —
         //    creator handles cache store. A .visible caller elevates a lower-tier prefetch it joins.
@@ -492,6 +499,7 @@ public actor ImageActor {
         let networkStart = CFAbsoluteTimeGetCurrent()
         #endif
         let data: Data
+        diagnosticsObserver?.emit(.imageRequest(url.isFileURL ? .localFileRead : .networkFetch))
         if url.isFileURL {
             // Read in-process: nsurlsessiond can't reach into our sandbox container for file://
             // on a real device, so session.data(from:) 404s even though the file exists.
@@ -538,7 +546,9 @@ public actor ImageActor {
         scale: CGFloat
     ) -> CGImage? {
         let key = ImageCacheKey(url: url, targetSize: targetSize, cornerRadius: cornerRadius, scale: min(scale, decodeScaleCeiling))
-        return cache.object(forKey: key)?.image
+        let hit = cache.object(forKey: key)?.image
+        if hit != nil { diagnosticsObserver?.emit(.imageRequest(.decodedHit)) }
+        return hit
     }
 
     /// Cancel fetches below the visible range. No-op until fling-handling (Phase 3+).

@@ -186,9 +186,11 @@ extension FeedScrollView {
                 // full-cell gradient would just flash gray for the one async gap before the first
                 // text raster arrives. Suppress it; refineKnownFrames' real-content delivery reveals
                 // the text itself. Media items keep the gray box as the intended loading affordance.
-                if !tableContainsMedia(table) {
+                let hasMedia = tableContainsMedia(table)
+                if !hasMedia {
                     cell.suppressPlaceholderForEmptyMount()
                 }
+                reportEmptyLayoutMount(index: index, placeholderVisible: hasMedia)
                 _pendingFragmentIndices.insert(index)
             }
 
@@ -215,6 +217,7 @@ extension FeedScrollView {
             }
         }
 
+        reportPlaceholderExposure()
         syncContentSize()
         flushAccessibilityElementsIfNeeded()
         return visRange

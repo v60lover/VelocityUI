@@ -33,6 +33,28 @@ public enum RasterDiagnosticsEvent: Sendable {
         byteBudget: Int
     )
     case repaintMissing(key: BlockKey, kind: RasterDiagnosticFragmentKind)
+    /// A raster lookup on the mount path found the bitmap; `fromFrozenStore` means it was promoted
+    /// out of `FrozenBitmapStore` rather than already being resident.
+    case rasterHit(key: BlockKey, kind: RasterDiagnosticFragmentKind, fromFrozenStore: Bool)
+    /// A cell mounted with no layout entry. `placeholderVisible` is false for media-free items,
+    /// whose gray gradient is suppressed.
+    case emptyLayoutMount(index: Int, placeholderVisible: Bool)
+    /// Once per mount pass: how many mounted cells currently show the full-cell gray gradient.
+    case placeholderExposure(visibleCellCount: Int)
+    /// The pipeline resolved an item's layout: `recomputed` is true when `LayoutCache` missed and
+    /// the item was measured from scratch.
+    case layoutResolved(index: Int, recomputed: Bool)
+    /// One image request outcome inside `ImageActor`.
+    case imageRequest(ImageRequestOutcome)
+    /// A cold-archive lookup for a sealed raster. Emitted by the archive tier only.
+    case coldArchiveLookup(key: BlockKey, hit: Bool)
+}
+
+/// Where an `ImageActor` request was satisfied. Carries no URL.
+public enum ImageRequestOutcome: Sendable {
+    case decodedHit
+    case networkFetch
+    case localFileRead
 }
 
 /// Receives optional feed-local raster diagnostics. Keep the callback short because selected

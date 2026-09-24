@@ -152,6 +152,9 @@ final class BenchmarkOrchestrator {
             }
         case .replay:
             startReplayWarmup(scrollView: scrollView)
+        case .cacheHorizon:
+            // Driven entirely by `CacheHorizonViewController`; never reaches the orchestrator.
+            break
         case .stream:
             // `StreamBenchmarkViewController` never calls `scrollViewReady` — it has nothing for
             // this to drive — and reaches the real entry point via

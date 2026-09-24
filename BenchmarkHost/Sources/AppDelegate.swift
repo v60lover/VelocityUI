@@ -25,7 +25,23 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         }
 
         let rootVC: UIViewController
-        if args.scenario == .stream {
+        if args.scenario == .cacheHorizon {
+            let vc = CacheHorizonViewController(
+                itemCount: args.itemCount >= 2_000 ? args.itemCount : CacheHorizonDataset.defaultItemCount,
+                backstop: args.measurementDuration
+            )
+            vc.onComplete = { report in
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                if let data = try? encoder.encode(report), let json = String(data: data, encoding: .utf8) {
+                    print("<<<CACHE_HORIZON_REPORT_BEGIN>>>")
+                    print(json)
+                    print("<<<CACHE_HORIZON_REPORT_END>>>")
+                }
+                exit(0)
+            }
+            rootVC = vc
+        } else if args.scenario == .stream {
             // VelocityUI-only today (VelocityUI-xxf7) — comparison runtimes are an explicit
             // follow-up, not this bead's scope. A `--runtime` other than velocityui (or the
             // `--live` manual-HUD flow, which this scenario doesn't support) is a misuse of the

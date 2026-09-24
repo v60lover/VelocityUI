@@ -211,7 +211,10 @@ public final class RenderEnvironment: Sendable {
             textPool: textPool,
             layoutCache: layoutCache,
             dimensionCache: dc,
-            imageActor: ImageActor(session: session, dimensionCache: dc, decodeScaleCeiling: decodeScaleCeiling),
+            imageActor: ImageActor(
+                session: session, dimensionCache: dc, decodeScaleCeiling: decodeScaleCeiling,
+                diagnosticsObserver: rasterDiagnosticsObserver
+            ),
             gifActor: gifActor,
             videoController: VideoController(videoPreparation: videoPrep, maxAttached: maxAttached),
             videoPreparation: videoPrep,

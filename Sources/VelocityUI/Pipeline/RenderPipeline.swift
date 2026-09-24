@@ -66,6 +66,7 @@ public actor RenderPipeline {
     /// cache-hit-without-reuse alike — see `RenderEnvironment.codeBodyRetokenizeObserver`.
     /// `nil` in production and in most tests.
     private let codeBodyRetokenizeObserver: (@Sendable () -> Void)?
+    private let rasterDiagnosticsObserver: RasterDiagnosticsObserver?
 
     // MARK: - Supersession guard state
 
@@ -98,7 +99,8 @@ public actor RenderPipeline {
         highlightRegistry: HighlightRegistry,
         formulaCache: FormulaCache = .init(),
         mathFontProvider: KaTeXFontProvider = .init(),
-        codeBodyRetokenizeObserver: (@Sendable () -> Void)? = nil
+        codeBodyRetokenizeObserver: (@Sendable () -> Void)? = nil,
+        rasterDiagnosticsObserver: RasterDiagnosticsObserver? = nil
     ) {
         self.textPool = textPool
         self.layoutCache = layoutCache
@@ -108,6 +110,7 @@ public actor RenderPipeline {
         self.formulaCache = formulaCache
         self.mathFontProvider = mathFontProvider
         self.codeBodyRetokenizeObserver = codeBodyRetokenizeObserver
+        self.rasterDiagnosticsObserver = rasterDiagnosticsObserver
     }
 
     /// Test-only convenience — creates a private pool/cache/imageActor not shared with
@@ -121,6 +124,7 @@ public actor RenderPipeline {
         self.formulaCache = FormulaCache()
         self.mathFontProvider = KaTeXFontProvider()
         self.codeBodyRetokenizeObserver = nil
+        self.rasterDiagnosticsObserver = nil
     }
 
     /// Notifies the pipeline that the warm window changed. No-op if `warmRange` is unchanged
@@ -192,6 +196,7 @@ public actor RenderPipeline {
         let fontProvider = mathFontProvider
         let capturedScale = scale
         let capturedWarmRange = warmRange
+        let diagnostics = rasterDiagnosticsObserver
 
         prefetchTask = Task {
             // Keep the pixels and their cache identity on the same locked theme snapshot.
@@ -226,6 +231,7 @@ public actor RenderPipeline {
                     let key = CacheKey(layoutHash: table.layoutHash, width: availableWidth)
                     group.addTask {
                         if let entry = await cache.get(key) {
+                            diagnostics?.emit(.layoutResolved(index: index, recomputed: false))
                             // CacheKey is (layoutHash, width) only — actionID/blockID don't
                             // affect geometry, so two items with identical content share this
                             // entry. `extractFragments` is a cheap tree walk (no CoreText/
@@ -304,6 +310,7 @@ public actor RenderPipeline {
                             textPool: pool,
                             formulaCache: formulaCache
                         )
+                        diagnostics?.emit(.layoutResolved(index: index, recomputed: true))
                         let fragments = extractFragments(table: table, layout: layout)
                         let (artifacts, retokenizeCount) = rasterizeTextArtifacts(
                             table: table,

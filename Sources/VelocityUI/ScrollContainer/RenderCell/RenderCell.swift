@@ -621,6 +621,8 @@ public final class RenderCell {
     /// drives placeholder/content opacity itself (see `applyLayout`), and a cross-item recycle
     /// re-raises the placeholder in `prepareForReuse`. Media items skip this — the gray box is their
     /// intended loading affordance.
+    var isPlaceholderVisible: Bool { placeholderLayer.opacity > 0 }
+
     func suppressPlaceholderForEmptyMount() {
         CATransaction.begin()
         CATransaction.setDisableActions(true)

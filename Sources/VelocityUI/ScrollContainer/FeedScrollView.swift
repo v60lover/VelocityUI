@@ -304,7 +304,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
             highlightRegistry: environment.highlightRegistry,
             formulaCache: environment.formulaCache,
             mathFontProvider: environment.mathFontProvider,
-            codeBodyRetokenizeObserver: environment.codeBodyRetokenizeObserver
+            codeBodyRetokenizeObserver: environment.codeBodyRetokenizeObserver,
+            rasterDiagnosticsObserver: environment.rasterDiagnosticsObserver
         )
         self.workingRange = WorkingRange()
         self.differ = RenderDiffer(dimensionCache: environment.dimensionCache)

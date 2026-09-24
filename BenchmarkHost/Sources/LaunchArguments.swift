@@ -41,6 +41,10 @@ struct LaunchArguments {
         /// `--hot-rasterize` are the scenario's own knobs (see their docs below). `--duration`
         /// is still the hard backstop, same role as every other scenario.
         case stream
+        /// >2,000-item mixed transcript scrolled to the bottom and back, counting every cache
+        /// transition (VelocityUI-fc9e.4). `--items` overrides the item count (default 2400);
+        /// `--duration` is the backstop for the reverse pass.
+        case cacheHorizon = "cache-horizon"
     }
 
     enum HotBlockRasterizeMode: String {

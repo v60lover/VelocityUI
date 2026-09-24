@@ -75,6 +75,18 @@ extension FeedScrollView {
         }
     }
 
+    func reportEmptyLayoutMount(index: Int, placeholderVisible: Bool) {
+        environment.rasterDiagnosticsObserver?.emit(
+            .emptyLayoutMount(index: index, placeholderVisible: placeholderVisible)
+        )
+    }
+
+    func reportPlaceholderExposure() {
+        guard let observer = environment.rasterDiagnosticsObserver else { return }
+        let count = visibleCells.values.reduce(0) { $0 + ($1.isPlaceholderVisible ? 1 : 0) }
+        if count > 0 { observer.emit(.placeholderExposure(visibleCellCount: count)) }
+    }
+
     func buildCodeBodyContentMap(for fragments: [Fragment], table: NodeTable, ordinals: [Int: Int]) -> [Int: CodeBodyLayerContent] {
         var map: [Int: CodeBodyLayerContent] = [:]
         let itemID = table.itemID
