@@ -27,17 +27,16 @@ struct HotTableRenderResult: @unchecked Sendable {
 
 /// Performs the same solve/layout/raster sequence as the cold table path, off MainActor.
 nonisolated func rasterizeHotTable(_ snapshot: HotTableRenderSnapshot,
+                                   state: HotTableLayoutState,
                                    formulaCache: FormulaCache?,
                                    fontProvider: KaTeXFontProvider?) -> HotTableRenderResult? {
+    let context = TextMeasurementContext()
     let measure: TextMeasure = { descriptor, width in
-        TextMeasurementContext().measure(descriptor, width: width, formulaCache: formulaCache)
+        context.measure(descriptor, width: width, formulaCache: formulaCache)
     }
     let padding = TableCellPadding.default
-    let solution = solveColumnWidths(
-        cells: snapshot.descriptor.cells, availableWidth: snapshot.width, measure: measure, padding: padding
-    )
-    let layout = layoutTableCells(
-        cells: snapshot.descriptor.cells, columnWidths: solution.widths,
+    let layout = state.resolve(
+        cells: snapshot.descriptor.cells, availableWidth: snapshot.width,
         alignments: snapshot.descriptor.alignments, measure: measure, padding: padding
     )
     let raster = rasterizeTable(
@@ -54,7 +53,7 @@ nonisolated func rasterizeHotTable(_ snapshot: HotTableRenderSnapshot,
 /// one replaceable pending snapshot, so stream updates cannot cancel every CPU-bound table solve.
 @MainActor
 public final class HotTableRasterizerStore {
-    typealias Renderer = @Sendable (HotTableRenderSnapshot) async -> HotTableRenderResult?
+    typealias Renderer = @Sendable (HotTableRenderSnapshot, HotTableLayoutState) async -> HotTableRenderResult?
     typealias Delivery = @MainActor @Sendable (HotTableRenderResult, Bool) -> Void
 
     private struct Request: Sendable {
@@ -64,6 +63,7 @@ public final class HotTableRasterizerStore {
     }
 
     private struct Entry {
+        let layoutState = HotTableLayoutState()
         var activeTask: Task<Void, Never>?
         var activeTicket: Int?
         var pending: Request?
@@ -108,8 +108,9 @@ public final class HotTableRasterizerStore {
         let ticket = nextTicket
         var entry = entries[request.snapshot.key] ?? Entry()
         entry.activeTicket = ticket
+        let state = entry.layoutState
         entry.activeTask = Task.detached { [weak self, renderer = request.renderer, snapshot = request.snapshot] in
-            let result = await renderer(snapshot)
+            let result = await renderer(snapshot, state)
             guard !Task.isCancelled else { return }
             await self?.complete(result, for: request, ticket: ticket)
         }

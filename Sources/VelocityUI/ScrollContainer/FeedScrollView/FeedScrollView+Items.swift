@@ -696,8 +696,8 @@ extension FeedScrollView {
                     key: block.key, generation: 0, descriptor: descriptor, width: block.width,
                     scale: scale, isFinal: isFinal
                 ),
-                renderer: { [formulaCache = environment.formulaCache, fontProvider = environment.mathFontProvider] snapshot in
-                    rasterizeHotTable(snapshot, formulaCache: formulaCache, fontProvider: fontProvider)
+                renderer: { [formulaCache = environment.formulaCache, fontProvider = environment.mathFontProvider] snapshot, state in
+                    rasterizeHotTable(snapshot, state: state, formulaCache: formulaCache, fontProvider: fontProvider)
                 },
                 onDelivery: hotTableDelivery
             )

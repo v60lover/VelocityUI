@@ -92,7 +92,7 @@ final class HotTableRasterizerStoreTests: XCTestCase {
         let key = BlockKey(itemID: "message", index: 0)
         let deliveries = DeliveryLog()
         let resultImage = image()
-        let renderer: HotTableRasterizerStore.Renderer = { snapshot in
+        let renderer: HotTableRasterizerStore.Renderer = { snapshot, _ in
             await gate.wait(snapshot.generation)
             return HotTableRenderResult(
                 key: snapshot.key, generation: snapshot.generation, image: resultImage, size: .init(width: 1, height: 1)
@@ -126,7 +126,7 @@ final class HotTableRasterizerStoreTests: XCTestCase {
         let key = BlockKey(itemID: "message", index: 1)
         let deliveries = DeliveryLog()
         let resultImage = image()
-        let renderer: HotTableRasterizerStore.Renderer = { snapshot in
+        let renderer: HotTableRasterizerStore.Renderer = { snapshot, _ in
             await gate.wait(snapshot.generation)
             let generation = snapshot.generation == 2 ? 1 : snapshot.generation
             return HotTableRenderResult(key: snapshot.key, generation: generation, image: resultImage, size: .init(width: 1, height: 1))
@@ -154,7 +154,7 @@ final class HotTableRasterizerStoreTests: XCTestCase {
         let key = BlockKey(itemID: "message", index: 2)
         let deliveries = DeliveryLog()
         let resultImage = image()
-        let renderer: HotTableRasterizerStore.Renderer = { snapshot in
+        let renderer: HotTableRasterizerStore.Renderer = { snapshot, _ in
             await gate.wait(snapshot.generation)
             return HotTableRenderResult(key: snapshot.key, generation: snapshot.generation, image: resultImage, size: .init(width: 1, height: 1))
         }
@@ -168,7 +168,7 @@ final class HotTableRasterizerStoreTests: XCTestCase {
         await waitUntil { deliveries.finalFlags == [true] }
 
         let resetGate = RenderGate()
-        let resetRenderer: HotTableRasterizerStore.Renderer = { snapshot in
+        let resetRenderer: HotTableRasterizerStore.Renderer = { snapshot, _ in
             await resetGate.wait(snapshot.generation)
             return HotTableRenderResult(key: snapshot.key, generation: snapshot.generation, image: resultImage, size: .init(width: 1, height: 1))
         }
