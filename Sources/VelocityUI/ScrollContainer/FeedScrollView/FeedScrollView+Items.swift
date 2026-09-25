@@ -649,7 +649,8 @@ extension FeedScrollView {
             }
             let result = environment.hotBlockRasterizerStore.append(
                 descriptor, width: block.width, scale: scale, contentHash: block.contentHash, for: block.key,
-                formulaCache: environment.formulaCache, fontProvider: environment.mathFontProvider
+                formulaCache: environment.formulaCache, fontProvider: environment.mathFontProvider,
+                observer: environment.rasterDiagnosticsObserver
             )
             if let image = result.image {
                 residentStore.store(image, size: CGSize(width: block.width, height: result.height), for: block.key)
@@ -699,7 +700,8 @@ extension FeedScrollView {
                 renderer: { [formulaCache = environment.formulaCache, fontProvider = environment.mathFontProvider] snapshot, state in
                     rasterizeHotTable(snapshot, state: state, formulaCache: formulaCache, fontProvider: fontProvider)
                 },
-                onDelivery: hotTableDelivery
+                onDelivery: hotTableDelivery,
+                observer: environment.rasterDiagnosticsObserver
             )
             return true
         }

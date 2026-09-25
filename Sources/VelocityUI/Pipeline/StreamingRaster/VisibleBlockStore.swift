@@ -8,19 +8,19 @@ import os
 /// temporarily exceed `targetByteBudget` rather than being dropped and rasterized again on the
 /// next streaming token. Leaving blocks are demoted to the evictable frozen cache.
 public final class VisibleBlockStore: Sendable {
-    private struct Entry: @unchecked Sendable {
+    struct Entry: @unchecked Sendable {
         let bitmap: CGImage
         let size: CGSize
         let cost: Int
         let codeBodyIdentity: CodeBodyRasterIdentity?
     }
 
-    private struct State {
+    struct State {
         var entries: [BlockKey: Entry] = [:]
         var currentByteTotal = 0
     }
 
-    private let state = OSAllocatedUnfairLock(initialState: State())
+    let state = OSAllocatedUnfairLock(initialState: State())
 
     /// A tuning signal for diagnostics, not a hard cap. Visible content is allowed to exceed it.
     public let targetByteBudget: Int

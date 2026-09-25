@@ -1,6 +1,7 @@
 #if canImport(UIKit)
 import XCTest
 import UIKit
+import os
 @testable import VelocityUI
 
 @MainActor
@@ -84,6 +85,34 @@ final class HotTableRasterizerStoreTests: XCTestCase {
             await Task.yield()
         }
         XCTFail("condition did not become true", file: file, line: line)
+    }
+
+    func testObserverSeesPhasesRasterWorkAndMeasureCalls() async {
+        let store = HotTableRasterizerStore()
+        let key = BlockKey(itemID: "message", index: 0)
+        let events = OSAllocatedUnfairLock(initialState: [String]())
+        let observer = RasterDiagnosticsObserver { event in
+            switch event {
+            case .hotRenderPhase(.submitted, _, _, _): events.withLock { $0.append("submitted") }
+            case .hotRenderPhase(.started, _, _, _): events.withLock { $0.append("started") }
+            case .hotRenderPhase(.delivered, _, _, _): events.withLock { $0.append("delivered") }
+            case .rasterWork(_, _, let w, let h, let copied): events.withLock { $0.append("raster \(w)x\(h) copied \(copied)") }
+            case .measureCalls(_, _, let count): events.withLock { $0.append("measure \(count)") }
+            default: break
+            }
+        }
+        let resultImage = image()
+        let renderer: HotTableRasterizerStore.Renderer = { snapshot, _ in
+            HotTableRenderResult(
+                key: snapshot.key, generation: snapshot.generation, image: resultImage,
+                size: .init(width: 1, height: 1), measureCalls: 5
+            )
+        }
+        store.submit(snapshot("row", key: key, isFinal: true), renderer: renderer, onDelivery: { _, _ in }, observer: observer)
+        await waitUntil { events.withLock { $0.count >= 5 } }
+        XCTAssertEqual(events.withLock { $0 }.filter { !$0.hasPrefix("raster") },
+                       ["submitted", "started", "delivered", "measure 5"])
+        XCTAssertTrue(events.withLock { $0 }.contains { $0.hasPrefix("raster ") && $0.hasSuffix("copied 0") })
     }
 
     func testRapidMutationsKeepOneActiveAndLatestPendingThenDeliverProgressiveAndFinal() async {

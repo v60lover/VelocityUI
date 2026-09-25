@@ -11,9 +11,11 @@ import SwaTexRender
 /// owned by `HotBlockRasterizerStore`.
 final class HotBlockRasterizer {
     private let measurer = HotBlockMeasurer()
-    private var image: CGImage?
+    private(set) var image: CGImage?
     private var lastSize: CGSize = .zero
     private var previousFragmentCount: Int = 0
+    /// Pixels the last `append` blitted from the retained image rather than redrawing. Diagnostics only.
+    private(set) var lastCopiedPixelArea = 0
 
     /// Stored test-only observability state. Always present (no XCTest guard) — production code
     /// (`append(_:width:scale:)`) references it unconditionally. See `HotBlockRasterizerTestHooks`
@@ -35,6 +37,7 @@ final class HotBlockRasterizer {
         let (height, appended) = measurer.measure(descriptor, width: width, formulaCache: formulaCache, fontProvider: fontProvider)
         let size = CGSize(width: width, height: height)
         lastSize = size
+        lastCopiedPixelArea = 0
 
         var newFragments: [NSTextLayoutFragment] = []
         measurer.layoutManager.enumerateTextLayoutFragments(
@@ -64,6 +67,7 @@ final class HotBlockRasterizer {
             format.scale = scale
             format.opaque = false
             let renderer = UIGraphicsImageRenderer(size: size, format: format)
+            var copiedArea = 0
             image = renderer.image { ctx in
                 if stableTopY > 0 {
                     // Crop, don't scale: previousImage is already rasterized at `scale`, so
@@ -73,12 +77,14 @@ final class HotBlockRasterizer {
                     if stableTopYPixels > 0,
                        let cropped = previousImage.cropping(to: CGRect(x: 0, y: 0, width: previousImage.width, height: stableTopYPixels)) {
                         UIImage(cgImage: cropped, scale: scale, orientation: .up).draw(at: .zero)
+                        copiedArea = cropped.width * cropped.height
                     }
                 }
                 for fragment in redrawFragments {
                     fragment.draw(at: fragment.layoutFragmentFrame.origin, in: ctx.cgContext)
                 }
             }.cgImage
+            lastCopiedPixelArea = copiedArea
             _testHooks.lastRedrawnFragmentCount = redrawFragments.count
         } else {
             // Non-append (first call, or a full-reset fallback): the block changed

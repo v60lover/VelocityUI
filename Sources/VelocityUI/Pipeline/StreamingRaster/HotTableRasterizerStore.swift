@@ -23,6 +23,8 @@ struct HotTableRenderResult: @unchecked Sendable {
     let generation: Int
     let image: CGImage
     let size: CGSize
+    /// How many times the solve called the text measurer. Diagnostics only.
+    var measureCalls: Int = 0
 }
 
 /// Performs the same solve/layout/raster sequence as the cold table path, off MainActor.
@@ -31,8 +33,10 @@ nonisolated func rasterizeHotTable(_ snapshot: HotTableRenderSnapshot,
                                    formulaCache: FormulaCache?,
                                    fontProvider: KaTeXFontProvider?) -> HotTableRenderResult? {
     let context = TextMeasurementContext()
+    var measureCalls = 0
     let measure: TextMeasure = { descriptor, width in
-        context.measure(descriptor, width: width, formulaCache: formulaCache)
+        measureCalls += 1
+        return context.measure(descriptor, width: width, formulaCache: formulaCache)
     }
     let padding = TableCellPadding.default
     let layout = state.resolve(
@@ -45,7 +49,8 @@ nonisolated func rasterizeHotTable(_ snapshot: HotTableRenderSnapshot,
     )
     guard let image = raster.image else { return nil }
     return HotTableRenderResult(
-        key: snapshot.key, generation: snapshot.generation, image: image, size: raster.size
+        key: snapshot.key, generation: snapshot.generation, image: image, size: raster.size,
+        measureCalls: measureCalls
     )
 }
 
@@ -60,6 +65,7 @@ public final class HotTableRasterizerStore {
         let snapshot: HotTableRenderSnapshot
         let renderer: Renderer
         let delivery: Delivery
+        let observer: RasterDiagnosticsObserver?
     }
 
     private struct Entry {
@@ -79,15 +85,19 @@ public final class HotTableRasterizerStore {
     /// Replaces only pending work. The active render is intentionally allowed to finish, which
     /// guarantees a progressive paint even when a token stream never pauses between versions.
     func submit(_ snapshot: HotTableRenderSnapshot, renderer: @escaping Renderer,
-                onDelivery: @escaping Delivery) {
+                onDelivery: @escaping Delivery, observer: RasterDiagnosticsObserver? = nil) {
         var entry = entries[snapshot.key] ?? Entry()
         entry.nextGeneration += 1
         let snapshot = HotTableRenderSnapshot(
             key: snapshot.key, generation: entry.nextGeneration, descriptor: snapshot.descriptor,
             width: snapshot.width, scale: snapshot.scale, isFinal: snapshot.isFinal
         )
-        let request = Request(snapshot: snapshot, renderer: renderer, delivery: onDelivery)
+        let request = Request(snapshot: snapshot, renderer: renderer, delivery: onDelivery, observer: observer)
+        observer?.emit(.hotRenderPhase(.submitted, key: snapshot.key, kind: .table, generation: snapshot.generation))
         if entry.activeTask != nil {
+            if entry.pending != nil {
+                observer?.emit(.hotRenderPhase(.replacedPending, key: snapshot.key, kind: .table, generation: snapshot.generation))
+            }
             entry.pending = request
             entries[snapshot.key] = entry
             return
@@ -108,6 +118,9 @@ public final class HotTableRasterizerStore {
         let ticket = nextTicket
         var entry = entries[request.snapshot.key] ?? Entry()
         entry.activeTicket = ticket
+        request.observer?.emit(.hotRenderPhase(
+            .started, key: request.snapshot.key, kind: .table, generation: request.snapshot.generation
+        ))
         let state = entry.layoutState
         entry.activeTask = Task.detached { [weak self, renderer = request.renderer, snapshot = request.snapshot] in
             let result = await renderer(snapshot, state)
@@ -126,6 +139,18 @@ public final class HotTableRasterizerStore {
         if let result, result.generation > entry.lastDeliveredGeneration {
             entry.lastDeliveredGeneration = result.generation
             request.delivery(result, request.snapshot.isFinal)
+            if let observer = request.observer {
+                observer.emit(.hotRenderPhase(.delivered, key: key, kind: .table, generation: result.generation))
+                observer.emit(.rasterWork(
+                    key: key, kind: .table, pixelWidth: result.image.width, pixelHeight: result.image.height,
+                    copiedPixelArea: 0
+                ))
+                observer.emit(.measureCalls(key: key, kind: .table, count: result.measureCalls))
+            }
+        } else {
+            request.observer?.emit(.hotRenderPhase(
+                .droppedStale, key: key, kind: .table, generation: request.snapshot.generation
+            ))
         }
 
         if let pending = entry.pending {

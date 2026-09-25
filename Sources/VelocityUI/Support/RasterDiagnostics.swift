@@ -48,6 +48,25 @@ public enum RasterDiagnosticsEvent: Sendable {
     case imageRequest(ImageRequestOutcome)
     /// A cold-archive lookup for a sealed raster. Emitted by the archive tier only.
     case coldArchiveLookup(key: BlockKey, hit: Bool)
+    /// A hot-render request moved through the scheduler. `generation` is per key and only set for tables.
+    case hotRenderPhase(HotRenderPhase, key: BlockKey, kind: RasterDiagnosticFragmentKind, generation: Int)
+    /// Pixels produced by one hot raster pass. `copiedPixelArea` is the part blitted from the
+    /// retained image instead of redrawn; the rest of `pixelWidth * pixelHeight` was redrawn.
+    case rasterWork(
+        key: BlockKey, kind: RasterDiagnosticFragmentKind,
+        pixelWidth: Int, pixelHeight: Int, copiedPixelArea: Int
+    )
+    /// Text-measure calls one hot render made.
+    case measureCalls(key: BlockKey, kind: RasterDiagnosticFragmentKind, count: Int)
+}
+
+/// Stages of a hot table render, in the order a request normally passes them.
+public enum HotRenderPhase: Sendable {
+    case submitted
+    case replacedPending
+    case started
+    case delivered
+    case droppedStale
 }
 
 /// Where an `ImageActor` request was satisfied. Carries no URL.

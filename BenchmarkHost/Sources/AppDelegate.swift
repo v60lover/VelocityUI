@@ -63,13 +63,21 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                 }
                 exit(0)
             }
+            let fixtureTurns = args.streamFixtureName.flatMap { StreamCostScenario.turns(fixture: $0) }
+            if let name = args.streamFixtureName, fixtureTurns == nil { fatalError("unknown --stream-fixture \(name)") }
+            let turns = fixtureTurns ?? StreamDataset.turns()
+            let tokenCount = turns.reduce(0) { $0 + $1.assistantChunks.count }
+            let script = args.streamScriptName.flatMap { StreamCostScenario.script(named: $0, tokenCount: tokenCount) }
+            if let name = args.streamScriptName, script == nil { fatalError("unknown --stream-script \(name)") }
             rootVC = StreamBenchmarkViewController(
                 harness: harness,
                 orchestrator: orchestrator,
                 hotBlockRasterizeEnabled: args.hotBlockRasterizeMode == .on,
                 gestureGatedDeferralEnabled: args.gestureGatedDeferralMode == .on,
                 includeInterleavedBlocks: !args.streamTextOnly,
-                tokensPerSecond: args.streamTokensPerSecond
+                turns: turns,
+                tokensPerSecond: args.streamTokensPerSecond,
+                scenarioScript: script ?? .none
             )
         } else if let runtime = args.runtime, args.liveHUD {
             // Interactive live-HUD mode: open this runtime directly with no orchestrator,

@@ -17,6 +17,7 @@ final class StreamBenchmarkViewController: UIViewController {
     private let harness: BenchmarkHarness
     private let orchestrator: BenchmarkOrchestrator?
     private let environment: RenderEnvironment
+    private var didPrintCostReport = false
     private let store = StreamStore()
     /// Flat concatenation of every turn's chunks — feeds the headless `orchestrator` path, which
     /// measures one continuous answer and has no notion of turn boundaries.
@@ -37,6 +38,13 @@ final class StreamBenchmarkViewController: UIViewController {
     /// `stop()`) once per turn rather than run once over the flat stream — see `driveManualTurns`.
     private let manualDriver = StreamDriver()
     private var liveMetrics: LiveMetricsController?
+    /// Token-to-paint / MainActor timing for the streaming cost baseline (VelocityUI-ln1g.1).
+    private let costRecorder = StreamCostRecorder(warmupTokens: 20)
+    private let libraryCounters: StreamLibraryCounters
+    private let scenarioScript: StreamScenarioScript
+    /// Tokens delivered so far across all turns; the script's `beforeToken` indexes into this.
+    private var deliveredTokenCount = 0
+    private let stallWatchdog: StreamStallWatchdog
 
     init(
         harness: BenchmarkHarness,
@@ -45,8 +53,10 @@ final class StreamBenchmarkViewController: UIViewController {
         gestureGatedDeferralEnabled: Bool = false,
         includeInterleavedBlocks: Bool = true,
         turns: [StreamDataset.StreamTurn] = StreamDataset.turns(),
-        tokensPerSecond: Double = 20
+        tokensPerSecond: Double = 20,
+        scenarioScript: StreamScenarioScript = .none
     ) {
+        self.scenarioScript = scenarioScript
         self.harness = harness
         self.orchestrator = orchestrator
         self.turns = turns
@@ -54,10 +64,15 @@ final class StreamBenchmarkViewController: UIViewController {
         self.tokensPerSecond = tokensPerSecond
         self.includeInterleavedBlocks = includeInterleavedBlocks
         self.gestureGatedDeferralEnabled = gestureGatedDeferralEnabled
+        let counters = StreamLibraryCounters()
+        self.libraryCounters = counters
+        self.stallWatchdog = StreamStallWatchdog(total: turns.reduce(0) { $0 + $1.assistantChunks.count }, counters: counters)
         self.environment = RenderEnvironment(
             hotBlockRasterizeEnabled: hotBlockRasterizeEnabled,
             rasterDiagnosticsObserver: RasterDiagnosticsObserver { event in
-                print(rasterDiagnosticsConsoleLine(event))
+                counters.record(event)
+                // Hot-render events fire per token; printing them would distort the timings.
+                if let line = rasterDiagnosticsConsoleLine(event) { print(line) }
             }
         )
         super.init(nibName: nil, bundle: nil)
@@ -67,8 +82,33 @@ final class StreamBenchmarkViewController: UIViewController {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
+    /// Store images plus every image set on a mounted layer under this view, deduped by identity.
+    private func imageReport() -> ImageOwnershipReport {
+        environment.debugImageReport(extraOwners: [.mountedLayers(under: [view.layer])])
+    }
+
+    /// Prints the `[cost]` block once. Also called when the capture backstop ends a run early, so a
+    /// run that never delivers its last token still reports (with `delivered=` showing how far it got).
+    private func printCostReport() {
+        guard !didPrintCostReport else { return }
+        didPrintCostReport = true
+        stallWatchdog.stop()
+        let total = turns.reduce(0) { $0 + $1.assistantChunks.count }
+        print("[cost] delivered=\(deliveredTokenCount)/\(total)")
+        print(costRecorder.report(
+            libraryTotals: libraryCounters.totals(), scenario: scenarioScript.name,
+            tokensPerSecond: Double(tokensPerSecond), imageReport: imageReport()
+        ))
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
+        if let orchestrator, let previous = orchestrator.onComplete {
+            orchestrator.onComplete = { [weak self] report in
+                MainActor.assumeIsolated { self?.printCostReport() }
+                previous(report)
+            }
+        }
         let feedView = StreamFeedView(store: store, environment: environment, includeInterleavedBlocks: includeInterleavedBlocks)
         let hostVC = UIHostingController(rootView: feedView)
         addChild(hostVC)
@@ -79,6 +119,7 @@ final class StreamBenchmarkViewController: UIViewController {
     }
 
     private var didStartDriving = false
+    private let settleGate = StartupSettleGate()
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
@@ -91,19 +132,18 @@ final class StreamBenchmarkViewController: UIViewController {
         }
 
         if let orchestrator {
-            // Headless measured path — BenchmarkOrchestrator owns capture start/stop timing and
-            // only understands one flat token stream, so this stays a single user bubble (the
-            // first turn's question) followed by one continuous streamed answer, same shape as
-            // before turn-splitting existed. No real gesture ever occurs here (--live is rejected
-            // for --scenario stream), so the deferral toggle above is wired for interface symmetry
-            // but inert on this path.
-            store.addUserMessage(turns.first?.userMessage ?? "")
-            store.beginAssistantMessage()
-            orchestrator.streamReady(tokens: tokens, tokensPerSecond: tokensPerSecond) { [weak store] token in
-                store?.append(token)
+            // Host launch lag would pollute p99 and backlog, so wait until frames are quiet (30 s cap).
+            settleGate.wait { [weak self] settled in
+                guard let self else { return }
+                print("[cost] startup settle: \(settled ? "quiet" : "TIMEOUT after 30s")")
+                self.costRecorder.start()
+                self.stallWatchdog.start()
+                self.beginHeadlessStream(orchestrator)
             }
             return
         }
+        costRecorder.start()
+        stallWatchdog.start()
 
         // Manual/picker flow: no orchestrator, no measured capture — drive turn by turn and
         // attach a live HUD, same shape as every other runtime VC's `orchestrator == nil` branch
@@ -116,6 +156,56 @@ final class StreamBenchmarkViewController: UIViewController {
             let c = LiveMetricsController(scrollView: scrollView, harness: harness, imageMode: LaunchArguments().imageMode, runtimeLabel: "VelocityUI-stream")
             c.start()
             liveMetrics = c
+        }
+    }
+
+    /// Headless measured path — BenchmarkOrchestrator owns capture start/stop timing and only
+    /// understands one flat token stream, so this stays a single user bubble (the first turn's
+    /// question) followed by one continuous streamed answer. No real gesture ever occurs here
+    /// (--live is rejected for --scenario stream).
+    private func beginHeadlessStream(_ orchestrator: BenchmarkOrchestrator) {
+        store.addUserMessage(turns.first?.userMessage ?? "")
+        // Same gap as the manual flow: the assistant bubble must not land in the same tick as the
+        // user bubble, or the feed shows only the user message. Capture starts after the gap.
+        Task { [weak self] in
+            try? await Task.sleep(for: self?.responseLatency ?? .zero)
+            guard let self else { return }
+            self.store.beginAssistantMessage()
+            orchestrator.streamReady(tokens: self.tokens, tokensPerSecond: self.tokensPerSecond) { [weak self] token in
+                self?.deliver(token)
+            }
+        }
+    }
+
+    /// Runs any scenario actions due before this token, then delivers it under the cost recorder.
+    private func deliver(_ token: String) {
+        for action in scenarioScript.actions(before: deliveredTokenCount) {
+            perform(action)
+        }
+        deliveredTokenCount += 1
+        stallWatchdog.noteDelivered(deliveredTokenCount)
+        costRecorder.recordDelivery { store.append(token) }
+        if orchestrator != nil, deliveredTokenCount == tokens.count {
+            // Headless path has no onEnd: give the last token a moment to paint, then print.
+            Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(300))
+                guard let self else { return }
+                self.printCostReport()
+            }
+        }
+    }
+
+    private func perform(_ action: StreamScenarioAction) {
+        switch action {
+        case .scrollAwayFromTail:
+            guard let sv = view.firstScrollView else { return }
+            sv.setContentOffset(CGPoint(x: 0, y: -sv.adjustedContentInset.top), animated: false)
+        case .scrollToTail:
+            guard let sv = view.firstScrollView else { return }
+            let y = max(-sv.adjustedContentInset.top, sv.contentSize.height - sv.bounds.height + sv.adjustedContentInset.bottom)
+            sv.setContentOffset(CGPoint(x: 0, y: y), animated: false)
+        case .setHorizontalPadding(let value):
+            store.horizontalPadding = value
         }
     }
 
@@ -142,16 +232,19 @@ final class StreamBenchmarkViewController: UIViewController {
             self.store.addUserMessage(turn.userMessage)
             try? await Task.sleep(for: self.responseLatency)
             self.store.beginAssistantMessage()
-            self.manualDriver.start(tokens: turn.assistantChunks, tokensPerSecond: self.tokensPerSecond, onToken: { [weak store] token in
-                store?.append(token)
+            self.manualDriver.start(tokens: turn.assistantChunks, tokensPerSecond: self.tokensPerSecond, onToken: { [weak self] token in
+                self?.deliver(token)
             }, onEnd: { [weak self] in
+                if let self, index + 1 >= self.turns.count {
+                    self.printCostReport()
+                }
                 self?.driveManualTurns(startingAt: index + 1)
             })
         }
     }
 }
 
-private func rasterDiagnosticsConsoleLine(_ event: RasterDiagnosticsEvent) -> String {
+private func rasterDiagnosticsConsoleLine(_ event: RasterDiagnosticsEvent) -> String? {
     switch event {
     case let .rasterMiss(key, kind, visible, frozen):
         return "[raster] miss item=\(key.itemID) key=\(key) kind=\(kind.rawValue) visible=\(visible) frozen=\(frozen)"
@@ -165,6 +258,8 @@ private func rasterDiagnosticsConsoleLine(_ event: RasterDiagnosticsEvent) -> St
         return "[raster] repaint-missing item=\(key.itemID) key=\(key) kind=\(kind.rawValue)"
     case .rasterHit, .emptyLayoutMount, .placeholderExposure, .layoutResolved, .imageRequest, .coldArchiveLookup:
         return "[raster] \(event)"
+    case .hotRenderPhase, .rasterWork, .measureCalls:
+        return nil
     }
 }
 
@@ -195,6 +290,8 @@ private final class StreamStore: ObservableObject {
     /// `StreamFeedView` threads it into `.tailFollow(_:pinTrigger:)` so `AsyncFeed` fires
     /// `FeedScrollView.pinTailSpacer()` right after the new user bubble lands.
     @Published var pinToken = 0
+    /// Feed side padding; the scenario script changes it mid-stream to force a width change.
+    @Published var horizontalPadding: CGFloat = 8
 
     private var nextID = 0
     /// One memoizing controller per assistant turn (VelocityUI-8g6l), keyed by that turn's message
@@ -300,7 +397,7 @@ private struct StreamFeedView: View {
         })
         .prefetchWindow(ahead: 10, behind: 3)
         .tailFollow(.off, pinTrigger: store.pinToken)
-        .padding(.horizontal, 8)
+        .padding(.horizontal, store.horizontalPadding)
     }
 }
 

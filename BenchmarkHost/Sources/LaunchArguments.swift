@@ -92,6 +92,10 @@ struct LaunchArguments {
     /// pass, or to isolate the text-rasterizer cost from image-decode noise. Ignored by every
     /// other scenario.
     var streamTextOnly: Bool
+    /// `--stream-fixture <name>` / `--stream-script <name>` — cost-baseline fixture and scenario
+    /// script (see `StreamCostScenario`). nil keeps the default chat dataset / no script.
+    var streamFixtureName: String?
+    var streamScriptName: String?
     /// `--gesture-deferral <on|off>` — threads into `StreamBenchmarkViewController`'s
     /// gesture-gated-deferral toggle (VelocityUI-0tbi), the fix direction proposed by zgdg's H2
     /// finding: buffer per-token items updates while a scroll gesture is active, flushing one
@@ -114,6 +118,8 @@ struct LaunchArguments {
         streamTokensPerSecond = Self.value(for: "--stream-rate", in: args).flatMap(Double.init) ?? 40.0
         hotBlockRasterizeMode = Self.value(for: "--hot-rasterize", in: args).flatMap(HotBlockRasterizeMode.init) ?? .on
         streamTextOnly = args.contains("--stream-text-only")
+        streamFixtureName = Self.value(for: "--stream-fixture", in: args)
+        streamScriptName = Self.value(for: "--stream-script", in: args)
         gestureGatedDeferralMode = Self.value(for: "--gesture-deferral", in: args).flatMap(GestureGatedDeferralMode.init) ?? .off
     }
 
@@ -145,6 +151,8 @@ struct LaunchArguments {
         self.streamTokensPerSecond = streamTokensPerSecond
         self.hotBlockRasterizeMode = hotBlockRasterizeMode
         self.streamTextOnly = streamTextOnly
+        self.streamFixtureName = nil
+        self.streamScriptName = nil
         self.gestureGatedDeferralMode = gestureGatedDeferralMode
     }
 

@@ -10,12 +10,12 @@ import SwaTexRender
 /// enough. `@MainActor`, no locking: touched only from the synchronous scroll path.
 @MainActor
 public final class HotBlockRasterizerStore {
-    private struct Entry {
+    struct Entry {
         let rasterizer: HotBlockRasterizer
         var contentHash: Int
     }
 
-    private var entries: [BlockKey: Entry] = [:]
+    private(set) var entries: [BlockKey: Entry] = [:]
 
     public init() {}
 
@@ -25,11 +25,18 @@ public final class HotBlockRasterizerStore {
     /// uses — so hot and sealed inline-math renders agree.
     func append(
         _ descriptor: TextDescriptor, width: CGFloat, scale: CGFloat, contentHash: Int, for key: BlockKey,
-        formulaCache: FormulaCache? = nil, fontProvider: KaTeXFontProvider? = nil
+        formulaCache: FormulaCache? = nil, fontProvider: KaTeXFontProvider? = nil,
+        observer: RasterDiagnosticsObserver? = nil
     ) -> (height: CGFloat, image: CGImage?) {
         let rasterizer = entries[key]?.rasterizer ?? HotBlockRasterizer()
         let result = rasterizer.append(descriptor, width: width, scale: scale, formulaCache: formulaCache, fontProvider: fontProvider)
         entries[key] = Entry(rasterizer: rasterizer, contentHash: contentHash)
+        if let observer, let image = result.image {
+            observer.emit(.rasterWork(
+                key: key, kind: .text, pixelWidth: image.width, pixelHeight: image.height,
+                copiedPixelArea: rasterizer.lastCopiedPixelArea
+            ))
+        }
         return result
     }
 

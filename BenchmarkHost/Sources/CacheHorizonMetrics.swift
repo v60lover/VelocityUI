@@ -113,7 +113,7 @@ final class CacheHorizonMetrics: Sendable {
         case .frozenBitmapEvicted(_, _, let bytes, _):
             c.frozenEvictions += 1
             peak = max(peak, bytes)
-        case .repairFinished, .repaintMissing:
+        case .repairFinished, .repaintMissing, .hotRenderPhase, .rasterWork, .measureCalls:
             break
         }
     }
