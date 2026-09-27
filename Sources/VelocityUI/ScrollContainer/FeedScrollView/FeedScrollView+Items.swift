@@ -94,6 +94,9 @@ extension FeedScrollView {
                         nextTables.append(flatten(root, itemID: item.id, contentSizeCategory: contentSizeCategory))
                     }
                     documentRevisions[item.id] = document.revision
+                    environment.streamingDeliveryCoordinator.noteDocumentRevision(
+                        itemID: item.id, revision: document.revision
+                    )
                     continue
                 }
                 nextTables.append(flatten(root, itemID: item.id, contentSizeCategory: contentSizeCategory))

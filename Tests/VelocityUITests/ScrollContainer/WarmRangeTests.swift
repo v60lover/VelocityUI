@@ -32,7 +32,7 @@ final class WarmRangeTests: XCTestCase {
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(),
             hotBlockRasterizerStore: HotBlockRasterizerStore(),
-            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore()
+            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore(), streamingDeliveryCoordinator: StreamingDeliveryCoordinator()
         )
     }
 

@@ -45,7 +45,7 @@ final class FeedScrollViewTests: XCTestCase {
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(),
             hotBlockRasterizerStore: HotBlockRasterizerStore(),
-            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore()
+            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore(), streamingDeliveryCoordinator: StreamingDeliveryCoordinator()
         )
     }
 
@@ -361,7 +361,7 @@ final class FeedScrollViewTests: XCTestCase {
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(),
             hotBlockRasterizerStore: HotBlockRasterizerStore(),
-            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore()
+            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore(), streamingDeliveryCoordinator: StreamingDeliveryCoordinator()
         )
 
         let feed = FeedScrollView<TestItem>(
@@ -434,7 +434,7 @@ final class FeedScrollViewTests: XCTestCase {
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(),
             hotBlockRasterizerStore: HotBlockRasterizerStore(),
-            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore()
+            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore(), streamingDeliveryCoordinator: StreamingDeliveryCoordinator()
         )
 
         struct ImageItem: Identifiable, Sendable {
@@ -558,7 +558,7 @@ final class FeedScrollViewTests: XCTestCase {
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(),
             hotBlockRasterizerStore: HotBlockRasterizerStore(),
-            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore()
+            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore(), streamingDeliveryCoordinator: StreamingDeliveryCoordinator()
         )
 
         struct ImageItem: Identifiable, Sendable {
@@ -660,7 +660,7 @@ final class FeedScrollViewTests: XCTestCase {
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(),
             hotBlockRasterizerStore: HotBlockRasterizerStore(),
-            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore()
+            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore(), streamingDeliveryCoordinator: StreamingDeliveryCoordinator()
         )
 
         let feed = FeedScrollView<URLItem>(
@@ -741,7 +741,7 @@ final class FeedScrollViewTests: XCTestCase {
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(),
             hotBlockRasterizerStore: HotBlockRasterizerStore(),
-            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore()
+            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore(), streamingDeliveryCoordinator: StreamingDeliveryCoordinator()
         )
 
         struct URLItem: Identifiable, Sendable {
@@ -860,7 +860,7 @@ final class FeedScrollViewTests: XCTestCase {
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(),
             hotBlockRasterizerStore: HotBlockRasterizerStore(),
-            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore()
+            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore(), streamingDeliveryCoordinator: StreamingDeliveryCoordinator()
         )
 
         struct StyleItem: Identifiable, Sendable {
@@ -1414,7 +1414,7 @@ final class FeedScrollViewTests: XCTestCase {
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(),
             hotBlockRasterizerStore: HotBlockRasterizerStore(),
-            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore()
+            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore(), streamingDeliveryCoordinator: StreamingDeliveryCoordinator()
         )
 
         struct ImageItem: Identifiable, Sendable {
@@ -1726,7 +1726,7 @@ final class FeedScrollViewTests: XCTestCase {
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(),
             hotBlockRasterizerStore: HotBlockRasterizerStore(),
-            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore(),
+            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore(), streamingDeliveryCoordinator: StreamingDeliveryCoordinator(),
             contentDeliveryObserver: { kind in
                 deliveredLock.withLock { $0.append(kind) }
             }
@@ -1785,7 +1785,7 @@ final class FeedScrollViewTests: XCTestCase {
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(),
             hotBlockRasterizerStore: HotBlockRasterizerStore(),
-            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore(),
+            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore(), streamingDeliveryCoordinator: StreamingDeliveryCoordinator(),
             pipelineTaskSpawnObserver: {
                 spawnCount.withLock { $0 += 1 }
             }

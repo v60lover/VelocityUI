@@ -17,7 +17,7 @@ final class TextSelectionWiringTests: XCTestCase {
             videoController: VideoController(videoPreparation: videoPrep),
             videoPreparation: videoPrep, frozenBitmapStore: FrozenBitmapStore(),
             hotBlockRasterizerStore: HotBlockRasterizerStore(),
-            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore()
+            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore(), streamingDeliveryCoordinator: StreamingDeliveryCoordinator()
         )
         let feed = FeedScrollView<TestItem>(environment: env, frame: CGRect(x: 0, y: 0, width: 375, height: 812))
         feed.cellBuilder = { item in

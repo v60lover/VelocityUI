@@ -783,7 +783,7 @@ extension FrozenBitmapStoreTests {
             videoPreparation: videoPrep,
             frozenBitmapStore: store,
             hotBlockRasterizerStore: HotBlockRasterizerStore(),
-            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore()
+            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore(), streamingDeliveryCoordinator: StreamingDeliveryCoordinator()
         )
     }
 

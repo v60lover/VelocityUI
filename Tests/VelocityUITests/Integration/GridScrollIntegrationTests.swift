@@ -72,7 +72,7 @@ final class GridScrollIntegrationTests: XCTestCase {
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(),
             hotBlockRasterizerStore: HotBlockRasterizerStore(),
-            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore()
+            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore(), streamingDeliveryCoordinator: StreamingDeliveryCoordinator()
         )
     }
 
@@ -383,7 +383,7 @@ final class GridScrollIntegrationTests: XCTestCase {
             videoPreparation: videoPrep,
             frozenBitmapStore: FrozenBitmapStore(),
             hotBlockRasterizerStore: HotBlockRasterizerStore(),
-            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore()
+            hotCodeStreamStore: HotCodeStreamStore(), hotTableRasterizerStore: HotTableRasterizerStore(), streamingDeliveryCoordinator: StreamingDeliveryCoordinator()
         )
     }
 
