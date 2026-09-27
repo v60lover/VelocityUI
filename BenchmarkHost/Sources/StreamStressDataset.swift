@@ -42,8 +42,7 @@ enum StreamStressDataset {
     /// attributed to paragraph seals vs. the fence seal without scrolling the transcript.
     static func textTurns() -> [StreamDataset.StreamTurn] {
         let all = turns()
-//        return [all[0], all[2]]
-        return [all[0]]
+        return [all[0], all[2]]
     }
 
     static func codeTurns() -> [StreamDataset.StreamTurn] {
@@ -91,12 +90,12 @@ enum StreamStressDataset {
     private static func turn2(rng: inout LCG) -> [String] {
         var chunks: [String] = []
         chunks += literal("## One big reference implementation\n\n")
-//        chunks += proseChunks(totalBytes: 300, rng: &rng)
-//        chunks.append("\n\n")
-//        // ~100 KB fence, thousands of lines, stays open the whole time.
-//        chunks += StreamFixture.longCode(lines: 3000).tokens
-//        chunks += proseChunks(totalBytes: 200, rng: &rng)
-//        chunks.append("\n\n")
+        chunks += proseChunks(totalBytes: 300, rng: &rng)
+        chunks.append("\n\n")
+        // ~100 KB fence, thousands of lines, stays open the whole time.
+        chunks += StreamFixture.longCode(lines: 3000).tokens
+        chunks += proseChunks(totalBytes: 200, rng: &rng)
+        chunks.append("\n\n")
         return chunks
     }
 
@@ -105,15 +104,15 @@ enum StreamStressDataset {
     private static func turn3(rng: inout LCG) -> [String] {
         var chunks: [String] = []
         chunks += literal("## Gotchas worth knowing about\n\n")
-//        chunks += rollbackLongCodeSpan(rng: &rng)
-//        chunks += rollbackBracketThenLink(rng: &rng)
-//        chunks += rollbackEmphasisAcrossGap(rng: &rng)
-//        chunks += rollbackBoldAfterCap(rng: &rng)
-//        chunks += unmatchedDanglingMarkers(rng: &rng)
-//
-//        chunks += literal("## Written out one more time, as a single long line\n\n")
-//        chunks += literal("Here's the same reasoning again, deliberately kept on one line: ")
-//        chunks += longLine(totalBytes: 64 * 1024, rng: &rng)
+        chunks += rollbackLongCodeSpan(rng: &rng)
+        chunks += rollbackBracketThenLink(rng: &rng)
+        chunks += rollbackEmphasisAcrossGap(rng: &rng)
+        chunks += rollbackBoldAfterCap(rng: &rng)
+        chunks += unmatchedDanglingMarkers(rng: &rng)
+
+        chunks += literal("## Written out one more time, as a single long line\n\n")
+        chunks += literal("Here's the same reasoning again, deliberately kept on one line: ")
+        chunks += longLine(totalBytes: 64 * 1024, rng: &rng)
         return chunks
     }
 

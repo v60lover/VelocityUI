@@ -34,15 +34,19 @@ final class RuntimePickerViewController: UITableViewController {
     /// lag can be pinned to one block kind without scrolling the transcript.
     private static let largeStressTextRowTitle = "VelocityUI — Streaming Text (large stress — text)"
     private static let largeStressCodeRowTitle = "VelocityUI — Streaming Text (large stress — code)"
-    private static let streamRowCount = 5
+    private static let fullStressVelocityRowTitle = "VelocityUI — Full stream stress"
+    private static let fullStressRillRowTitle = "Rill — Full stream stress"
+    private static let streamRowCount = 7
     private static let streamRowSubtitles = [
         "Canned transcript, auto-plays",
         "Same, with scroll-gated update deferral",
         "Real network reply, you type the prompt",
         "Huge paragraphs + inline markup, no code",
         "One 3000-line code fence",
+        "All StreamStressDataset turns, 40 tokens/s by default",
+        "Same turns and token cadence as VelocityUI",
     ]
-    private static let streamRowIcons = ["text.append", "hand.draw", "bolt.fill", "chart.bar.doc.horizontal", "curlybraces"]
+    private static let streamRowIcons = ["text.append", "hand.draw", "bolt.fill", "chart.bar.doc.horizontal", "curlybraces", "text.book.closed", "text.book.closed"]
 
     /// VelocityUI-0c5's `.grid(columns:spacing:)` DSL — same shape as the `Scenarios` section
     /// above (live-only, not part of the `runtimes` matrix `makeRuntimeVC` drives generically):
@@ -105,6 +109,7 @@ final class RuntimePickerViewController: UITableViewController {
             content.text = [
                 Self.streamRowTitle, Self.streamDeferralRowTitle, Self.liveLLMRowTitle,
                 Self.largeStressTextRowTitle, Self.largeStressCodeRowTitle,
+                Self.fullStressVelocityRowTitle, Self.fullStressRillRowTitle,
             ][row]
             content.secondaryText = Self.streamRowSubtitles[row]
             content.image = UIImage(systemName: Self.streamRowIcons[row])
@@ -128,6 +133,13 @@ final class RuntimePickerViewController: UITableViewController {
         case 1 where indexPath.row == 2:
             let vc = LiveLLMViewController()
             navigationController?.pushViewController(vc, animated: true)
+        case 1 where indexPath.row == 6:
+            let vc = RillStreamBenchmarkViewController(
+                harness: harness,
+                turns: StreamStressDataset.turns(),
+                tokensPerSecond: LaunchArguments().streamTokensPerSecond
+            )
+            navigationController?.pushViewController(vc, animated: true)
         case 1:
             // VelocityUI-0tbi: hot-rasterize/rate/text-only now read from LaunchArguments (were
             // hardcoded before this bead) — without this, configs C (--hot-rasterize off) and D
@@ -139,11 +151,13 @@ final class RuntimePickerViewController: UITableViewController {
                 orchestrator: nil,
                 hotBlockRasterizeEnabled: args.hotBlockRasterizeMode == .on,
                 gestureGatedDeferralEnabled: indexPath.row == 1,
-                includeInterleavedBlocks: !args.streamTextOnly,
+                includeInterleavedBlocks: indexPath.row == 5 ? false : !args.streamTextOnly,
                 turns: indexPath.row == 3 ? StreamStressDataset.textTurns()
-                    : indexPath.row == 4 ? StreamStressDataset.codeTurns() : StreamDataset.turns(),
+                    : indexPath.row == 4 ? StreamStressDataset.codeTurns()
+                    : indexPath.row == 5 ? StreamStressDataset.turns() : StreamDataset.turns(),
                 tokensPerSecond: args.streamTokensPerSecond
             )
+            if indexPath.row == 5 { vc.title = Self.fullStressVelocityRowTitle }
             navigationController?.pushViewController(vc, animated: true)
         default:
             let vc = VelocityUIGridRuntimeViewController(items: items, harness: harness)
