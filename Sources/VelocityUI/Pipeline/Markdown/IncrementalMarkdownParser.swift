@@ -2,16 +2,6 @@
 
 import Foundation
 import CoreGraphics
-#if canImport(os)
-import os
-#endif
-
-#if canImport(os) && DEBUG
-/// Temporary diagnostic for VelocityUI-pojd: logs every line seen by `parseTail` that contains
-/// `![`, matched or not, so real LLM output can be checked against `isImageLine`'s syntax
-/// coverage (title-attribute images, reference-style `![alt][ref]`, multiple images per line, …).
-private let markdownImageDiagnosticLog = Logger(subsystem: "com.velocityui", category: "MarkdownImageParse")
-#endif
 
 // MARK: - MarkdownBlockKind
 
@@ -138,20 +128,14 @@ nonisolated func inlineRuns(_ text: String) -> [InlineRun] {
         buffer = ""
     }
 
+    // CommonMark flanking classification for every `*`/`_` run, precomputed once (+Emphasis.swift).
+    let delimiterRuns = scanEmphasisDelimiterRuns(in: text)
+    var delimiterRunIndex = 0
+    var italicOpenChar: Character?
+    var boldOpenChar: Character?
+
     var chars = Substring(text)
     while !chars.isEmpty {
-        if chars.hasPrefix("***") || chars.hasPrefix("___") {
-            flush()
-            flags.formSymmetricDifference([.bold, .italic])
-            chars = chars.dropFirst(3)
-            continue
-        }
-        if chars.hasPrefix("**") || chars.hasPrefix("__") {
-            flush()
-            flags.formSymmetricDifference(.bold)
-            chars = chars.dropFirst(2)
-            continue
-        }
         if chars.hasPrefix("~~") {
             flush()
             flags.formSymmetricDifference(.strike)
@@ -235,17 +219,25 @@ nonisolated func inlineRuns(_ text: String) -> [InlineRun] {
             chars = chars.dropFirst()
             continue
         }
-        if let first = chars.first, first == "*" || first == "_" {
-            // A lone marker with nothing after it yet might still widen into "**"/"__" on the
-            // next append. Drop it as a pending marker instead of toggling italic, so a trailing
-            // '*' never commits to italic before we know whether its partner is coming.
-            if chars.dropFirst().isEmpty {
-                chars = chars.dropFirst()
-                continue
+        if chars.first == "*" || chars.first == "_" {
+            // Decision logic (flanking rules, open/close matching, end-of-text streaming guard)
+            // lives in +Emphasis.swift so this loop stays a thin dispatch on its result.
+            switch nextEmphasisStep(
+                chars: chars, text: text, delimiterRuns: delimiterRuns,
+                runIndex: &delimiterRunIndex, italicOpenChar: &italicOpenChar, boldOpenChar: &boldOpenChar
+            ) {
+            case .literal(let count):
+                buffer.append(contentsOf: chars.prefix(count))
+                chars = chars.dropFirst(count)
+            case .toggle(let delta, let count):
+                flush()
+                flags.formSymmetricDifference(delta)
+                chars = chars.dropFirst(count)
+            case .pending(let count):
+                // Ambiguous trailing marker, might still widen next append. Consume without
+                // appending or toggling flags -- same as the old pre-flanking-rules behavior.
+                chars = chars.dropFirst(count)
             }
-            flush()
-            flags.formSymmetricDifference(.italic)
-            chars = chars.dropFirst(1)
             continue
         }
         if chars.first == "`" {
@@ -371,15 +363,38 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
     private(set) var sealedBlocks: [ParsedMDBlock] = []
     private(set) var sealedBlockIDs: [BlockID] = []
 
-    /// Unsealed tail of the source since the last seal — re-scanned in full on every
-    /// `append(_:)` (bounded except during an open fence), never the whole message.
-    private var hotTail: String = ""
+    /// Resumable scanner state for the hot region: every *complete* (newline-terminated) line
+    /// seen so far has already been classified and folded in here — `append(_:)` never
+    /// re-feeds a line that's already in `hotScan`. See `IncrementalMarkdownParser+HotScan.swift`.
+    private var hotScan = HotScanState()
 
-    /// The hot region's current parse, kept alongside `hotTail` so `blocks(itemID:width:)`
-    /// doesn't need to re-run the scanner.
-    private(set) var hotBlocksState: [ParsedMDBlock] = []
+    /// Raw text of the current, not-yet-newline-terminated trailing line. Reprocessed in full
+    /// on every `append(_:)` (its classification can still change — see `HotScanState.step`),
+    /// but this is bounded by one line's length, not by the whole hot region.
+    var hotPendingLine = ""
+
+    /// Diagnostics distinguishing genuinely new scan work from necessary reconsideration and
+    /// from reused/cached work. Owned per parser instance — no singleton.
+    private(set) var scanCounters = MarkdownScanCounters()
+
     private(set) var hotBlockIDs: [BlockID] = []
     private var nextBlockID = 0
+
+    /// Materialized hot blocks, computed at most once per `append(_:)` call and simply read
+    /// (never recomputed) by every consumer in between -- `blockList`, `renderableBlocks`, etc.
+    /// See `append(_:)`'s tail for how this gets refreshed.
+    private(set) var hotBlocksState: [ParsedMDBlock] = []
+    /// Trailing UTF-8 byte offset of `hotPendingLine` already merged into the open fence/mathBlock
+    /// via `appendPendingCharsToFenceFastPath`. Bytes, not graphemes -- O(1) `UTF8View` indexing
+    /// vs O(n) `String.Index(offsetBy:)`. Reset to 0 whenever a real line completes.
+    private var materializedPendingByteCount = 0
+    /// Once the still-open pending line's block kind (paragraph/blockquote/listItem) can no
+    /// longer change, this caches it so growing the line costs O(delta), not O(line length).
+    /// Reset to nil wherever `materializedPendingByteCount` resets -- both mark "new pending
+    /// line, nothing settled yet". See `IncrementalMarkdownParser+PendingLine.swift`.
+    private var pendingLineFastPath: PendingLineFastPath?
+    /// Tokenized prefix of the current open Tier-2 block.
+    var inlineWindow = OpenInlineWindow()
 
     public init() {}
 
@@ -387,23 +402,307 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
     /// Monotonically non-decreasing: `sealedBlocks` is only ever appended to.
     public var frontier: Int { sealedBlocks.count }
 
-    /// Appends `text` to the accumulated stream and re-parses the hot tail. Any block that
-    /// becomes provably sealed (per `Self.parseTail`'s contract) is moved into `sealedBlocks`
-    /// permanently; everything still open stays in the hot tier.
+    /// Appends `text` to the accumulated stream, resuming the hot-region scan instead of
+    /// re-scanning it from scratch. Only the newly-completed lines (plus the still-open
+    /// trailing line, in `dryRun` mode) are fed through the classifier; everything already
+    /// folded into `hotScan` from a previous call is never revisited. Any block that becomes
+    /// provably sealed is moved into `sealedBlocks` permanently; everything still open stays hot.
     public mutating func append(_ text: String) {
         guard !text.isEmpty else { return }
-        hotTail += text
-        let result = Self.parseTail(hotTail)
-        let sealedIDs = reconciledIDs(existing: hotBlockIDs, count: result.sealed.count)
-        if !result.sealed.isEmpty {
-            sealedBlocks.append(contentsOf: result.sealed)
-            sealedBlockIDs.append(contentsOf: sealedIDs)
-            hotTail = String(hotTail[result.cutIndex...])
+        // `hotPendingLine`'s existing content is always newline-free (this loop's own invariant),
+        // so any "\n" this call finds must be inside the newly-appended `text` -- scanning from
+        // `priorByteCount` instead of `hotPendingLine.startIndex` keeps `firstIndex(of:)` bounded
+        // by the new bytes, not by however long the pending line has already grown (which made a
+        // single very long open line's per-keystroke cost O(line-length), i.e. O(n^2) overall).
+        let priorByteCount = hotPendingLine.utf8.count
+        hotPendingLine += text
+        var searchFromByte = priorByteCount
+
+        while let newline = Self.firstNewline(in: hotPendingLine, fromByte: searchFromByte) {
+            let completedLine = String(hotPendingLine[hotPendingLine.startIndex..<newline])
+            hotPendingLine.removeSubrange(hotPendingLine.startIndex...newline)
+            searchFromByte = 0  // remaining content is an unscanned tail of this call's `text`
+
+            // Continuing an open fence/mathBlock: fold the line in place (O(delta)), not a full
+            // re-alias every line. Drop the mirror first so `step()`'s mutation is uniquely-owned.
+            let continuingFence = (hotScan.inFence || hotScan.inMathBlock) && !hotBlocksState.isEmpty
+            if continuingFence {
+                hotBlocksState[hotBlocksState.count - 1].text = ""
+                // Undo the fast path's speculative pre-merge of this line (plus its leading "\n")
+                // before `step()` re-adds it canonically, or the line duplicates. Suffix removal on
+                // a uniquely-owned buffer, so still O(delta).
+                if materializedPendingByteCount > 0, hotScan.openBlockCache != nil {
+                    let removeCount = materializedPendingByteCount + 1
+                    let utf8 = hotScan.openBlockCache!.text.utf8
+                    let cut = utf8.index(utf8.endIndex, offsetBy: -removeCount)
+                    hotScan.openBlockCache!.text.removeSubrange(cut..<hotScan.openBlockCache!.text.endIndex)
+                }
+            }
+            let openIndex = hotScan.blocks.count
+            let retainedRuns: [InlineRun]?
+            if let cache = hotScan.openBlockCache, openIndex < hotBlocksState.count,
+               hotBlocksState[openIndex].kind == hotScan.openKind,
+               hotBlocksState[openIndex].text == cache.text {
+                retainedRuns = hotBlocksState[openIndex].runs
+            } else {
+                retainedRuns = nil
+            }
+            Self.step(Substring(completedLine), into: &hotScan, retainedOpenRuns: retainedRuns)
+            scanCounters.linesScannedNew += 1
+            sealCommittedPrefixIfNeeded()
+
+            if continuingFence, hotScan.inFence || hotScan.inMathBlock, let cache = hotScan.openBlockCache {
+                hotBlocksState[hotBlocksState.count - 1].text = cache.text  // cheap mirror refresh
+                scanCounters.fenceBytesCopiedTotal += completedLine.utf8.count + 1
+            } else {
+                rebuildHotBlocksStateFromScan()  // opened/closed/non-fence: infrequent, full resync is fine
+            }
+            materializedPendingByteCount = 0
+            pendingLineFastPath = nil
         }
-        hotBlocksState = result.hot
-        hotBlockIDs = reconciledIDs(
-            existing: Array(hotBlockIDs.dropFirst(result.sealed.count)), count: result.hot.count
-        )
+
+        var hotCount = hotScan.blocks.count
+        if !hotPendingLine.isEmpty {
+            if hotScan.inFence || hotScan.inMathBlock {
+                // No branch in `step()` reclassifies mid-fence, so merging directly is safe.
+                appendPendingCharsToFenceFastPath()
+                hotCount = hotScan.blocks.count + 1
+            } else {
+                scanCounters.partialLineReconsiderations += 1
+                let line = Substring(hotPendingLine)
+                // A pending line the fast path has settled (or can settle right now) can only be
+                // non-blank real content -- `settlePendingLineFastPath` returns nil for an
+                // all-whitespace line -- so it can never resolve a seal point later. Skip the
+                // O(line-length) dry-run `step()` entirely in that case; it exists only to answer
+                // "did this line just become a blank-line seal?" and "would-be non-fence open kind
+                // count", both already known once the fast path has settled.
+                if (hotScan.openKind == nil &&
+                    (pendingLineFastPath != nil || Self.settlePendingLineFastPath(line) != nil)) ||
+                   continuationFastPathEligible(line) {
+                    hotCount = hotScan.blocks.count + 1
+                } else {
+                    // Every other open kind's pending line is ambiguous until `\n` arrives --
+                    // dry-run first to count blocks, then materialize for real once, below.
+                    var transient = hotScan
+                    Self.step(line, into: &transient, dryRun: true)
+                    if transient.pendingSealBlockCount > hotScan.pendingSealBlockCount {
+                        scanCounters.partialLineSeals += 1
+                    }
+                    hotCount = transient.blocks.count
+                    if transient.openKind != nil { hotCount += 1 }
+                }
+                materializeNonFenceHotBlocksState()
+            }
+        } else if hotScan.openKind != nil {
+            hotCount += 1
+        }
+        hotBlockIDs = reconciledIDs(existing: hotBlockIDs, count: hotCount)
+    }
+
+    /// Finds the first "\n" in `line` at or after `fromByte`, without scanning any bytes before
+    /// it -- keeps the newline check bounded by how much is new, not by the pending line's total
+    /// length so far.
+    private static func firstNewline(in line: String, fromByte: Int) -> String.Index? {
+        let bytes = line.utf8
+        let start = bytes.index(bytes.startIndex, offsetBy: fromByte)
+        return line[start...].firstIndex(of: "\n")
+    }
+
+    /// Rebuilds `hotBlocksState` from `hotScan` alone (no pending trailing line to merge). Cheap:
+    /// `blockFromCache` shares `cache.text`'s buffer via COW, no copy happens here.
+    private mutating func rebuildHotBlocksStateFromScan() {
+        var hot = hotScan.blocks
+        if let kind = hotScan.openKind, let cache = hotScan.openBlockCache {
+            hot.append(materializedOpenBlock(kind: kind, cache: cache, identity: sealedBlocks.count + hot.count))
+        }
+        hotBlocksState = hot
+    }
+
+    /// Classifies the trailing line against a scratch scan. The inline window keeps settled
+    /// runs across these materializations; the raw block text is still joined for consumers.
+    ///
+    /// `hotBlocksState[last].runs` mirrors `inlineWindow`'s own merge buffer -- drop it first so
+    /// that buffer stays uniquely-owned across calls (mirrors the `.text` clear-before/refresh-
+    /// after trick in `appendPendingCharsToFenceFastPath`, applied to inline runs instead).
+    private mutating func materializeNonFenceHotBlocksState() {
+        if !hotBlocksState.isEmpty { hotBlocksState[hotBlocksState.count - 1].runs = [] }
+
+        // Fast path #1: the pending line hasn't committed to an open block yet (`hotScan.openKind
+        // == nil`). Once its own kind (paragraph/blockquote/listItem) is settled, growing it here
+        // is O(delta) instead of re-running `step()` -- which would otherwise force a COW copy of
+        // `hotScan.openBlockCache.text` via `var scratch = hotScan` on every keystroke.
+        if hotScan.openKind == nil, let block = materializedPendingLineFastPath() {
+            var hot = hotScan.blocks
+            hot.append(block)
+            hotBlocksState = hot
+            scanCounters.hotFullMaterializations += 1
+            return
+        }
+        // Fast path #2: the pending line IS extending an already multi-line open paragraph or
+        // blockquote (`hotScan.openKind != nil`). Same COW hazard as fast path #1, just one line
+        // later -- see `materializedOpenContinuationFastPath`'s doc comment.
+        if let block = materializedOpenContinuationFastPath() {
+            var hot = hotScan.blocks
+            hot.append(block)
+            hotBlocksState = hot
+            scanCounters.hotFullMaterializations += 1
+            return
+        }
+        pendingLineFastPath = nil
+
+        var scratch = hotScan
+        Self.step(Substring(hotPendingLine), into: &scratch)
+        var hot = scratch.blocks
+        if let kind = scratch.openKind, let cache = scratch.openBlockCache {
+            hot.append(materializedOpenBlock(kind: kind, cache: cache, identity: sealedBlocks.count + hot.count))
+        }
+        hotBlocksState = hot
+        scanCounters.hotFullMaterializations += 1
+    }
+
+    /// True when the still-open trailing `line` is guaranteed to just extend the CURRENT
+    /// `.paragraph`/`.blockquote` open block once it completes. Shared by `append`'s block-count
+    /// dry run and `materializedOpenContinuationFastPath` -- both need to skip the exact but
+    /// O(line-length) `step()` classification for the same reason (see that function's doc).
+    /// Excludes `.listItem` (a plain continuation line under an open list item always closes it
+    /// and starts a new paragraph -- see `step()`'s final fallback) and the one-line-old
+    /// paragraph whose first line contains "|" (still eligible for retroactive promotion to
+    /// `.table`, so it must stay on the slow, exact path).
+    private func continuationFastPathEligible(_ line: Substring) -> Bool {
+        guard let openKind = hotScan.openKind, openKind == .paragraph || openKind == .blockquote,
+              hotScan.openBlockCache != nil else { return false }
+        if openKind == .paragraph, hotScan.openLineCount == 1, hotScan.firstOpenLine?.contains("|") == true {
+            return false
+        }
+        let settledKind = pendingLineFastPath?.kind ?? Self.settlePendingLineFastPath(line)?.kind
+        switch (settledKind, openKind) {
+        case (.paragraph, .paragraph), (.blockquote, .blockquote): return true
+        default: return false
+        }
+    }
+
+    /// Growing the still-uncommitted trailing line of an ALREADY multi-line open paragraph or
+    /// blockquote had no fast path: the slow branch below runs a real (non-dry-run) `step()` on
+    /// a scratch copy of `hotScan` every keystroke, which mutates `scratch.openBlockCache!.text`
+    /// -- since that buffer is still COW-shared with the real `hotScan.openBlockCache!.text`,
+    /// every keystroke forced a full copy of the WHOLE open block's accumulated text, i.e.
+    /// O(open-block-size) per keystroke (the exact defect class `PendingLineFastPath` fixes for
+    /// a not-yet-multi-line block, one line later). See `continuationFastPathEligible` for why
+    /// this is safe to take.
+    private mutating func materializedOpenContinuationFastPath() -> ParsedMDBlock? {
+        let line = Substring(hotPendingLine)
+        guard continuationFastPathEligible(line), let openKind = hotScan.openKind else { return nil }
+        if pendingLineFastPath == nil {
+            guard let settled = Self.settlePendingLineFastPath(line) else { return nil }
+            pendingLineFastPath = PendingLineFastPath(
+                kind: settled.kind,
+                text: hotScan.openBlockCache!.text + "\n" + settled.text,
+                consumedByteCount: settled.consumedByteCount
+            )
+        } else if pendingLineFastPath!.consumedByteCount != line.utf8.count {
+            if !hotBlocksState.isEmpty { hotBlocksState[hotBlocksState.count - 1].text = "" }
+            let deltaByteCount = Self.extendPendingLineFastPath(&pendingLineFastPath!, line: line)
+            scanCounters.pendingLineFastPathBytesCopiedTotal += deltaByteCount
+        }
+        guard let fast = pendingLineFastPath else { return nil }
+        scanCounters.pendingLineFastPathAppends += 1
+        let identity = sealedBlocks.count + hotScan.blocks.count
+        return materializedOpenBlock(kind: openKind, cache: OpenBlockCache(kind: openKind, text: fast.text), identity: identity)
+    }
+
+    /// Tries to settle (or extend an already-settled) `PendingLineFastPath` for the still-open
+    /// trailing line. Returns nil when the kind isn't settled yet or isn't fast-pathed (heading,
+    /// fence/mathBlock/image openers) -- callers fall back to the exact `step()` path then.
+    private mutating func materializedPendingLineFastPath() -> ParsedMDBlock? {
+        let line = Substring(hotPendingLine)
+        if pendingLineFastPath == nil {
+            pendingLineFastPath = Self.settlePendingLineFastPath(line)
+        } else if pendingLineFastPath!.consumedByteCount != line.utf8.count {
+            // The previous call's ParsedMDBlock.text (mirrored into hotBlocksState below) aliases
+            // this same String buffer -- drop that reference first, or `fast.text +=` below forces
+            // a full COW copy of the whole line on every keystroke (the same hazard the `.text`
+            // clear-before/refresh-after trick in `appendPendingCharsToFenceFastPath` guards against
+            // for the fence buffer).
+            if !hotBlocksState.isEmpty { hotBlocksState[hotBlocksState.count - 1].text = "" }
+            let deltaByteCount = Self.extendPendingLineFastPath(&pendingLineFastPath!, line: line)
+            scanCounters.pendingLineFastPathBytesCopiedTotal += deltaByteCount
+        }
+        guard let fast = pendingLineFastPath else { return nil }
+        scanCounters.pendingLineFastPathAppends += 1
+
+        let identity = sealedBlocks.count + hotScan.blocks.count
+        switch fast.kind {
+        case .paragraph:
+            return materializedOpenBlock(
+                kind: .paragraph, cache: OpenBlockCache(kind: .paragraph, text: fast.text), identity: identity
+            )
+        case .blockquote:
+            return materializedOpenBlock(
+                kind: .blockquote, cache: OpenBlockCache(kind: .blockquote, text: fast.text), identity: identity
+            )
+        case .listItem(let ordered, let number, let depth, let checked):
+            let kind = MarkdownBlockKind.listItem(ordered: ordered, number: number, depth: depth, checked: checked)
+            let result = inlineWindow.runs(for: fast.strippedText ?? "", kind: kind, identity: identity)
+            scanCounters.tier2CharsTokenizedTotal += result.tokenizedBytes
+            return ParsedMDBlock(kind: kind, text: fast.text, runs: result.runs)
+        }
+    }
+
+    private mutating func materializedOpenBlock(
+        kind: MarkdownBlockKind, cache: OpenBlockCache, identity: Int
+    ) -> ParsedMDBlock {
+        switch kind {
+        case .paragraph, .heading, .blockquote:
+            let result = inlineWindow.runs(for: cache.text, kind: kind, identity: identity)
+            scanCounters.tier2CharsTokenizedTotal += result.tokenizedBytes
+            return ParsedMDBlock(kind: kind, text: cache.text, runs: result.runs)
+        default:
+            let block = Self.blockFromCache(kind: kind, cache: cache)
+            if case .listItem = kind {
+                scanCounters.tier2CharsTokenizedTotal += cache.text.utf8.count
+            }
+            return block
+        }
+    }
+
+    /// O(delta) fast path: merges only newly-arrived `hotPendingLine` chars into the open
+    /// fence/mathBlock's text. `hotScan.openBlockCache!.text` is the buffer that grows;
+    /// `hotBlocksState[last].text` is a mirror, cleared before and refreshed after each
+    /// mutation so it's always uniquely-owned (no COW copy -- the round-3 bug this replaces).
+    private mutating func appendPendingCharsToFenceFastPath() {
+        guard hotScan.openBlockCache != nil, !hotBlocksState.isEmpty else {
+            rebuildHotBlocksStateFromScan()
+            scanCounters.hotFullMaterializations += 1
+            return
+        }
+        let last = hotBlocksState.count - 1
+        hotBlocksState[last].text = ""
+        if materializedPendingByteCount == 0 {
+            hotScan.openBlockCache!.text += "\n"
+        }
+        let bytes = hotPendingLine.utf8
+        let deltaStart = bytes.index(bytes.startIndex, offsetBy: materializedPendingByteCount)
+        let deltaByteCount = hotPendingLine.utf8.distance(from: deltaStart, to: bytes.endIndex)
+        hotScan.openBlockCache!.text += hotPendingLine[deltaStart...]
+        hotBlocksState[last].text = hotScan.openBlockCache!.text
+        materializedPendingByteCount = hotPendingLine.utf8.count
+        scanCounters.hotFastPathAppends += 1
+        scanCounters.fenceBytesCopiedTotal += deltaByteCount
+    }
+
+    /// Moves any newly-sealed prefix out of `hotScan.blocks` into `sealedBlocks` permanently,
+    /// truncating `hotScan` back to just the still-hot remainder. Called right after any
+    /// `step()` that may have advanced `hotScan.pendingSealBlockCount`.
+    private mutating func sealCommittedPrefixIfNeeded() {
+        let sealedCount = min(hotScan.pendingSealBlockCount, hotScan.blocks.count)
+        guard sealedCount > 0 else { return }
+        let newlySealed = Array(hotScan.blocks[0..<sealedCount])
+        let sealedIDs = reconciledIDs(existing: hotBlockIDs, count: newlySealed.count)
+        sealedBlocks.append(contentsOf: newlySealed)
+        sealedBlockIDs.append(contentsOf: sealedIDs)
+        hotBlockIDs = Array(hotBlockIDs.dropFirst(newlySealed.count))
+        hotScan.blocks.removeFirst(sealedCount)
+        hotScan.pendingSealBlockCount = 0
     }
 
     /// Builds the `[Block]` list a caller feeds into `diff(previous:new:frontier:)` —
@@ -412,9 +711,10 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
     public func blockList<ID: Hashable & Sendable>(
         itemID: ID, width: CGFloat, theme: MarkdownTheme = .default
     ) -> [Block] {
+        let hot = hotBlocksState
         var blocks: [Block] = []
-        blocks.reserveCapacity(sealedBlocks.count + hotBlocksState.count)
-        let combined = sealedBlocks + hotBlocksState
+        blocks.reserveCapacity(sealedBlocks.count + hot.count)
+        let combined = sealedBlocks + hot
         let lastIndex = combined.count - 1
         for (index, pair) in zip(combined, sealedBlockIDs + hotBlockIDs).enumerated() {
             let lifecycle: BlockLifecycle = index < sealedBlocks.count ? .sealed : .hot
@@ -736,7 +1036,7 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
     /// `listMarkerInfo` (decides `MarkdownBlockKind.listItem`'s `checked`) and `stripListMarker`
     /// (drops the marker from rendered content), so the two can't disagree on what counts as a
     /// task marker.
-    private static func taskMarkerChecked(_ rest: Substring) -> Bool? {
+    static func taskMarkerChecked(_ rest: Substring) -> Bool? {
         let chars = Array(rest.prefix(4))
         guard chars.count >= 3, chars[0] == "[", chars[2] == "]" else { return nil }
         guard chars.count == 3 || chars[3] == " " else { return nil }
@@ -751,7 +1051,7 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
     /// `stripListMarker` helper, so runs never disagree with what's painted. codeFence/table/
     /// thematicBreak never render as free-form styled text, so they get no runs — a `.table`
     /// block's cells are tokenized separately, per cell, into `ParsedMDBlock.tableRows`.
-    private static func tokenizableRuns(for kind: MarkdownBlockKind, text: String) -> [InlineRun] {
+    static func tokenizableRuns(for kind: MarkdownBlockKind, text: String) -> [InlineRun] {
         switch kind {
         case .paragraph, .heading, .blockquote:
             return inlineRuns(text)
@@ -813,457 +1113,4 @@ public struct IncrementalMarkdownParser: Sendable, Equatable {
         return lines.joined(separator: "\n")
     }
 
-    // MARK: - Tail parse
-
-    private struct TailParseResult {
-        var sealed: [ParsedMDBlock]
-        var hot: [ParsedMDBlock]
-        var cutIndex: String.Index
-    }
-
-    /// Line-by-line scan of the hot tail: everything before the last unprotected blank
-    /// line (not inside an open fence or container) is sealed. A just-closed fence is an
-    /// additional, unconditional seal point — CommonMark never reopens a closed block.
-    private static func parseTail(_ source: String) -> TailParseResult {
-        var blocks: [ParsedMDBlock] = []
-        var pendingSealBlockCount = 0
-        var pendingSealCut = source.startIndex
-
-        // Lines, each paired with the source index just past its line terminator (or
-        // `source.endIndex` for a final, still-being-typed unterminated line).
-        var lines: [(text: Substring, lineEnd: String.Index)] = []
-        var cursor = source.startIndex
-        while cursor < source.endIndex {
-            if let newline = source[cursor...].firstIndex(of: "\n") {
-                let lineEnd = source.index(after: newline)
-                lines.append((source[cursor..<newline], lineEnd))
-                cursor = lineEnd
-            } else {
-                lines.append((source[cursor...], source.endIndex))
-                cursor = source.endIndex
-            }
-        }
-
-        var openKind: MarkdownBlockKind?
-        var openLines: [Substring] = []
-        var inFence = false
-        var fenceMarker: Substring = ""
-        var inMathBlock = false
-        var mathBlockCloseMarker = ""
-        var inContainer = false
-        var containerBlankSeen = false
-        var containerBlankCut: (index: String.Index, count: Int)?
-
-        func finalizeOpenBlock() {
-            guard let kind = openKind, !openLines.isEmpty else { return }
-            blocks.append(Self.makeParsedBlock(kind: kind, lines: openLines))
-            openKind = nil
-            openLines = []
-        }
-
-        func isBlank(_ line: Substring) -> Bool {
-            line.allSatisfy { $0 == " " || $0 == "\t" }
-        }
-        func leadingSpaces(_ line: Substring) -> Int {
-            line.prefix { $0 == " " }.count
-        }
-        func isFenceOpen(_ line: Substring) -> (marker: Substring, language: String?)? {
-            let trimmed = line.drop { $0 == " " }
-            let marker: Substring
-            if trimmed.hasPrefix("```") {
-                marker = trimmed.prefix { $0 == "`" }
-            } else if trimmed.hasPrefix("~~~") {
-                marker = trimmed.prefix { $0 == "~" }
-            } else {
-                return nil
-            }
-            let info = trimmed.dropFirst(marker.count).trimmingCharacters(in: .whitespaces)
-            let language = info.split(separator: " ").first.map(String.init)
-            return (marker, language)
-        }
-        // `$$` / `\[` only opens block math at the start of a line (after optional leading
-        // spaces) — mid-paragraph occurrences stay literal, tokenized inline instead (see
-        // `inlineRuns`). `rest` is everything on the line after the opening marker, used to
-        // detect a same-line close (a one-line block).
-        func isMathBlockOpen(_ line: Substring) -> (closeMarker: String, rest: Substring)? {
-            let trimmed = line.drop { $0 == " " }
-            if trimmed.hasPrefix("$$") {
-                return ("$$", trimmed.dropFirst(2))
-            }
-            if trimmed.hasPrefix("\\[") {
-                return ("\\]", trimmed.dropFirst(2))
-            }
-            return nil
-        }
-        func isFenceClose(_ line: Substring, opening: Substring) -> Bool {
-            guard let openChar = opening.first else { return false }
-            var trimmed = line.drop { $0 == " " }
-            var count = 0
-            while let first = trimmed.first, first == openChar {
-                trimmed = trimmed.dropFirst()
-                count += 1
-            }
-            guard count >= opening.count else { return false }
-            return trimmed.allSatisfy { $0 == " " || $0 == "\t" }
-        }
-        func listMarkerInfo(_ line: Substring) -> (ordered: Bool, number: Int, depth: Int, checked: Bool?)? {
-            let spaces = leadingSpaces(line)
-            guard spaces <= 3 else { return nil }
-            let rest = line.drop { $0 == " " }
-            guard let first = rest.first else { return nil }
-            let depth = spaces / 2
-            if "-*+".contains(first) {
-                let after = rest.index(after: rest.startIndex)
-                guard after < rest.endIndex, rest[after] == " " else { return nil }
-                let content = rest[rest.index(after: after)...].drop { $0 == " " }
-                return (ordered: false, number: 0, depth: depth, checked: Self.taskMarkerChecked(content))
-            }
-            var idx = rest.startIndex
-            var digits = 0
-            while idx < rest.endIndex, rest[idx].isNumber {
-                idx = rest.index(after: idx)
-                digits += 1
-            }
-            guard digits > 0, idx < rest.endIndex, rest[idx] == "." || rest[idx] == ")" else { return nil }
-            let after = rest.index(after: idx)
-            guard after < rest.endIndex, rest[after] == " " else { return nil }
-            let number = Int(rest[rest.startIndex..<idx]) ?? 1
-            let content = rest[rest.index(after: after)...].drop { $0 == " " }
-            return (ordered: true, number: number, depth: depth, checked: Self.taskMarkerChecked(content))
-        }
-        func isListMarker(_ line: Substring) -> Bool {
-            listMarkerInfo(line) != nil
-        }
-        func isATXHeading(_ line: Substring) -> (level: Int, content: String)? {
-            guard leadingSpaces(line) == 0, line.first == "#" else { return nil }
-            var rest = line
-            var level = 0
-            while rest.first == "#" {
-                rest = rest.dropFirst()
-                level += 1
-                if level > 6 { return nil }
-            }
-            guard rest.isEmpty || rest.first == " " else { return nil }
-            var text = rest.drop { $0 == " " }
-            while let last = text.last, last == " " || last == "\t" {
-                text = text.dropLast()
-            }
-            // Optional CommonMark closing sequence: a trailing run of '#' preceded by
-            // whitespace (or nothing but the run itself) is stripped too.
-            var probe = text
-            var trailingHashes = 0
-            while probe.last == "#" {
-                probe = probe.dropLast()
-                trailingHashes += 1
-            }
-            if trailingHashes > 0, probe.isEmpty || probe.last == " " || probe.last == "\t" {
-                text = probe
-                while let last = text.last, last == " " || last == "\t" {
-                    text = text.dropLast()
-                }
-            }
-            return (level, String(text))
-        }
-        // Recognizes a line that consists of exactly `![alt](url)`, alone — same strictness
-        // as `isATXHeading`/`isThematicBreak` (leading spaces == 0). Alt text is only used to
-        // find the closing `]`; the URL substring is everything between the matching `(` and
-        // the line's final `)`, so a URL containing its own parentheses still round-trips.
-        // Returns nil while the line is still streaming (no closing `)` yet, or malformed),
-        // so a not-yet-complete image line degrades to ordinary paragraph text meanwhile
-        // instead of misparsing.
-        func isImageLine(_ line: Substring) -> URL? {
-            guard leadingSpaces(line) == 0 else { return nil }
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard trimmed.hasPrefix("!["), trimmed.hasSuffix(")"), trimmed.count > 3 else { return nil }
-            let body = trimmed.dropFirst(2).dropLast()
-            guard let closeBracket = body.firstIndex(of: "]") else { return nil }
-            let afterBracket = body.index(after: closeBracket)
-            guard afterBracket < body.endIndex, body[afterBracket] == "(" else { return nil }
-            let urlString = String(body[body.index(after: afterBracket)...])
-            guard !urlString.isEmpty, let url = URL(string: urlString) else { return nil }
-            return url
-        }
-        func isThematicBreak(_ line: Substring) -> Bool {
-            guard leadingSpaces(line) == 0 else { return false }
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard trimmed.count >= 3, let first = trimmed.first, "-*_".contains(first) else { return false }
-            return trimmed.allSatisfy { $0 == first }
-        }
-        func isBlockquoteMarker(_ line: Substring) -> Bool {
-            guard leadingSpaces(line) <= 3 else { return false }
-            return line.drop { $0 == " " }.first == ">"
-        }
-        // Validates a delimiter row AND parses its per-column alignment in the same pass —
-        // one source of truth for "is this a delimiter row" and "what does it say", so the
-        // promotion check and the alignment it commits to a `.table` block can never disagree.
-        func tableDelimiterAlignments(_ line: Substring) -> [TableColumnAlignment]? {
-            let t = line.trimmingCharacters(in: .whitespaces)
-            guard !t.isEmpty else { return nil }
-            let cells = t.split(separator: "|", omittingEmptySubsequences: true)
-            guard !cells.isEmpty else { return nil }
-            var alignments: [TableColumnAlignment] = []
-            alignments.reserveCapacity(cells.count)
-            for cell in cells {
-                let c = cell.trimmingCharacters(in: .whitespaces)
-                guard !c.isEmpty, c.contains("-") else { return nil }
-                for ch in c where ch != "-" && ch != ":" { return nil }
-                switch (c.hasPrefix(":"), c.hasSuffix(":")) {
-                case (true, true): alignments.append(.center)
-                case (true, false): alignments.append(.left)
-                case (false, true): alignments.append(.right)
-                case (false, false): alignments.append(.none)
-                }
-            }
-            return alignments
-        }
-        func isSetextUnderline(_ line: Substring) -> Int? {
-            let t = line.trimmingCharacters(in: .whitespaces)
-            guard !t.isEmpty else { return nil }
-            if t.allSatisfy({ $0 == "=" }) { return 1 }
-            if t.allSatisfy({ $0 == "-" }) { return 2 }
-            return nil
-        }
-
-        for (line, lineEnd) in lines {
-            if inFence {
-                openLines.append(line)
-                if isFenceClose(line, opening: fenceMarker) {
-                    inFence = false
-                    finalizeOpenBlock()
-                    // A closed fence is an unconditional seal point — see doc comment.
-                    pendingSealCut = lineEnd
-                    pendingSealBlockCount = blocks.count
-                }
-                continue
-            }
-
-            if inMathBlock {
-                openLines.append(line)
-                if line.trimmingCharacters(in: .whitespaces) == mathBlockCloseMarker {
-                    inMathBlock = false
-                    finalizeOpenBlock()
-                    // A closed math block is an unconditional seal point, same as a closed fence.
-                    pendingSealCut = lineEnd
-                    pendingSealBlockCount = blocks.count
-                }
-                continue
-            }
-
-            if isBlank(line) {
-                if inContainer {
-                    containerBlankSeen = true
-                    containerBlankCut = (lineEnd, blocks.count)
-                    continue
-                }
-                finalizeOpenBlock()
-                pendingSealCut = lineEnd
-                pendingSealBlockCount = blocks.count
-                continue
-            }
-
-            if let (marker, language) = isFenceOpen(line) {
-                finalizeOpenBlock()
-                inContainer = false
-                containerBlankSeen = false
-                inFence = true
-                fenceMarker = marker
-                openKind = .codeFence(language: language)
-                openLines = [line]
-                continue
-            }
-
-            if let (closeMarker, rest) = isMathBlockOpen(line) {
-                finalizeOpenBlock()
-                inContainer = false
-                containerBlankSeen = false
-                if rest.range(of: closeMarker) != nil {
-                    // Same-line close ("$$ E=mc^2 $$") — a one-line block, finalized right away
-                    // like a heading/thematic-break; `style()` strips both markers at render.
-                    openKind = .mathBlock
-                    openLines = [line]
-                    finalizeOpenBlock()
-                    continue
-                }
-                inMathBlock = true
-                mathBlockCloseMarker = closeMarker
-                openKind = .mathBlock
-                openLines = [line]
-                continue
-            }
-
-            if let (level, headingText) = isATXHeading(line) {
-                finalizeOpenBlock()
-                inContainer = false
-                containerBlankSeen = false
-                openKind = .heading(level: level)
-                openLines = [Substring(headingText)]
-                finalizeOpenBlock()
-                continue
-            }
-
-            if case .paragraph = openKind, openLines.count == 1, let level = isSetextUnderline(line) {
-                openKind = .heading(level: level)
-                continue
-            }
-
-            if isThematicBreak(line) {
-                finalizeOpenBlock()
-                inContainer = false
-                containerBlankSeen = false
-                openKind = .thematicBreak
-                openLines = [line]
-                finalizeOpenBlock()
-                continue
-            }
-
-            let imageLineMatch = isImageLine(line)
-            #if canImport(os) && DEBUG
-            if line.contains("![") {
-                markdownImageDiagnosticLog.debug("line contains '![': \(String(line), privacy: .public) matched=\(imageLineMatch != nil)")
-            }
-            #endif
-            if let url = imageLineMatch {
-                finalizeOpenBlock()
-                inContainer = false
-                containerBlankSeen = false
-                openKind = .image(url: url)
-                openLines = [line]
-                finalizeOpenBlock()
-                continue
-            }
-
-            if case .paragraph = openKind, openLines.count == 1, openLines[0].contains("|"),
-               let alignments = tableDelimiterAlignments(line) {
-                openKind = .table(alignments: alignments)
-                openLines.append(line)
-                continue
-            }
-            if case .table = openKind, line.contains("|") {
-                openLines.append(line)
-                continue
-            }
-
-            // A fresh column-0, non-marker line after a blank was seen inside an open container
-            // definitively closes it — retroactively promotes the withheld blank-line seal.
-            if inContainer, containerBlankSeen, !isListMarker(line), !isBlockquoteMarker(line), leadingSpaces(line) == 0 {
-                inContainer = false
-                containerBlankSeen = false
-                if let cut = containerBlankCut {
-                    pendingSealCut = cut.index
-                    pendingSealBlockCount = cut.count
-                }
-                containerBlankCut = nil
-            }
-
-            if let info = listMarkerInfo(line) {
-                finalizeOpenBlock()
-                inContainer = true
-                containerBlankSeen = false
-                openKind = .listItem(ordered: info.ordered, number: info.number, depth: info.depth, checked: info.checked)
-                openLines = [line]
-                finalizeOpenBlock()  // each list marker line is its own block
-                continue
-            }
-            if isBlockquoteMarker(line) {
-                if case .blockquote = openKind {
-                    openLines.append(line)
-                } else {
-                    finalizeOpenBlock()
-                    openKind = .blockquote
-                    openLines = [line]
-                }
-                inContainer = true
-                containerBlankSeen = false
-                continue
-            }
-
-            if openKind == nil {
-                openKind = .paragraph
-                openLines = [line]
-            } else if case .paragraph = openKind {
-                openLines.append(line)
-            } else {
-                finalizeOpenBlock()
-                openKind = .paragraph
-                openLines = [line]
-            }
-        }
-
-        // Whatever remains open stays hot — not finalized here, so it never looks sealed.
-        let sealedCount = min(pendingSealBlockCount, blocks.count)
-        let sealed = Array(blocks[0..<sealedCount])
-        var hot = Array(blocks[sealedCount...])
-        if let kind = openKind, !openLines.isEmpty {
-            hot.append(Self.makeParsedBlock(kind: kind, lines: openLines))
-        }
-        return TailParseResult(sealed: sealed, hot: hot, cutIndex: pendingSealCut)
-    }
-
-    /// Builds one `ParsedMDBlock` from an open/closing run of lines — the single construction
-    /// site `finalizeOpenBlock()` and the tail's trailing hot block both call, so they can't
-    /// drift on how `.table` blocks get their `tableRows` populated.
-    private static func makeParsedBlock(kind: MarkdownBlockKind, lines: [Substring]) -> ParsedMDBlock {
-        let text = lines.map(String.init).joined(separator: "\n")
-        var block = ParsedMDBlock(kind: kind, text: text, runs: Self.tokenizableRuns(for: kind, text: text))
-        if case .table(let alignments) = kind {
-            block.tableRows = Self.parseTableRows(lines: lines, columnCount: alignments.count)
-        }
-        return block
-    }
-
-    /// Builds `[[TableCell]]` from a `.table` block's raw lines: `lines[0]` is the header,
-    /// `lines[1]` is the delimiter row (skipped — it carries alignment, not cell content),
-    /// `lines[2...]` are body rows. Every row is split and tokenized through the same
-    /// `splitTableRowCells`/`inlineRuns` path so header and body cells can't disagree on shape.
-    private static func parseTableRows(lines: [Substring], columnCount: Int) -> [[TableCell]] {
-        guard columnCount > 0, lines.count >= 2 else { return [] }
-        var rows: [[TableCell]] = []
-        rows.reserveCapacity(lines.count - 1)
-        for (index, line) in lines.enumerated() where index != 1 {
-            let cells = Self.splitTableRowCells(line, columnCount: columnCount)
-            rows.append(cells.map { TableCell(text: $0, runs: inlineRuns($0)) })
-        }
-        return rows
-    }
-
-    /// Splits one raw table row line into cells per GFM rules: a leading/trailing `|` is
-    /// optional and stripped, `\|` is a literal pipe (never a column separator), and the
-    /// result is padded with empty cells or truncated to `columnCount` — ragged rows are
-    /// legal GFM (short rows padded, long rows truncated to the header's column count).
-    private static func splitTableRowCells(_ line: Substring, columnCount: Int) -> [String] {
-        var trimmed = Substring(line.trimmingCharacters(in: .whitespaces))
-        if trimmed.first == "|" { trimmed = trimmed.dropFirst() }
-        if let last = trimmed.last, last == "|" {
-            let beforeLast = trimmed.index(before: trimmed.endIndex)
-            let isEscaped = beforeLast > trimmed.startIndex && trimmed[trimmed.index(before: beforeLast)] == "\\"
-            if !isEscaped { trimmed = trimmed.dropLast() }
-        }
-
-        var cells: [String] = []
-        var current = ""
-        var chars = trimmed
-        while let ch = chars.first {
-            if ch == "\\", chars.dropFirst().first == "|" {
-                current.append("|")
-                chars = chars.dropFirst(2)
-                continue
-            }
-            if ch == "|" {
-                cells.append(current.trimmingCharacters(in: .whitespaces))
-                current = ""
-                chars = chars.dropFirst()
-                continue
-            }
-            current.append(ch)
-            chars = chars.dropFirst()
-        }
-        cells.append(current.trimmingCharacters(in: .whitespaces))
-
-        if cells.count < columnCount {
-            cells.append(contentsOf: repeatElement("", count: columnCount - cells.count))
-        } else if cells.count > columnCount {
-            cells = Array(cells.prefix(columnCount))
-        }
-        return cells
-    }
 }

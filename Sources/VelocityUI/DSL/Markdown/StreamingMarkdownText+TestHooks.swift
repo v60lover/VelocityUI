@@ -13,10 +13,15 @@
 final class StreamingMarkdownControllerTestHooks {
     /// Counts `style()` calls from `renderNodes` — a cache hit must not increment it.
     var styleCount = 0
+    var handoffBytesCopiedTotal = 0
+    /// Raw slice flatten plus the styled content assembled from runs for open blocks.
+    var renderBoundaryBytesCopiedTotal = 0
 }
 
 #if canImport(XCTest)
 extension StreamingMarkdownController {
     var _styleCallCount: Int { _testHooks.styleCount }
+    var _handoffBytesCopiedTotal: Int { _testHooks.handoffBytesCopiedTotal }
+    var _renderBoundaryBytesCopiedTotal: Int { _testHooks.renderBoundaryBytesCopiedTotal }
 }
 #endif

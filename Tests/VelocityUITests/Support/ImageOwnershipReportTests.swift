@@ -27,6 +27,7 @@ final class ImageOwnershipReportTests: XCTestCase {
         XCTAssertEqual(report.uniqueBytes, report.rows[0].heldBytes)
     }
 
+    #if canImport(UIKit)
     @MainActor
     func testEnvironmentReportSeesVisibleStoreImage() {
         let env = RenderEnvironment()
@@ -35,4 +36,5 @@ final class ImageOwnershipReportTests: XCTestCase {
         let report = env.debugImageReport()
         XCTAssertEqual(report.rows.first { $0.owner == "visible" }?.refCount, 1)
     }
+    #endif
 }

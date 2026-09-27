@@ -13,20 +13,75 @@ private let markdownImageLog = Logger(subsystem: "com.velocityui", category: "Ma
 
 extension IncrementalMarkdownParser {
 
+    /// Borrowed views of the current hot block. All three slices retain the same raw buffer.
+    struct OpenTextHandoff {
+        var frozen: Substring
+        var unsettled: Substring
+        var tail: Substring
+        var invalidatedLines: Range<Int>?
+
+        /// 0 only when verified: frozen/unsettled/tail are contiguous slices of one buffer, so
+        /// construction copied nothing. Falls back to the full byte count if that ever stops
+        /// being true, so a future regression shows up here instead of being asserted away.
+        var bytesCopied: Int {
+            let totalBytes = frozen.utf8.count + unsettled.utf8.count + tail.utf8.count
+            guard let f = Self.contiguousStorage(frozen), let u = Self.contiguousStorage(unsettled),
+                  let t = Self.contiguousStorage(tail) else { return totalBytes }
+            let adjacent = f.base.advanced(by: f.count) == u.base && u.base.advanced(by: u.count) == t.base
+            return adjacent ? 0 : totalBytes
+        }
+
+        private static func contiguousStorage(_ s: Substring) -> (base: UnsafeRawPointer, count: Int)? {
+            s.utf8.withContiguousStorageIfAvailable { buf in
+                buf.baseAddress.map { (UnsafeRawPointer($0), buf.count) }
+            }.flatMap { $0 }
+        }
+    }
+
     /// One block's identity/lifecycle plus its parsed content, so a caching owner can decide
     /// per block whether to reuse a stored `TextNode` or call `style(_:)`.
     struct RenderableBlock {
         var blockID: BlockID
         var isSealed: Bool
         var parsed: ParsedMDBlock
+        var openText: OpenTextHandoff?
+
+        /// `parsed.text` is already the flattened frozen+unsettled+tail content (they're always
+        /// adjacent slices of it -- see `openTextHandoff(for:at:)`), so there's nothing to copy.
+        func parsedAtRenderBoundary() -> (block: ParsedMDBlock, bytesCopied: Int) {
+            (parsed, 0)
+        }
     }
 
     /// Sealed blocks then the open hot region — the raw material `renderNodes` styles into
     /// `TextNode`s.
     var renderableBlocks: [RenderableBlock] {
         zip(sealedBlocks + hotBlocksState, sealedBlockIDs + hotBlockIDs).enumerated().map { index, pair in
-            RenderableBlock(blockID: pair.1, isSealed: index < sealedBlocks.count, parsed: pair.0)
+            let isSealed = index < sealedBlocks.count
+            return RenderableBlock(
+                blockID: pair.1, isSealed: isSealed, parsed: pair.0,
+                openText: isSealed ? nil : openTextHandoff(for: pair.0, at: index)
+            )
         }
+    }
+
+    private func openTextHandoff(for block: ParsedMDBlock, at index: Int) -> OpenTextHandoff? {
+        guard index == sealedBlocks.count + hotBlocksState.count - 1 else { return nil }
+        switch block.kind {
+        case .paragraph, .heading, .blockquote: break
+        default: return nil
+        }
+        let bytes = block.text.utf8
+        let hasInlineWindow = inlineWindow.identity == index && inlineWindow.kind == block.kind
+        let frozenCount = hasInlineWindow ? inlineWindow.frozenByteCount : 0
+        let frozenEnd = bytes.index(bytes.startIndex, offsetBy: min(frozenCount, bytes.count))
+        let pendingCount = min(hotPendingLine.utf8.count, bytes.distance(from: frozenEnd, to: bytes.endIndex))
+        let tailStart = bytes.index(bytes.endIndex, offsetBy: -pendingCount)
+        return OpenTextHandoff(
+            frozen: block.text[..<frozenEnd], unsettled: block.text[frozenEnd..<tailStart],
+            tail: block.text[tailStart...],
+            invalidatedLines: hasInlineWindow ? inlineWindow.lastInvalidatedLineRange : nil
+        )
     }
 
     /// Layer-1 DSL bridge: one `TextNode` per block, sealed then hot, re-derived from scratch
@@ -53,40 +108,44 @@ extension IncrementalMarkdownParser {
     /// `isPendingTableHeader` must only be true for the last block in the full sealed+hot
     /// sequence — see `isPendingTableCandidate`. A non-trailing block matching that text shape
     /// has already been resolved as a plain paragraph by whatever followed it.
-    static func renderNode(for block: RenderableBlock, theme: MarkdownTheme, isPendingTableHeader: Bool = false) -> any RenderNode {
-        if case .image(let url) = block.parsed.kind {
+    static func renderNode(
+        for block: RenderableBlock, theme: MarkdownTheme, isPendingTableHeader: Bool = false
+    ) -> (node: any RenderNode, bytesCopied: Int) {
+        let (parsed, rawBytesCopied) = block.parsedAtRenderBoundary()
+        if case .image(let url) = parsed.kind {
             #if canImport(os) && DEBUG
-            markdownImageLog.debug("raw line: \(block.parsed.text, privacy: .public) -> parsed url: \(url.absoluteString, privacy: .public)")
+            markdownImageLog.debug("raw line: \(parsed.text, privacy: .public) -> parsed url: \(url.absoluteString, privacy: .public)")
             #endif
-            return AsyncImageNode(url: url)
+            return (AsyncImageNode(url: url), rawBytesCopied)
         }
-        let styled = Self.style(block.parsed, theme: theme, isPendingTableHeader: isPendingTableHeader)
+        let styled = Self.style(parsed, theme: theme, isPendingTableHeader: isPendingTableHeader)
+        let bytesCopied = rawBytesCopied + (block.openText == nil ? 0 : styled.content.utf8.count)
         let lifecycle: BlockLifecycle = block.isSealed ? .sealed : .hot
-        if case .codeFence(let language) = block.parsed.kind {
-            return CodeBlockNode(
+        if case .codeFence(let language) = parsed.kind {
+            return (CodeBlockNode(
                 language: language, rawCode: styled.content, font: theme.code,
                 blockID: block.blockID, blockLifecycle: lifecycle
-            )
+            ), bytesCopied)
         }
-        if case .table(let alignments) = block.parsed.kind {
-            return MarkdownTableNode(
-                tableRows: block.parsed.tableRows, alignments: alignments, font: theme.body,
+        if case .table(let alignments) = parsed.kind {
+            return (MarkdownTableNode(
+                tableRows: parsed.tableRows, alignments: alignments, font: theme.body,
                 blockID: block.blockID, blockLifecycle: lifecycle
-            )
+            ), bytesCopied)
         }
-        if case .mathBlock = block.parsed.kind {
-            return MathBlockNode(
+        if case .mathBlock = parsed.kind {
+            return (MathBlockNode(
                 rawTeX: styled.content, font: theme.body,
                 blockID: block.blockID, blockLifecycle: lifecycle
-            )
+            ), bytesCopied)
         }
-        let decoration = IncrementalMarkdownParser.textDecoration(for: block.parsed.kind)
-        return TextNode(
+        let decoration = IncrementalMarkdownParser.textDecoration(for: parsed.kind)
+        return (TextNode(
             styled.content, font: styled.font, color: decoration.color, runs: styled.runs,
             leadingBarColor: decoration.barColor, leadingBarWidth: decoration.barWidth, leadingBarGap: decoration.barGap,
             ruleColor: decoration.ruleColor,
             blockID: block.blockID, blockLifecycle: lifecycle
-        )
+        ), bytesCopied)
     }
 
     private func _renderNodes(theme: MarkdownTheme) -> [any RenderNode] {
@@ -94,7 +153,7 @@ extension IncrementalMarkdownParser {
         let lastIndex = blocks.count - 1
         return blocks.enumerated().map { index, block in
             let isPending = index == lastIndex && !block.isSealed && IncrementalMarkdownParser.isPendingTableCandidate(block.parsed)
-            return Self.renderNode(for: block, theme: theme, isPendingTableHeader: isPending)
+            return Self.renderNode(for: block, theme: theme, isPendingTableHeader: isPending).node
         }
     }
 }
@@ -140,16 +199,18 @@ public final class StreamingMarkdownController {
         let blocks = parser.renderableBlocks
         let lastIndex = blocks.count - 1
         return blocks.enumerated().map { index, block in
+            _testHooks.handoffBytesCopiedTotal += block.openText?.bytesCopied ?? 0
             if block.isSealed, let cached = sealedNodes[block.blockID] {
                 return cached
             }
             _testHooks.styleCount += 1
             let isPending = index == lastIndex && !block.isSealed && IncrementalMarkdownParser.isPendingTableCandidate(block.parsed)
-            let node = IncrementalMarkdownParser.renderNode(for: block, theme: theme, isPendingTableHeader: isPending)
+            let rendered = IncrementalMarkdownParser.renderNode(for: block, theme: theme, isPendingTableHeader: isPending)
+            _testHooks.renderBoundaryBytesCopiedTotal += rendered.bytesCopied
             if block.isSealed {
-                sealedNodes[block.blockID] = node
+                sealedNodes[block.blockID] = rendered.node
             }
-            return node
+            return rendered.node
         }
     }
 

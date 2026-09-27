@@ -28,6 +28,7 @@ final class TextSelectionOffsetMapTests: XCTestCase {
         XCTAssertEqual(map.copiedText(kitRange: NSRange(location: 1, length: 4), content: content), " and")
     }
 
+    #if canImport(UIKit)
     func testBuilderRecordsMapOnlyWhenAsked() {
         var map: TextSelectionOffsetMap? = TextSelectionOffsetMap()
         let d = TextDescriptor(
@@ -38,4 +39,5 @@ final class TextSelectionOffsetMapTests: XCTestCase {
         _ = d.attributedString(formulaCache: nil, fontProvider: nil, scale: 1, offsetMap: &map)
         XCTAssertEqual(map?.copiedText(kitRange: NSRange(location: 1, length: 3), content: "hello"), "ell")
     }
+    #endif
 }

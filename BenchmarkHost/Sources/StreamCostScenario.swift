@@ -12,6 +12,9 @@ enum StreamCostScenario {
                 StreamDataset.StreamTurn(userMessage: "Question \($0.offset)", assistantChunks: $0.element)
             }
         }
+        if name == "large-stress" {
+            return StreamStressDataset.turns()
+        }
         let fixture: StreamFixture
         switch name {
         case "table-501-stable": fixture = .table(rows: 501, widths: .stable)

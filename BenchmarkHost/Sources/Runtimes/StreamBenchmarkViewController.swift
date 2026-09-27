@@ -229,18 +229,28 @@ final class StreamBenchmarkViewController: UIViewController {
         Task { [weak self] in
             try? await Task.sleep(for: self?.userMessageLatency ?? .zero)
             guard let self else { return }
+            Self.logFootprint("turn \(index + 1) before user bubble")
             self.store.addUserMessage(turn.userMessage)
             try? await Task.sleep(for: self.responseLatency)
+            Self.logFootprint("turn \(index + 1) user bubble +2s")
             self.store.beginAssistantMessage()
             self.manualDriver.start(tokens: turn.assistantChunks, tokensPerSecond: self.tokensPerSecond, onToken: { [weak self] token in
                 self?.deliver(token)
             }, onEnd: { [weak self] in
+                Self.logFootprint("turn \(index + 1) end")
+                // Seals land on the next publish, so sample again once they've had time to run.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { Self.logFootprint("turn \(index + 1) +2s") }
                 if let self, index + 1 >= self.turns.count {
                     self.printCostReport()
                 }
                 self?.driveManualTurns(startingAt: index + 1)
             })
         }
+    }
+
+    private static func logFootprint(_ label: String) {
+        let mb = Double(AllocationProbe.currentPhysFootprint()) / 1_048_576
+        print("[memory] \(label): phys_footprint=\(String(format: "%.1f", mb)) MB")
     }
 }
 

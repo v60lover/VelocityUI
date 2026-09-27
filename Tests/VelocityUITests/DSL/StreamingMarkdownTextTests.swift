@@ -310,4 +310,91 @@ final class StreamingMarkdownTextTests: XCTestCase {
         XCTAssertEqual(heading.font.size, 21)
         XCTAssertEqual(heading.font.weight, VFontDescriptor.regularWeight)
     }
+
+    // MARK: - Borrowed open text handoff
+
+    func testRenderableBlocks_OpenParagraphHeadingAndQuoteExposeBorrowedSlices() throws {
+        let fixtures = ["# Heading", "> quoted text", "plain paragraph"]
+
+        for source in fixtures {
+            var parser = IncrementalMarkdownParser()
+            parser.append(source)
+
+            let block = try XCTUnwrap(parser.renderableBlocks.last)
+            let handoff = try XCTUnwrap(block.openText, "Missing open handoff for \(source), kind \(block.parsed.kind), inline kind \(String(describing: parser.inlineWindow.kind))")
+            XCTAssertEqual(
+                String(handoff.frozen) + String(handoff.unsettled) + String(handoff.tail),
+                block.parsed.text
+            )
+            XCTAssertEqual(handoff.frozen.utf8.count + handoff.unsettled.utf8.count + handoff.tail.utf8.count,
+                           block.parsed.text.utf8.count)
+            XCTAssertEqual(handoff.bytesCopied, 0)
+        }
+    }
+
+    @MainActor
+    func testStreamingMarkdownController_LongCharacterStreamCopiesOnlyAtRenderBoundary() {
+        let controller = StreamingMarkdownController()
+        let source = String(repeating: "plain line\n", count: 24) + "tail"
+        var expectedRenderBytes = 0
+
+        for character in source {
+            controller.append(String(character))
+            // R3 fix: render boundary no longer re-flattens already-flat block text, so this is
+            // styled content only, not raw-flatten + styled.
+            let nodes = controller.renderNodes
+            expectedRenderBytes += (nodes.last as? TextNode)?.content.utf8.count ?? 0
+        }
+
+        XCTAssertEqual(controller._handoffBytesCopiedTotal, 0,
+                       "borrowed slices must not copy bytes when the DSL handoff is built")
+        XCTAssertEqual(controller._renderBoundaryBytesCopiedTotal, expectedRenderBytes,
+                       "the named render boundary must account for each flattened open block")
+        let handoff = controller.parser.renderableBlocks.last?.openText
+        XCTAssertNotNil(handoff)
+        XCTAssertGreaterThan(handoff?.frozen.utf8.count ?? 0, 0)
+        XCTAssertEqual(handoff?.tail, "tail")
+
+        controller.append("\n\n")
+        _ = controller.renderNodes
+        let afterSeal = controller._renderBoundaryBytesCopiedTotal
+        _ = controller.renderNodes
+        XCTAssertEqual(controller._renderBoundaryBytesCopiedTotal, afterSeal,
+                       "reusing sealed cached nodes must not flatten their text again")
+    }
+
+    func testRenderableBlocks_RollbackInvalidatedRangeReachesOpenTextHandoff() throws {
+        let source = "`code begins\n" + String(repeating: "plain line\n", count: 19) + "` closes here"
+        var parser = IncrementalMarkdownParser()
+        for character in source { parser.append(String(character)) }
+
+        XCTAssertEqual(parser.inlineRollbackCount, 1, "Precondition: the late closer must roll back a frozen prefix")
+        let block = try XCTUnwrap(parser.renderableBlocks.last)
+        let handoff = try XCTUnwrap(block.openText)
+        XCTAssertEqual(handoff.invalidatedLines, 0..<21)
+        XCTAssertEqual(
+            String(handoff.frozen) + String(handoff.unsettled) + String(handoff.tail),
+            block.parsed.text
+        )
+    }
+
+    @MainActor
+    func testStreamingMarkdownController_OpenTextContentAndRunsMatchBlockList() {
+        let controller = StreamingMarkdownController()
+        controller.append("**bold** _italic_ `code` ~~strike~~ [link](https://example.com)\n\n")
+        controller.append("still **growing**")
+
+        let nodes = controller.renderNodes
+        let blocks = controller.parser.blockList(itemID: "msg", width: 300)
+        XCTAssertEqual(nodes.count, blocks.count)
+
+        for (node, block) in zip(nodes, blocks) {
+            guard let textNode = node as? TextNode,
+                  case .text(let descriptor) = block.fragment.content else {
+                return XCTFail("each fixture block must render as a text node and text fragment")
+            }
+            XCTAssertEqual(textNode.content, descriptor.content)
+            XCTAssertEqual(textNode.runs, descriptor.runs)
+        }
+    }
 }

@@ -41,7 +41,7 @@ SOURCES_DIR="Sources"
 ALLOWLIST=(
   "Sources/VelocityUI/ScrollContainer/FeedScrollView+Items.swift"
   "Sources/VelocityUI/ScrollContainer/RenderCell.swift"
-  "Sources/VelocityUI/Pipeline/IncrementalMarkdownParser.swift"
+  "Sources/VelocityUI/Pipeline/Markdown/IncrementalMarkdownParser.swift"
   "Sources/VelocityUI/Pipeline/FrozenBitmapStore.swift"
   "Sources/VelocityUI/Pipeline/HotBlockRasterizer.swift"
   "Sources/VelocityUI/Pipeline/HotBlockMeasurer.swift"

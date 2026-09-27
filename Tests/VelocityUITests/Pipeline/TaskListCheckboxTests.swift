@@ -56,6 +56,55 @@ final class TaskListCheckboxTests: XCTestCase {
         XCTAssertEqual(checked, true, "an ordered checked task item must parse to checked == true")
     }
 
+    func testTaskCheckboxAppearsWhenMarkerCompletesWithoutNewline() {
+        for (marker, expectedChecked, glyph) in [("- [ ]", false, "☐"), ("- [x]", true, "☑")] {
+            var parser = IncrementalMarkdownParser()
+
+            for (index, character) in marker.enumerated() {
+                parser.append(String(character))
+                if index < marker.count - 1 {
+                    let partialBlocks = parser.blockList(itemID: "msg", width: 300)
+                    XCTAssertFalse(
+                        partialBlocks.contains { block in
+                            guard case .text(let descriptor) = block.fragment.content else { return false }
+                            return descriptor.content.contains("☐") || descriptor.content.contains("☑")
+                        },
+                        "a partial task marker must not render a checkbox: \(String(marker.prefix(index + 1)))"
+                    )
+                }
+            }
+
+            assertTaskCheckbox(expectedChecked, glyph: glyph, text: "", parser: parser)
+
+            parser.append(" buy milk")
+            assertTaskCheckbox(expectedChecked, glyph: glyph, text: "buy milk", parser: parser)
+        }
+    }
+
+    private func assertTaskCheckbox(
+        _ expectedChecked: Bool, glyph: String, text: String, parser: IncrementalMarkdownParser,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        guard let block = parser.hotBlocksState.first,
+              case .listItem(_, _, _, let checked) = block.kind else {
+            XCTFail("task marker must be classified as a list item", file: file, line: line)
+            return
+        }
+        XCTAssertEqual(checked, expectedChecked, file: file, line: line)
+
+        let rendered = parser.blockList(itemID: "msg", width: 300)
+        let renderedText = rendered.compactMap { block -> String? in
+            guard case .text(let descriptor) = block.fragment.content else { return nil }
+            return descriptor.content
+        }.joined()
+        XCTAssertFalse(renderedText.isEmpty, "task item must render as text", file: file, line: line)
+        XCTAssertTrue(renderedText.contains(glyph), "checkbox appears as soon as the marker completes", file: file, line: line)
+        XCTAssertFalse(renderedText.contains("[ ]") || renderedText.contains("[x]"), "task marker must be stripped", file: file, line: line)
+        if !text.isEmpty {
+            XCTAssertTrue(renderedText.contains(text), "task text remains visible", file: file, line: line)
+        }
+    }
+
     // MARK: - Rendering: glyph substitution, no literal marker
 
     func testUnorderedTaskItem_Unchecked_RendersCheckboxGlyph() {

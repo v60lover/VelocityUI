@@ -30,13 +30,19 @@ final class RuntimePickerViewController: UITableViewController {
     /// token list, and the user drives it by typing (`LiveLLMViewController`'s input bar) rather
     /// than the scenario auto-playing scripted turns.
     private static let liveLLMRowTitle = "VelocityUI — Live LLM"
-    private static let streamRowCount = 3
+    /// `StreamStressDataset` rows, split into text-only and code-only so a memory spike or scroll
+    /// lag can be pinned to one block kind without scrolling the transcript.
+    private static let largeStressTextRowTitle = "VelocityUI — Streaming Text (large stress — text)"
+    private static let largeStressCodeRowTitle = "VelocityUI — Streaming Text (large stress — code)"
+    private static let streamRowCount = 5
     private static let streamRowSubtitles = [
         "Canned transcript, auto-plays",
         "Same, with scroll-gated update deferral",
         "Real network reply, you type the prompt",
+        "Huge paragraphs + inline markup, no code",
+        "One 3000-line code fence",
     ]
-    private static let streamRowIcons = ["text.append", "hand.draw", "bolt.fill"]
+    private static let streamRowIcons = ["text.append", "hand.draw", "bolt.fill", "chart.bar.doc.horizontal", "curlybraces"]
 
     /// VelocityUI-0c5's `.grid(columns:spacing:)` DSL — same shape as the `Scenarios` section
     /// above (live-only, not part of the `runtimes` matrix `makeRuntimeVC` drives generically):
@@ -96,7 +102,10 @@ final class RuntimePickerViewController: UITableViewController {
             content.image = UIImage(systemName: "square.stack.3d.up")
         case 1:
             let row = indexPath.row
-            content.text = [Self.streamRowTitle, Self.streamDeferralRowTitle, Self.liveLLMRowTitle][row]
+            content.text = [
+                Self.streamRowTitle, Self.streamDeferralRowTitle, Self.liveLLMRowTitle,
+                Self.largeStressTextRowTitle, Self.largeStressCodeRowTitle,
+            ][row]
             content.secondaryText = Self.streamRowSubtitles[row]
             content.image = UIImage(systemName: Self.streamRowIcons[row])
         default:
@@ -131,6 +140,8 @@ final class RuntimePickerViewController: UITableViewController {
                 hotBlockRasterizeEnabled: args.hotBlockRasterizeMode == .on,
                 gestureGatedDeferralEnabled: indexPath.row == 1,
                 includeInterleavedBlocks: !args.streamTextOnly,
+                turns: indexPath.row == 3 ? StreamStressDataset.textTurns()
+                    : indexPath.row == 4 ? StreamStressDataset.codeTurns() : StreamDataset.turns(),
                 tokensPerSecond: args.streamTokensPerSecond
             )
             navigationController?.pushViewController(vc, animated: true)
