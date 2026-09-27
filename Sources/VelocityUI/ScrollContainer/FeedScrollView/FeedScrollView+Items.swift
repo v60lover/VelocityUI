@@ -409,11 +409,13 @@ extension FeedScrollView {
         }
         let itemID = items[nextIdx].id
         let retainedResult = documentChangeStarts[itemID].flatMap { start in
-            applyRetainedHotTextTail(
+            environment.streamingDeliveryCoordinator.applyRetainedHotTextTail(
+                environment: environment,
                 previousTable: inputs.previousTable, previousFragments: inputs.previousFragments,
                 newTable: inputs.newTable, itemID: itemID, changedStart: start,
                 width: width, scale: scale
-            ) ?? applyRetainedHotTableTail(
+            ) ?? environment.streamingDeliveryCoordinator.applyRetainedHotTableTail(
+                environment: environment,
                 previousTable: inputs.previousTable, previousFragments: inputs.previousFragments,
                 newTable: inputs.newTable, itemID: itemID, changedStart: start,
                 width: width, scale: scale,
