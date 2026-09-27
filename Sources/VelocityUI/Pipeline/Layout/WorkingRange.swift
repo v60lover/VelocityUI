@@ -100,5 +100,12 @@ public final class WorkingRange {
         rangeStart = 0
     }
 
+    /// Drops one stale item while preserving other resolved slots in the window.
+    public func invalidate(at index: Int) {
+        let offset = index - rangeStart
+        guard offset >= 0, offset < capacity else { return }
+        buffer[offset] = nil
+    }
+
     public var currentRangeStart: Int { rangeStart }
 }

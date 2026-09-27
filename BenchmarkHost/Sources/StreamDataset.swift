@@ -250,11 +250,15 @@ enum StreamDataset {
     ///   `AsyncImageNode`/`SpacerNode` ever spliced in. `true` (the default) is what the
     ///   acceptance-criteria run uses; `false` backs `--stream-text-only`, a text-only run with no
     ///   network/decode dependency, for a quick device sanity pass before the full comparison.
-    static func interleavedRenderNodes(textNodes: [any RenderNode], frontier: Int, includeInterleavedBlocks: Bool = true) -> [any RenderNode] {
+    static func interleavedRenderNodes(
+        textNodes: [any RenderNode], frontier: Int,
+        includeInterleavedBlocks: Bool = true, startIndex: Int = 0
+    ) -> [any RenderNode] {
         guard includeInterleavedBlocks else { return textNodes }
         var result: [any RenderNode] = []
         result.reserveCapacity(textNodes.count + imageAfterBlockIndices.count + 1)
-        for (index, node) in textNodes.enumerated() {
+        for (offset, node) in textNodes.enumerated() {
+            let index = startIndex + offset
             result.append(node)
             guard index < frontier else { continue }
             if imageAfterBlockIndices.contains(index) {

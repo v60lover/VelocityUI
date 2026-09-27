@@ -1,5 +1,7 @@
 // StreamingMarkdownText.swift
 
+import CoreGraphics
+
 #if canImport(os)
 import os
 #endif
@@ -63,6 +65,21 @@ extension IncrementalMarkdownParser {
                 openText: isSealed ? nil : openTextHandoff(for: pair.0, at: index)
             )
         }
+    }
+
+    func renderableBlock(at index: Int) -> RenderableBlock {
+        if index < sealedBlocks.count {
+            return RenderableBlock(
+                blockID: sealedBlockIDs[index], isSealed: true,
+                parsed: sealedBlocks[index], openText: nil
+            )
+        }
+        let hotIndex = index - sealedBlocks.count
+        let block = hotBlocksState[hotIndex]
+        return RenderableBlock(
+            blockID: hotBlockIDs[hotIndex], isSealed: false,
+            parsed: block, openText: openTextHandoff(for: block, at: index)
+        )
     }
 
     private func openTextHandoff(for block: ParsedMDBlock, at index: Int) -> OpenTextHandoff? {
@@ -180,6 +197,11 @@ public final class StreamingMarkdownController {
     /// construction; sealed blocks are cached, so changing it later won't restyle them.
     public let theme: MarkdownTheme
     private var sealedNodes: [BlockID: any RenderNode] = [:]
+    private var retainedNodes: [any RenderNode] = []
+    private var retainedSealedCount = 0
+    private var needsNodeUpdate = true
+    private var documentRevision: UInt64 = 0
+    private var changedStarts: [(revision: UInt64, index: Int)] = []
 
     public init(
         parser: IncrementalMarkdownParser = IncrementalMarkdownParser(),
@@ -190,28 +212,71 @@ public final class StreamingMarkdownController {
     }
 
     public func append(_ text: String) {
+        guard !text.isEmpty else { return }
+        let changedStart = parser.frontier
         parser.append(text)
+        needsNodeUpdate = true
+        documentRevision &+= 1
+        changedStarts.append((documentRevision, changedStart))
+        if changedStarts.count > 128 { changedStarts.removeFirst(changedStarts.count - 128) }
+    }
+
+    /// A single `RenderNode` standing in for this controller's whole document — sealed and hot
+    /// blocks alike. Return this directly as an item's content (in place of `renderNodes`
+    /// wrapped in a `VStackNode`) to let `FeedScrollView` splice only the changed suffix on
+    /// later updates instead of re-flattening and re-diffing every block.
+    ///
+    ///     let message = StreamingMarkdownController()
+    ///     message.append(token)
+    ///     return message.documentNode()
+    public func documentNode(alignment: VHorizontalAlignment = .leading, spacing: CGFloat = 8) -> RetainedDocumentNode {
+        RetainedDocumentNode(
+            documentID: ObjectIdentifier(self), revision: documentRevision,
+            alignment: alignment, spacing: spacing, controller: self
+        )
+    }
+
+    /// Returns the current changed suffix when `since` is still in the retained revision
+    /// window. A nil result asks the caller to rebuild through the ordinary DSL path.
+    /// `internal` — only `RetainedDocumentNode` calls this; nothing crosses Layer 1's public
+    /// surface through it.
+    func changedSuffix(since revision: UInt64?) -> (startBlock: Int, blocks: [any RenderNode])? {
+        guard let revision else { return (0, renderNodes) }
+        guard revision < documentRevision,
+              let first = changedStarts.first,
+              revision >= first.revision - 1 else { return nil }
+        let start = changedStarts.lazy.filter { $0.revision > revision }.map(\.index).min() ?? 0
+        return (start, Array(renderNodes.dropFirst(start)))
     }
 
     /// Same shape/order as `IncrementalMarkdownParser.renderNodes`. Sealed + cached -> returned
     /// as-is. Everything else is built via `style(_:)` and, if sealed, cached.
     public var renderNodes: [any RenderNode] {
-        let blocks = parser.renderableBlocks
-        let lastIndex = blocks.count - 1
-        return blocks.enumerated().map { index, block in
+        guard needsNodeUpdate else { return retainedNodes }
+        let sealedCount = parser.sealedBlocks.count
+        let blockCount = sealedCount + parser.hotBlocksState.count
+        let start = min(retainedSealedCount, sealedCount, retainedNodes.count)
+        retainedNodes.removeSubrange(start..<retainedNodes.count)
+        retainedNodes.reserveCapacity(blockCount)
+        for index in start..<blockCount {
+            let block = parser.renderableBlock(at: index)
             _testHooks.handoffBytesCopiedTotal += block.openText?.bytesCopied ?? 0
             if block.isSealed, let cached = sealedNodes[block.blockID] {
-                return cached
+                retainedNodes.append(cached)
+                continue
             }
             _testHooks.styleCount += 1
-            let isPending = index == lastIndex && !block.isSealed && IncrementalMarkdownParser.isPendingTableCandidate(block.parsed)
+            let isPending = index == blockCount - 1 && !block.isSealed && IncrementalMarkdownParser.isPendingTableCandidate(block.parsed)
             let rendered = IncrementalMarkdownParser.renderNode(for: block, theme: theme, isPendingTableHeader: isPending)
             _testHooks.renderBoundaryBytesCopiedTotal += rendered.bytesCopied
             if block.isSealed {
                 sealedNodes[block.blockID] = rendered.node
             }
-            return rendered.node
+            retainedNodes.append(rendered.node)
         }
+        retainedSealedCount = sealedCount
+        needsNodeUpdate = false
+        return retainedNodes
     }
 
     /// Stored test-only observability state. Always present (no XCTest guard) — production code

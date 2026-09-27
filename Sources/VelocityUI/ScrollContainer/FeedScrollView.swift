@@ -75,6 +75,10 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
     /// both — a violation causes stale UI, not a crash.
     public var itemSignature: ((Item) -> AnyHashable)? = nil
 
+    /// Optional equality check for snapshot producers. Equal items keep their prior NodeTable
+    /// even when the producer republishes the full item array.
+    public var itemEquals: ((Item, Item) -> Bool)? = nil
+
     // MARK: - Items
 
     /// Does NOT diff/relayout synchronously on assignment. A burst of assignments within one
@@ -109,6 +113,9 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
 
     /// NodeTables in display order. Parallel to `items`.
     var tables: [NodeTable] = []
+    var documentRevisions: [Item.ID: UInt64] = [:]
+    var documentChangeStarts: [Item.ID: Int] = [:]
+    var forceTableRebuild = false
     /// Absolute frames in scroll-content coordinates. Parallel to `items`.
     var resolvedFrames: [CGRect] = []
     /// Previous snapshot passed to RenderDiffer.
@@ -386,6 +393,8 @@ public final class FeedScrollView<Item: Identifiable & Sendable>: UIScrollView, 
         // itemSignature's cached tables were flattened at the old category and don't encode it,
         // so clear the cache to force every item back through flatten() at the new category.
         tableCache.removeAll(keepingCapacity: true)
+        documentRevisions.removeAll(keepingCapacity: true)
+        forceTableRebuild = true
         itemsDidChange(from: items)
     }
 

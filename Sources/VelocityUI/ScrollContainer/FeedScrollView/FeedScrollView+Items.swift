@@ -12,9 +12,11 @@ extension FeedScrollView {
         // Cleared unconditionally regardless of call site — any call fully resyncs
         // snapshot/tables to the current items, so a pending marker is always stale afterward.
         _pendingItemsDiffBase = nil
+        documentChangeStarts.removeAll(keepingCapacity: true)
+        defer { forceTableRebuild = false }
         guard let builder = cellBuilder else { return }
 
-        let nextTables = buildNextTables(using: builder)
+        let nextTables = buildNextTables(using: builder, oldItems: oldItems)
         let nextSnapshot = LayoutSnapshot(tables: nextTables)
         let changeSet = differ.diff(prev: snapshot, next: nextSnapshot)
 
@@ -29,6 +31,14 @@ extension FeedScrollView {
 
         commitSnapshot(nextSnapshot, nextTables: nextTables, oldFrames: oldFrames, survivors: survivors)
 
+        if plan.canDeferInvalidation,
+           changeSet.layoutChanged.allSatisfy({ visibleCells[$0.prevIdx] == nil }),
+           changeSet.survived.allSatisfy({ $0.prevIdx == $0.nextIdx }),
+           changeSet.appearanceChanged.isEmpty, changeSet.mediaChanged.isEmpty {
+            finishItemsChange(itemCountGrew: false, tookInPlaceFastPath: true)
+            return
+        }
+
         let tookInPlaceFastPath = reconcileVisibleCells(changeSet: changeSet, plan: plan)
 
         finishItemsChange(itemCountGrew: items.count > oldItems.count, tookInPlaceFastPath: tookInPlaceFastPath)
@@ -36,7 +46,9 @@ extension FeedScrollView {
 
     /// Builds `nextTables` from `items`, reusing a cached table when `itemSignature` reports an
     /// unchanged signature and evicting cache entries for items no longer present.
-    private func buildNextTables(using builder: @MainActor (Item) -> any RenderNode) -> [NodeTable] {
+    private func buildNextTables(
+        using builder: @MainActor (Item) -> any RenderNode, oldItems: [Item]
+    ) -> [NodeTable] {
         var nextTables: [NodeTable] = []
         nextTables.reserveCapacity(items.count)
         if let signature = itemSignature {
@@ -56,9 +68,40 @@ extension FeedScrollView {
                 for key in toRemove { tableCache.removeValue(forKey: key) }
             }
         } else {
+            var previousIndexByID: [Item.ID: Int] = [:]
+            previousIndexByID.reserveCapacity(oldItems.count)
+            for (index, item) in oldItems.enumerated() { previousIndexByID[item.id] = index }
             for item in items {
-                nextTables.append(flatten(builder(item), itemID: item.id, contentSizeCategory: contentSizeCategory))
+                let previousIndex = previousIndexByID[item.id]
+                let previousTable = previousIndex.flatMap { $0 < tables.count ? tables[$0] : nil }
+                if !forceTableRebuild, let previousIndex, let previousTable,
+                   itemEquals?(oldItems[previousIndex], item) == true {
+                    nextTables.append(previousTable)
+                    continue
+                }
+                let root = builder(item)
+                if let document = unwrapTransparentModifiers(root) as? RetainedDocumentNode {
+                    let previousRevision = documentRevisions[item.id]
+                    if let previousTable, let previousRevision, document.revision > previousRevision,
+                       let suffix = document.changedSuffix(since: previousRevision),
+                       let patched = previousTable.replacingStreamingSuffix(
+                           revision: document.revision, startBlock: suffix.startBlock, blocks: suffix.blocks,
+                           itemID: item.id, contentSizeCategory: contentSizeCategory
+                       ) {
+                        nextTables.append(patched)
+                        documentChangeStarts[item.id] = suffix.startBlock
+                    } else {
+                        nextTables.append(flatten(root, itemID: item.id, contentSizeCategory: contentSizeCategory))
+                    }
+                    documentRevisions[item.id] = document.revision
+                    continue
+                }
+                nextTables.append(flatten(root, itemID: item.id, contentSizeCategory: contentSizeCategory))
             }
+        }
+        if !documentRevisions.isEmpty {
+            let activeIDs = Set(items.lazy.map(\.id))
+            documentRevisions = documentRevisions.filter { activeIDs.contains($0.key) }
         }
         return nextTables
     }
@@ -118,7 +161,7 @@ extension FeedScrollView {
         let canDeferInvalidation = needsFullInvalidation
             && changeSet.removed.isEmpty && changeSet.added.isEmpty
             && !changeSet.layoutChanged.isEmpty
-            && changeSet.layoutChanged.allSatisfy { $0.prevIdx == $0.nextIdx && visibleCells[$0.prevIdx] != nil }
+            && changeSet.layoutChanged.allSatisfy { $0.prevIdx == $0.nextIdx }
 
         // Capture per-block diff inputs for every layout-changed survivor BEFORE
         // workingRange.invalidateAll() wipes the ring buffer — the old fragments are only
@@ -127,12 +170,25 @@ extension FeedScrollView {
         var blockDiffInputs: [Int: (previousTable: NodeTable, newTable: NodeTable, previousFragments: [Fragment])] = [:]
         if needsFullInvalidation {
             for e in changeSet.layoutChanged {
+                let didEvictSuffix = e.nextIdx < items.count
+                    && documentChangeStarts[items[e.nextIdx].id].map { start in
+                        evictChangedDocumentRasters(
+                            previousTable: e.prev, newTable: e.next,
+                            itemID: items[e.nextIdx].id, startBlock: start
+                        )
+                    } == true
+                if !didEvictSuffix {
+                    evictChangedResidentRasters(previousTable: e.prev, newTable: e.next, nextIdx: e.nextIdx)
+                }
                 guard let wrEntry = workingRange.entry(at: e.prevIdx) else { continue }
                 blockDiffInputs[e.prevIdx] = (e.prev, e.next, wrEntry.fragments)
-                evictChangedResidentRasters(previousTable: e.prev, newTable: e.next, nextIdx: e.nextIdx)
             }
 
-            if !canDeferInvalidation {
+            if canDeferInvalidation {
+                for e in changeSet.layoutChanged where visibleCells[e.prevIdx] == nil {
+                    workingRange.invalidate(at: e.prevIdx)
+                }
+            } else {
                 workingRange.invalidateAll()
                 _pendingPipelineInvalidation = true
             }
@@ -297,7 +353,10 @@ extension FeedScrollView {
     ) -> Bool {
         var tookInPlaceFastPath = false
         if plan.canDeferInvalidation {
-            if blockDiffResolvedIndices.count == changeSet.layoutChanged.count {
+            let visibleChangedCount = changeSet.layoutChanged.reduce(into: 0) { count, entry in
+                if keptCells[entry.nextIdx] != nil { count += 1 }
+            }
+            if blockDiffResolvedIndices.count == visibleChangedCount {
                 for (nextIdx, commit) in blockDiffWorkingRangeCommits {
                     workingRange.commit(commit.layout, commit.fragments, at: nextIdx)
                 }
@@ -342,12 +401,29 @@ extension FeedScrollView {
         // Per-block diff: unchanged blocks reused verbatim from FrozenBitmapStore, only the hot
         // tail touched. Returns nil when it can't guarantee correct content cheaply, falling
         // through to the full-refresh path.
-        guard let inputs = blockDiffInputs[prevIdx], nextIdx < items.count,
-              let result = applyInPlaceBlockDiff(
+        guard let inputs = blockDiffInputs[prevIdx], nextIdx < items.count else {
+            return .kept(nextIdx: nextIdx, blockDiffResolved: false, workingRangeCommit: nil)
+        }
+        let itemID = items[nextIdx].id
+        let retainedResult = documentChangeStarts[itemID].flatMap { start in
+            applyRetainedHotTextTail(
+                previousTable: inputs.previousTable, previousFragments: inputs.previousFragments,
+                newTable: inputs.newTable, itemID: itemID, changedStart: start,
+                width: width, scale: scale
+            ) ?? applyRetainedHotTableTail(
+                previousTable: inputs.previousTable, previousFragments: inputs.previousFragments,
+                newTable: inputs.newTable, itemID: itemID, changedStart: start,
+                width: width, scale: scale,
+                onDelivery: { [weak self] result, isFinal in
+                    self?.applyHotTableResult(result, isFinal: isFinal)
+                }
+            )
+        }
+        guard let result = retainedResult ?? applyInPlaceBlockDiff(
                   previousTable: inputs.previousTable,
                   previousFragments: inputs.previousFragments,
                   newTable: inputs.newTable,
-                  itemID: items[nextIdx].id,
+                  itemID: itemID,
                   width: width,
                   scale: scale,
                   codeStreamDelivery: { [weak cell] fragmentID, content in

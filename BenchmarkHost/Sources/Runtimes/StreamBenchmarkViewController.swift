@@ -384,23 +384,31 @@ private struct StreamFeedView: View {
 
     var body: some View {
         AsyncFeed(items: store.messages, environment: environment) { message in
-            let nodes: [any RenderNode]
+            let root: any RenderNode
             switch message.content {
             case .user(let text):
-                nodes = [
+                root = VStackNode(alignment: .leading, spacing: 8) {
                     TextNode(text)
                         .font(MarkdownTheme.liveLLM.body)
                         .messageRole(.user)
-                ]
+                }
             case .assistant:
                 let controller = store.controller(for: message.id)
-                nodes = StreamDataset.interleavedRenderNodes(
-                    textNodes: controller.renderNodes,
-                    frontier: controller.parser.frontier,
-                    includeInterleavedBlocks: includeInterleavedBlocks
-                )
+                // Interleaved mode inserts extra image/rule nodes at fixed block indices, which
+                // breaks the flat-block-index assumption the retained-document fast path needs —
+                // that mode always takes the general/full path instead.
+                if includeInterleavedBlocks {
+                    let nodes = StreamDataset.interleavedRenderNodes(
+                        textNodes: controller.renderNodes,
+                        frontier: controller.parser.frontier,
+                        includeInterleavedBlocks: true
+                    )
+                    root = VStackNode(alignment: .leading, spacing: 8) { nodes }
+                } else {
+                    root = controller.documentNode()
+                }
             }
-            return StreamBenchmarkCell(nodes: nodes)
+            return StreamBenchmarkCell(messageID: message.id, root: root)
         }
         .onTap({ message, rect in
             print("message = \(message), rect = \(rect)")
@@ -413,17 +421,21 @@ private struct StreamFeedView: View {
 
 // MARK: - Cell DSL
 
-/// Holds already-derived `[any RenderNode]` rather than a `StreamMessage`/controller reference —
+/// Holds an already-derived `any RenderNode` rather than a `StreamMessage`/controller reference —
 /// `RenderView` requires `Sendable` (RenderNode.swift:17) and `StreamingMarkdownController` is a
-/// deliberately non-Sendable `@MainActor` class, so it can't be a stored property here. `nodes`
-/// is derived on `@MainActor` in `StreamFeedView.body` (where the controller lives) and handed in
-/// as a plain `Sendable` array (`RenderNode: Sendable`).
+/// deliberately non-Sendable `@MainActor` class, so it can't be a stored property here. `root` is
+/// derived on `@MainActor` in `StreamFeedView.body` (where the controller lives) and handed in as
+/// a plain `Sendable` value (`RenderNode: Sendable`).
+///
+/// `renderBody` must return one fixed concrete type (`RenderView.Body: RenderNode`), but `root`'s
+/// dynamic type varies (a `VStackNode` for plain text, a `RetainedDocumentNode` for the streaming
+/// fast path) — `any RenderNode` itself doesn't self-conform to `RenderNode` here, so it can't be
+/// `Body` directly. `.renderID(_:)` is an existing transparent wrapper `flatten()` already unwraps
+/// before dispatching on the real dynamic type, so it doubles as a zero-cost erasure boundary that
+/// still lets `RetainedDocumentNode` be recognized downstream.
 private struct StreamBenchmarkCell: RenderView {
-    let nodes: [any RenderNode]
+    let messageID: StreamMessage.ID
+    let root: any RenderNode
 
-    var renderBody: some RenderNode {
-        VStackNode(alignment: .leading, spacing: 8) {
-            nodes
-        }
-    }
+    var renderBody: RenderIDModifierNode { root.renderID(messageID) }
 }

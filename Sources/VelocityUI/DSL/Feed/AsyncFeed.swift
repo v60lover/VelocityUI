@@ -187,6 +187,7 @@ public struct AsyncFeed<
         // Route through coordinator rather than capturing self (a value type) in view-stored
         // closures. Coordinator outlives each struct update, so a direct strong capture is safe.
         view.cellBuilder = { item in coordinator.build(item) }
+        view.itemEquals = { $0 == $1 }
         view.onTap = { item, frame in coordinator.handleTap(item, frame) }
         view.onNodeTap = { item, actionID, frame in coordinator.handleNodeTap(item, actionID, frame) }
         view.onReachEnd = { await coordinator.handleReachEnd() }

@@ -120,6 +120,11 @@ public func flatten<ID: Hashable & Sendable>(
             for child in n.children { visit(child, parent: myIndex) }
         case let n as SpacerNode:
             nodes.append(.spacer(n.minLength ?? 0))
+        case let n as RetainedDocumentNode:
+            nodes.append(.vstack(VStackDescriptor(
+                alignment: n.alignment.rawValue, spacing: n.spacing,
+                layoutHash: n.layoutHash, appearanceHash: n.appearanceHash)))
+            for child in n.fullBlocks() { visit(child, parent: myIndex) }
         case let n as TextNode:
             sawText = true
             blockID = blockID ?? n.blockID
@@ -179,6 +184,25 @@ public func flatten<ID: Hashable & Sendable>(
         blockLifecycles: blockLifecycles,
         actionIDs: actionIDs
     )
+}
+
+/// Strips the same transparent modifier chain `flatten()`'s `visit` unwraps inline (`.frame()`,
+/// `.renderID()`, `.action()`), exposing the real dynamic type underneath. Used where code outside
+/// `flatten()` needs to type-check a DSL node's identity — e.g. `FeedScrollView`'s
+/// `RetainedDocumentNode` fast-path detection — without duplicating this loop's ordering rules.
+func unwrapTransparentModifiers(_ node: any RenderNode) -> any RenderNode {
+    var node = node
+    while true {
+        if let f = node as? FrameModifierNode {
+            node = f.content
+        } else if let m = node as? RenderIDModifierNode {
+            node = m.content
+        } else if let m = node as? ActionModifierNode {
+            node = m.content
+        } else {
+            return node
+        }
+    }
 }
 
 /// Combines a DSL-level layoutHash with the Dynamic Type category `flatten()` was called with.
